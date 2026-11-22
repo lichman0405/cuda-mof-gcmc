@@ -201,6 +201,7 @@ bool load_mg_mof74_cif(
         }
         UffParam lj = get_uff_param(elem);
         double q = get_repeat_charge(aa.label);
+        int type_id = atom_type_from_label(aa.label);
 
         for (const auto& op : symops) {
             double sa = wrap01(op.m[0][0] * aa.fx + op.m[0][1] * aa.fy + op.m[0][2] * aa.fz + op.t[0]);
@@ -230,6 +231,7 @@ bool load_mg_mof74_cif(
                 fa.sigma_A = (float)lj.sigma_A;
                 fa.q = q;
                 fa.elem = elem;
+                fa.atom_type_id = type_id;
                 unit_atoms_out.push_back(fa);
             }
         }

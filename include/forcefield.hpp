@@ -56,6 +56,47 @@ inline double get_repeat_charge(const std::string& label) {
     return 0.0;
 }
 
+inline int atom_type_from_label(const std::string& label) {
+    if (label == "Mg1" || label == "Mof_Mg") return 0;
+    if (label == "O1"  || label == "Mof_Oa") return 1;
+    if (label == "O2"  || label == "Mof_Ob") return 2;
+    if (label == "O3"  || label == "Mof_Oc") return 3;
+    if (label == "C1"  || label == "Mof_Ca") return 4;
+    if (label == "C2"  || label == "Mof_Cb") return 5;
+    if (label == "C3"  || label == "Mof_Cc") return 6;
+    if (label == "C4"  || label == "Mof_Cd") return 7;
+    if (label == "H1"  || label == "Mof_H")  return 8;
+    return -1;
+}
+
+// Mercado et al. (J. Phys. Chem. C 2016, 120, 12590-12604) Mg-MOF-74 charges + EPM2 CO2
+namespace mercado2016 {
+    // Charges for type_id 0..8 (exact sum = 0.000000 e)
+    inline double get_framework_charge(int type_id) {
+        static const double Q[9] = {
+            +1.560, // 0: Mof_Mg (Mg1)
+            -0.899, // 1: Mof_Oa (O1)
+            -0.752, // 2: Mof_Ob (O2)
+            -0.903, // 3: Mof_Oc (O3)
+            +0.900, // 4: Mof_Ca (C1)
+            -0.314, // 5: Mof_Cb (C2)
+            +0.456, // 6: Mof_Cc (C3)
+            -0.234, // 7: Mof_Cd (C4)
+            +0.186  // 8: Mof_H  (H1)
+        };
+        return (type_id >= 0 && type_id < 9) ? Q[type_id] : 0.0;
+    }
+
+    // EPM2 CO2 parameters used with Mercado 2016 FF (r_cut shifted)
+    constexpr double Q_C_EPM2   = +0.6512;
+    constexpr double EPS_C_EPM2 = 28.129;
+    constexpr double SIG_C_EPM2 = 2.757;
+    constexpr double Q_O_EPM2   = -0.3256;
+    constexpr double EPS_O_EPM2 = 80.507;
+    constexpr double SIG_O_EPM2 = 3.033;
+    constexpr double BOND_CO_EPM2 = 1.160;
+}
+
 // TraPPE rigid 3-site CO2 parameters
 namespace trappe_co2 {
     constexpr double Q_C      = +0.70;

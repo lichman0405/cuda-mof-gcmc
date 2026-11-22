@@ -11,6 +11,7 @@ struct FrameworkAtom {
     float sigma_A;          // UFF sigma (Angstrom)
     double q;               // Partial charge (e)
     int elem;               // ElementId
+    int atom_type_id;       // 0=Mg1/Mof_Mg, 1=O1/Oa, 2=O2/Ob, 3=O3/Oc, 4=C1/Ca, 5=C2/Cb, 6=C3/Cc, 7=C4/Cd, 8=H1/H
 };
 
 // Precomputed periodic 3D grid over the 1x1x1 unit cell (fractional [0, 1)^3).

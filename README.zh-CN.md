@@ -16,6 +16,8 @@
   - 正式激活预计算的 `(Ex, Ey, Ez)` 三维电场网格与 $\text{CO}_2$ 各向异性极化率张量（$\alpha_\parallel = 4.05\ \text{\AA}^3,\ \alpha_\perp = 1.95\ \text{\AA}^3,\ \bar{\alpha} = 2.65\ \text{\AA}^3$），对比质心极化（`Pol-COM`）与三点分布极化（`Pol-3Site`，$w_C = 0.40, w_O = 0.30$）及客体间 Thole 阻尼诱导偶极作用（$a = 2.1304$）。
 - **[已完成] 第三步：多组分竞争共吸附（$\text{CO}_2/\text{N}_2$ 烟道气 & $\text{CO}_2/\text{CH}_4$ 沼气）**
   - 将 GPU 3D 网格与各向异性极化框架扩展为独立多组分求解器 [`build\mof_gcmc_mix.exe`](src/main_mix.cu)，内置 TraPPE $\text{N}_2$（3 位点）与 $\text{CH}_4$（单点 UA）力场、二元 Peng–Robinson 混合逸度、跨组分 Thole 阻尼诱导偶极作用以及严格满足细致平衡的**身份交换（Identity Swap）**蒙卡动作（通过理想气体解析验证与 `Swap-ON` vs `Swap-OFF` 孔道一致性双检）。
+- **[已完成] 第四步（发表级可信度升级）：`0.10 Å` 零漂移高精度内核 + Mercado 2016 DFT 力场 + 原生 RASPA3 背靠背验证**
+  - 在独立高精度求解器 [`build\mof_gcmc_v2.exe`](src/main_v2.cu) 中实现 `256x256x72`（`0.10 Å`）加密网格、`double` 共享内存坐标、每 `50k` 步全盒周期重算（零能量漂移）与 `4 × 1.0M` 步采样，接入官方 **Mercado et al. (*J. Phys. Chem. C* 2016, 120, 12590)** DFT Buckingham/LJ + EPM2 力场，并与 Windows 原生 **RASPA3 (`3.0.29`)** 精确 Ewald 进行同条件背靠背校验（实现 **`623×`** 吞吐加速）。
 
 ---
 
@@ -84,11 +86,35 @@
 
 ---
 
+## 第四步：发表级可信度全面升级（`0.10 Å` 网格、Mercado 2016 力场与 RASPA3 实测对拍）
+
+![Step 4 Validation: 0.10 A Grid, RASPA3 & Mercado 2016 DFT-FF](assets/step4_validated_mercado_raspa3.png)
+
+### 1. 升级一：数值精度与采样充分性跃升（[`build\mof_gcmc_v2.exe`](src/main_v2.cu)）
+- **网格分辨率加密（`128x128x36` `0.20 Å` → `256x256x72` `0.10 Å`）**：预计算耗时 `3.13 s`（6 张网格仅占 `113 MB` 显存）；近程 `Mg–O` 径向 MAE（`2.3–3.8 Å`）锐降 **15.2 倍**（`190.46 K → 12.53 K`）；孔道采样点（`1,000` 点 vs 直接 Ewald $\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$）误差降至 `U_lj_C = 0.793 K`、`U_lj_O = 2.387 K`、`Phi = 3.3867 K/e`。
+- **零漂移双精度架构**：客体分子坐标与累计能量全程采用共享内存 `double`，每 `50,000` 步触发全盒周期精确重算——全部 `128` 个 GPU 盒子（每力场 `6,400 万` 步）最大能量漂移仅为 **`6.345e-09 K`**（UFF）与 **`8.498e-09 K`**（Mercado 2016），全压力细致平衡偏差 `max|acc_ins - acc_del| <= 0.000171`。
+
+### 2. 升级二：官方 Mercado 2016 DFT 拟合 Buckingham/LJ + EPM2 力场
+- 完整导入 [`data/mercado2016/`](data/mercado2016/)（源自 `rociomer/DFT-derived-force-field`, *J. Phys. Chem. C* 2016, 120, 12590；对 `Mg–O_CO2` 采用带峰值钳位保护的 Buckingham 指数排斥势与 $r_{\text{cut}} = 11.0\ \text{\AA}$ 平移截断 + Mercado 骨架电荷 + EPM2 $\text{CO}_2$）。
+- **低压开放金属位点物理重现（`298 K, 0.15 bar`）**：低载吸附热 $Q_{\text{st}}$ 从 UFF 的 `26.86 kJ/mol` 跃升至 **`36.04 kJ/mol`**，完美晶体低压吸附量从 `1.34` 提升至 **`6.77 mmol/g`**，且 $\text{Mg}^{2+}\text{–O}_{\text{CO}_2}$ 径向配位主峰向内显著收缩 **`-0.25 Å`**（`2.775 Å → 2.525 Å`），同时清晰揭示理想刚性完美晶体与含缺陷实际样品（文献实验 `3.6–4.6 mmol/g @ 0.15 bar`、`7.5–8.6 mmol/g @ 1.0 bar`；图中 `×0.80` 有效位点参考线）之间的物理差异。
+
+### 3. 升级三：Windows 原生 `RASPA3 3.0.29` 精确 Ewald 背靠背对标（同 CIF、同 `r_cut = 11.0 Å`）
+
+| 压力 | 第一步 GPU `0.20 Å` | **GPU `v2` `0.10 Å` (`4 × 1M`)** | **原生 `RASPA3 3.0.29` (精确 Ewald)** | GPU vs RASPA3 偏差 | $Q_{\text{st}}$ 偏差 |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| **`0.15 bar`** | `1.1724 mmol/g` | **`1.3404 ± 0.0152 mmol/g`** | `1.4087 ± 0.0328 mmol/g` | **`-4.85%`** | `-0.12 kJ/mol` |
+| **`1.00 bar`** | `6.7019 mmol/g` | **`7.3513 ± 0.0262 mmol/g`** | `7.3384 ± 0.1329 mmol/g` | **`+0.18%`** | `-0.48 kJ/mol` |
+| **`5.00 bar`** | `12.6165 mmol/g` | **`13.0857 ± 0.0583 mmol/g`** | `13.3048 ± 0.2118 mmol/g` | **`-1.65%`** | `+0.48 kJ/mol` |
+
+- **实测加速比**：GPU `v2` 在 `0.10 Å` 全周期高精度配置下实测 **`757,119 MC-steps/s`**（`84.53 s` 跑完 `6,400 万` 步），而单轨 CPU `RASPA3` 精确 Ewald 为 **`1,215 MC-steps/s`**（`1,106–1,360 steps/s`）——在吸附量误差全面控制在 `<= 4.85%`（`1.0 bar` 仅 `0.18%`）、$Q_{\text{st}}$ 偏差 `< 0.5 kJ/mol` 的前提下实现 **`623.0×`** 吞吐加速。
+
+---
+
 ## 编译与运行命令
 
 ```powershell
-# 针对 RTX 5070 (sm_120) 编译全部目标（build\mof_gcmc.exe 与 build\mof_gcmc_mix.exe）
-cmd /c build.bat
+# 针对 RTX 5070 (sm_120) 编译全部目标（mof_gcmc.exe, mof_gcmc_mix.exe, mof_gcmc_v2.exe）
+cmd /c build.bat all
 
 # 第一步 + 第二步单组分对比及绘图
 .\build\mof_gcmc.exe
@@ -98,6 +124,12 @@ uv run --with matplotlib --with numpy python scripts\verify_step2.py
 # 第三步双组分竞争吸附（CO2/N2 与 CO2/CH4）及混合逸度校验出图
 .\build\mof_gcmc_mix.exe
 uv run --with matplotlib --with numpy python scripts\verify_step3.py
+
+# 第四步 0.10 A 高精度 UFF + Mercado 2016 + 原生 RASPA3 基准测试与发表级校验图
+cmd /c build.bat v2
+.\build\mof_gcmc_v2.exe
+uv run python scripts\run_raspa3_bench.py
+uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
 ```
 
 ---
@@ -107,14 +139,16 @@ uv run --with matplotlib --with numpy python scripts\verify_step3.py
 ```text
 cuda-mof-gcmc/
 ├── data/
-│   └── MgMOF-74.cif              # RASPA2 官方 R-3 Mg-MOF-74 晶体结构文件
+│   ├── MgMOF-74.cif              # RASPA2 官方 R-3 Mg-MOF-74 晶体结构文件
+│   └── mercado2016/              # 官方 Mercado et al. (JPCC 2016) DFT-FF 与 EPM2 参数文件
 ├── include/
 │   ├── cell.hpp                  # 六方/三斜晶胞坐标变换与精确 5 候选 MIC
-│   ├── forcefield.hpp            # UFF、REPEAT、TraPPE (CO2/N2/CH4) 参数与单/双组分 PR 逸度
+│   ├── forcefield.hpp            # UFF、REPEAT、Mercado 2016、TraPPE/EPM2 与单/双组分 PR 逸度
 │   ├── grid3d.hpp                # 周期性三维网格视图（U_lj, Phi, Ex, Ey, Ez）与三线性插值
 │   ├── cif_loader.hpp            # CIF 对称展开与几何检查接口
 │   ├── gcmc_gpu.hpp              # 第一/二步网格构建与单组分 Batched GCMC 接口
-│   └── mix_gcmc.hpp              # 第三步多组分 8 网格构建与二元共吸附 GCMC 接口
+│   ├── mix_gcmc.hpp              # 第三步多组分 8 网格构建与二元共吸附 GCMC 接口
+│   └── v2_gcmc.hpp               # 第四步 0.10 A 高精度 UFF 与 Mercado 2016 求解器接口
 ├── src/
 │   ├── cif_loader.cpp            # 18 对称操作展开 -> 162 原子与键长/电中性校验
 │   ├── grid_builder.cu           # 第一/二步 GPU 3D LJ + Ewald 势能与电场网格预计算
@@ -122,16 +156,22 @@ cuda-mof-gcmc/
 │   ├── main.cu                   # 第一/二步主程序（NonPol vs Pol-COM vs Pol-3Site）
 │   ├── mix_grid_builder.cu       # 第三步 GPU 八网格预计算（C_CO2, O_CO2, N_N2, CH4 + 电场）
 │   ├── mix_gcmc_kernel.cu        # 第三步二元 GCMC（5 动作含 Identity Swap + Thole 耦合）
-│   └── main_mix.cu               # 第三步主程序（理想气体与换牌检验 + CO2/N2 与 CO2/CH4 扫描）
+│   ├── main_mix.cu               # 第三步主程序（理想气体与换牌检验 + CO2/N2 与 CO2/CH4 扫描）
+│   ├── grid_builder_v2.cu        # 第四步 256x256x72 Buckingham/LJ + Ewald 网格构建器
+│   ├── gcmc_kernel_v2.cu         # 第四步双精度 SMEM + 50k 步重算 GCMC + Mg-O 径向分布统计
+│   └── main_v2.cu                # 第四步主程序（UFF 0.10 A vs Mercado 2016 0.10 A，各 6,400 万步）
 ├── scripts/
 │   ├── verify_physics.py         # 独立 MIC/PR 校验与第一步 300 DPI 出图脚本
 │   ├── verify_step2.py           # 第二步极化校验与 300 DPI 对比三联图脚本
-│   └── verify_step3.py           # 混合 PR EOS 校验与第三步 300 DPI 共吸附对比图脚本
+│   ├── verify_step3.py           # 混合 PR EOS 校验与第三步 300 DPI 共吸附对比图脚本
+│   ├── run_raspa3_bench.py       # Windows 原生 RASPA3 3.0.29 并发精确 Ewald 基准运行脚本
+│   └── verify_upgrades.py        # 第四步自动化断言校验与 300 DPI 验证三联图脚本
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
 │   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
-│   └── step3_mof74_binary_coadsorption.png # 第三步：CO2/N2 & CO2/CH4 选择性与孔道竞争占位图
-├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（支持 all / single / mix）
+│   ├── step3_mof74_binary_coadsorption.png # 第三步：CO2/N2 & CO2/CH4 选择性与孔道竞争占位图
+│   └── step4_validated_mercado_raspa3.png  # 第四步：0.10 A vs RASPA3 vs Mercado 2016 验证图
+├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2）
 ├── README.md                     # 英文项目文档
 └── README.zh-CN.md               # 中文项目文档
 ```
