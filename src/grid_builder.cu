@@ -220,13 +220,18 @@ void eval_direct_point(
     const std::vector<KVec>& kvecs,
     double sa, double sb, double sc,
     double r_cut_A, double alpha,
-    double& ulj_c_out, double& ulj_o_out, double& phi_out) {
+    double& ulj_c_out, double& ulj_o_out, double& phi_out,
+    double& ex_out, double& ey_out, double& ez_out) {
 
     double rx, ry, rz;
     cell.unit_frac_to_cart(sa, sb, sc, rx, ry, rz);
     double r_cut2 = r_cut_A * r_cut_A;
+    constexpr double INV_SQRT_PI = 0.56418958354775628695;
+    double two_alpha_inv_sqrt_pi = 2.0 * alpha * INV_SQRT_PI;
+    double alpha2 = alpha * alpha;
 
     double ulj_c = 0.0, ulj_o = 0.0, phi_r = 0.0;
+    double ex_r = 0.0, ey_r = 0.0, ez_r = 0.0;
     for (const auto& at : unit_atoms) {
         double dsa = sa - (double)at.sa;
         double dsb = sb - (double)at.sb;
@@ -252,6 +257,7 @@ void eval_direct_point(
                     if (r2 >= r_cut2 || r2 < 1.0e-12) continue;
                     double inv_r2 = 1.0 / r2;
                     double r = std::sqrt(r2);
+                    double inv_r = 1.0 / r;
 
                     double sr2_c = sig_c2 * inv_r2;
                     double sr6_c = sr2_c * sr2_c * sr2_c;
@@ -261,21 +267,38 @@ void eval_direct_point(
                     double sr6_o = sr2_o * sr2_o * sr2_o;
                     ulj_o += 4.0 * eps_o * (sr6_o * sr6_o - sr6_o);
 
-                    phi_r += KE_K * (double)at.q * std::erfc(alpha * r) / r;
+                    double erfc_ar = std::erfc(alpha * r);
+                    double exp_ar2 = std::exp(-alpha2 * r2);
+                    phi_r += KE_K * at.q * erfc_ar * inv_r;
+
+                    double e_fac = KE_K * at.q * inv_r2 * (erfc_ar * inv_r + two_alpha_inv_sqrt_pi * exp_ar2);
+                    ex_r += e_fac * dx;
+                    ey_r += e_fac * dy;
+                    ez_r += e_fac * dz;
                 }
             }
         }
     }
 
     double phi_k = 0.0;
+    double ex_k = 0.0, ey_k = 0.0, ez_k = 0.0;
     for (const auto& kv : kvecs) {
         double kr = kv.kx * rx + kv.ky * ry + kv.kz * rz;
-        phi_k += kv.W_C * std::cos(kr) + kv.W_S * std::sin(kr);
+        double c_kr = std::cos(kr);
+        double s_kr = std::sin(kr);
+        phi_k += kv.W_C * c_kr + kv.W_S * s_kr;
+        double e_amp = kv.W_C * s_kr - kv.W_S * c_kr;
+        ex_k += e_amp * kv.kx;
+        ey_k += e_amp * kv.ky;
+        ez_k += e_amp * kv.kz;
     }
 
     ulj_c_out = ulj_c;
     ulj_o_out = ulj_o;
     phi_out = phi_r + phi_k;
+    ex_out = ex_r + ex_k;
+    ey_out = ey_r + ey_k;
+    ez_out = ez_r + ez_k;
 }
 
 } // namespace
@@ -350,9 +373,13 @@ void build_framework_grids_gpu(
     // Cross-check trilinear grid against independent direct Ewald (alpha=0.25 A^-1, kmax=2.8)
     // at 1,000 random non-overlapping pore points.
     std::vector<float> h_uc(total), h_uo(total), h_phi(total);
+    std::vector<float> h_ex(total), h_ey(total), h_ez(total);
     CUDA_CHECK(cudaMemcpy(h_uc.data(), d_uc, bytes, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_uo.data(), d_uo, bytes, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_phi.data(), d_phi, bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_ex.data(), d_ex, bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_ey.data(), d_ey, bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_ez.data(), d_ez, bytes, cudaMemcpyDeviceToHost));
 
     double ref_alpha = 0.25;
     auto kvecs_ref = build_ewald_kvecs(cell, unit_atoms, ref_alpha, 2.8);
@@ -360,6 +387,8 @@ void build_framework_grids_gpu(
     std::mt19937_64 rng(42);
     std::uniform_real_distribution<double> uni(0.0, 1.0);
     double sum_err_c = 0.0, sum_err_o = 0.0, sum_err_phi = 0.0;
+    double sum_err_e = 0.0;
+    std::vector<double> fd_errs;
     int valid = 0, tries = 0;
     while (valid < 1000 && tries < 100000) {
         ++tries;
@@ -368,22 +397,64 @@ void build_framework_grids_gpu(
         float go = trilinear_periodic(h_uo.data(), nx, ny, nz, sa, sb, sc);
         if (gc > 100.0f || go > 100.0f) continue;
 
-        double dc, do_, dphi;
-        eval_direct_point(cell, unit_atoms, kvecs_ref, sa, sb, sc, r_cut_A, ref_alpha, dc, do_, dphi);
+        double dc, do_, dphi, dex, dey, dez;
+        eval_direct_point(cell, unit_atoms, kvecs_ref, sa, sb, sc, r_cut_A, ref_alpha,
+                          dc, do_, dphi, dex, dey, dez);
         if (dc > 100.0 || do_ > 100.0) continue;
 
         float gphi = trilinear_periodic(h_phi.data(), nx, ny, nz, sa, sb, sc);
+        float gex  = trilinear_periodic(h_ex.data(), nx, ny, nz, sa, sb, sc);
+        float gey  = trilinear_periodic(h_ey.data(), nx, ny, nz, sa, sb, sc);
+        float gez  = trilinear_periodic(h_ez.data(), nx, ny, nz, sa, sb, sc);
+
         sum_err_c += std::fabs((double)gc - dc);
         sum_err_o += std::fabs((double)go - do_);
         sum_err_phi += std::fabs((double)gphi - dphi);
+        double d_ex = (double)gex - dex, d_ey = (double)gey - dey, d_ez = (double)gez - dez;
+        sum_err_e += std::sqrt(d_ex * d_ex + d_ey * d_ey + d_ez * d_ez);
+
+        // Verify analytical Ewald E(r) vs central finite difference -grad(Phi) on 100 pore points
+        // (using smooth full-shell summation fd_rc=1e9 with ewald_alpha=0.30 so no sphere-cutoff jump occurs)
+        if ((int)fd_errs.size() < 100) {
+            constexpr double h_fd = 1.0e-4;
+            constexpr double fd_rc = 1.0e9;
+            double fd_u1, fd_u2, fd_p0, fd_ex0, fd_ey0, fd_ez0;
+            eval_direct_point(cell, unit_atoms, kvecs, sa, sb, sc, fd_rc, ewald_alpha,
+                              fd_u1, fd_u2, fd_p0, fd_ex0, fd_ey0, fd_ez0);
+            double rx, ry, rz;
+            cell.unit_frac_to_cart(sa, sb, sc, rx, ry, rz);
+            double e_fd[3] = {0.0, 0.0, 0.0};
+            for (int axis = 0; axis < 3; ++axis) {
+                double dx_p[3] = {rx, ry, rz};
+                double dx_m[3] = {rx, ry, rz};
+                dx_p[axis] += h_fd;
+                dx_m[axis] -= h_fd;
+                double sap, sbp, scp, sam, sbm, scm;
+                cell.cart_to_unit_frac(dx_p[0], dx_p[1], dx_p[2], sap, sbp, scp);
+                cell.cart_to_unit_frac(dx_m[0], dx_m[1], dx_m[2], sam, sbm, scm);
+                double u1, u2, pp, pm, e1, e2, e3;
+                eval_direct_point(cell, unit_atoms, kvecs, sap, sbp, scp, fd_rc, ewald_alpha,
+                                  u1, u2, pp, e1, e2, e3);
+                eval_direct_point(cell, unit_atoms, kvecs, sam, sbm, scm, fd_rc, ewald_alpha,
+                                  u1, u2, pm, e1, e2, e3);
+                e_fd[axis] = -(pp - pm) / (2.0 * h_fd);
+            }
+            double fx = e_fd[0] - fd_ex0, fy = e_fd[1] - fd_ey0, fz = e_fd[2] - fd_ez0;
+            fd_errs.push_back(std::sqrt(fx * fx + fy * fy + fz * fz));
+        }
         ++valid;
     }
+
+    double sum_err_fd = 0.0;
+    for (double v : fd_errs) sum_err_fd += v;
 
     stats_out.build_ms = (double)ms;
     stats_out.verify_samples = valid;
     stats_out.verify_lj_c_mae_K = (valid > 0) ? (sum_err_c / valid) : 0.0;
     stats_out.verify_lj_o_mae_K = (valid > 0) ? (sum_err_o / valid) : 0.0;
     stats_out.verify_phi_mae_Ke = (valid > 0) ? (sum_err_phi / valid) : 0.0;
+    stats_out.verify_efield_mae_KeA = (valid > 0) ? (sum_err_e / valid) : 0.0;
+    stats_out.verify_efield_fd_mae_KeA = (!fd_errs.empty()) ? (sum_err_fd / (double)fd_errs.size()) : 0.0;
 }
 
 void free_framework_grids_gpu(Grid3DView& d_grid) {

@@ -12,8 +12,8 @@
 
 - **[已完成] 第一步：纯 CUDA 刚性 3D 骨架网格 + Batched GCMC 底座（UFF + REPEAT + TraPPE）**
   - 在 GPU 上一次性预计算 6 张周期 3D 单胞网格（`U_lj_C`、`U_lj_O`、`Phi_elec`、`Ex`、`Ey`、`Ez`；包含精确 12-6 LJ 与 3D Ewald 求和），随后以单 Block 128 线程并行跑 32 个独立压力/副本盒子（共享内存存客体分子、精确六方 MIC、Marsaglia/Rodrigues 球面无偏旋转、DSF 静电、Peng–Robinson 逸度换算），并校验细致平衡与副本一致性。
-- **[下一步] 第二步（支线 B1）：$\text{Mg}^{2+}$ 开放金属位点显式静电场极化**
-  - 直接读取第一步已预留好的 `(Ex, Ey, Ez)` 三维电场网格，接入 $\text{CO}_2$ 各向异性极化率张量（$\alpha_\parallel, \alpha_\perp$）与客体诱导偶极自洽/OMS 修正参数，捕获低压区 $\text{Mg}^{2+}$ 强吸附陡升行为。
+- **[已完成] 第二步（支线 B1）：$\text{Mg}^{2+}$ 开放金属位点显式静电场极化 + Thole 诱导偶极耦合**
+  - 正式激活预计算的 `(Ex, Ey, Ez)` 三维电场网格与 $\text{CO}_2$ 各向异性极化率张量（$\alpha_\parallel = 4.05\ \text{\AA}^3,\ \alpha_\perp = 1.95\ \text{\AA}^3,\ \bar{\alpha} = 2.65\ \text{\AA}^3$），对比质心极化（`Pol-COM`）与三点分布极化（`Pol-3Site`，$w_C = 0.40, w_O = 0.30$）及客体间 Thole 阻尼诱导偶极作用（$a = 2.1304$）。
 - **[规划中] 第三步：多组分竞争共吸附**
   - 加入组分身份交换（Identity Swap）动作，扩展至 $\text{CO}_2/\text{N}_2$、$\text{CO}_2/\text{CH}_4$ 与 $\text{CO}_2/\text{H}_2\text{O}$ 共吸附筛选。
 
@@ -44,17 +44,40 @@
 
 ---
 
+## 第二步（支线 B1）：$\text{Mg}^{2+}$ 开放金属位点各向异性极化（RTX 5070）
+
+![Step 2 Mg-MOF-74 Polarization Comparison](assets/step2_mof74_pol_comparison.png)
+
+### 1. 三维电场有限差分与插值精度校验
+- **解析 Ewald 梯度校验**：在 `100` 个孔道点上对比解析 `E_direct` 与中心有限差分 $-\nabla\Phi_{\text{FD}}$（$h = 10^{-4}\ \text{\AA}$），误差低至 **`MAE = 2.21e-06 K/(e·Å)`**。
+- **三维插值精度**：`128x128x36` 网格 `(Ex, Ey, Ez)` 与独立 $\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$ 在 `1,000` 个孔道点对比得 **`MAE(|E|) = 8.909 K/(e·Å)`**。
+
+### 2. 三种模型同台实测对比（每组在 RTX 5070 上跑 `960 万` MC 步）
+
+| 模型 | GPU 耗时 | `0.15 bar` 吸附量 (mmol/g) | `1.00 bar` 吸附量 (mmol/g) | `20.0 bar` 吸附量 (mmol/g) | 低压 $Q_{\text{st}}$ (kJ/mol) | 平均极化能 $U_{\text{pol}}/N$ (kJ/mol) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`NonPol`（第一步基线）** | `14.210 s` | `1.1724 ± 0.0301` | `6.7019 ± 0.0769` | `14.7214 ± 0.1619` | `25.5–26.1` | `0.00` |
+| **`Pol-COM`（质心各向异性极化）** | `16.627 s` | `1.5406 ± 0.0125` | **`7.6421 ± 0.0038`** | `14.9957 ± 0.15` | `26.5–27.6` | `-0.67 → -0.45` |
+| **`Pol-3Site`（第二步 B1 分布极化）** | `18.014 s` | **`2.3890 ± 0.0392`** (`+104%`) | `9.1446 ± 0.1418` | `15.3591 ± 0.43` | **`29.2–31.4`** | **`-2.50 → -1.58`** |
+
+- **核心物理发现**：三点分布极化（`Pol-3Site`）能准确捕捉配位氧原子靠近 $\text{Mg}^{2+}$ 时的强烈 $r^{-4}$ 非均匀电场梯度，将平均极化能提升至质心模型的 **3.7 倍**（`-2.50` vs `-0.67 kJ/mol`），使 `0.15 bar` 烟道气分压下 $\text{CO}_2$ 吸附量直接翻倍（`1.17 → 2.39 mmol/g`），并在高压饱和过程中清晰展现 OMS 饱和特征（`-U_pol/N` 从 `2.50` 降至 `1.58 kJ/mol`）。全压力范围严格满足细致平衡（`max|acc_ins - acc_del| <= 0.0007`）。而距离实验 `40–47 kJ/mol` 剩余约 `10 kJ/mol` 的差距，则对应通用 UFF `sigma_Mg` 无法描述的近程轨道电荷转移与极化耦合（需结合 DFT 拟合 OMS 短程力场或 MLIP Nested MC）。
+
+---
+
 ## 编译与运行命令
 
 ```powershell
 # 针对 RTX 5070 (sm_120) 编译
 cmd /c build.bat
 
-# 运行第一步 GPU Batched GCMC（约 14 秒，结果导出至 build/）
+# 运行第一步 + 第二步全部三组对比（约 49 秒，CSV 导出至 build/）
 .\build\mof_gcmc.exe
 
-# 运行 Python 独立物理校验并绘制 300 DPI 三联图
+# 运行第一步校验与出图
 uv run --with matplotlib --with numpy python scripts\verify_physics.py
+
+# 运行第二步校验并绘制 300 DPI 对比三联图
+uv run --with matplotlib --with numpy python scripts\verify_step2.py
 ```
 
 ---
@@ -77,9 +100,11 @@ cuda-mof-gcmc/
 │   ├── gcmc_kernel.cu            # 多盒子 GPU GCMC 主核函数（128 线程/盒，DSF + 细致平衡）
 │   └── main.cu                   # 主程序、单元测试、32 副本等温线模拟与 CSV 导出
 ├── scripts/
-│   └── verify_physics.py         # 独立 MIC/PR 校验与 300 DPI 科研出图脚本
+│   ├── verify_physics.py         # 独立 MIC/PR 校验与第一步 300 DPI 出图脚本
+│   └── verify_step2.py           # 第二步极化校验与 300 DPI 对比三联图脚本
 ├── assets/
-│   └── step1_mof74_co2_298K.png  # 298 K 等温线、Qst 吸附热与 1 bar 六方孔道密度分布图
+│   ├── step1_mof74_co2_298K.png  # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
+│   └── step2_mof74_pol_comparison.png  # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
 ├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本
 ├── README.md                     # 英文项目文档
 └── README.zh-CN.md               # 中文项目文档

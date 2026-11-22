@@ -11,7 +11,15 @@ struct GridBuildStats {
     double verify_lj_c_mae_K;
     double verify_lj_o_mae_K;
     double verify_phi_mae_Ke;
+    double verify_efield_mae_KeA;
+    double verify_efield_fd_mae_KeA;
     int verify_samples;
+};
+
+enum PolMode {
+    POL_NONE  = 0,
+    POL_COM   = 1,
+    POL_3SITE = 2
 };
 
 struct BatchedGcmcConfig {
@@ -23,6 +31,8 @@ struct BatchedGcmcConfig {
     int prod_steps = 200000;
     int sample_stride = 20;
     int max_mol = 512;
+    int pol_mode = POL_NONE;
+    double pol_scale = 1.0;
     double framework_mass_super_gmol = 8738.46;
     uint64_t base_seed = 20261122ULL;
 };
@@ -42,6 +52,7 @@ struct BoxResult {
     double std_N;
     double uptake_mmol_g;
     double avg_U_K;
+    double avg_U_pol_per_mol_kJ;
     double Qst_kJ_mol;
     double acc_trans;
     double acc_rot;

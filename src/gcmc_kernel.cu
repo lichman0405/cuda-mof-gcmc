@@ -75,7 +75,10 @@ __device__ inline void rotate_rodrigues(
 __device__ inline double pair_energy_co2(
     const Cell& cell,
     double c1x, double c1y, double c1z, double u1x, double u1y, double u1z,
+    double mu1x, double mu1y, double mu1z,
     double c2x, double c2y, double c2z, double u2x, double u2y, double u2z,
+    double mu2x, double mu2y, double mu2z,
+    int pol_mode, double inv_alpha_cbrt,
     double r_cut, double r_cut2, double dsf_alpha, double dsf_shift, double dsf_deriv,
     int& overlap_flag) {
 
@@ -129,6 +132,24 @@ __device__ inline double pair_energy_co2(
             energy += u_coul;
         }
     }
+
+    // Thole-damped induced-dipole - induced-dipole interaction between framework-induced dipoles
+    if (pol_mode != POL_NONE && dm_r2 < r_cut2 && dm_r2 >= 0.25) {
+        double r_m = sqrt(dm_r2);
+        double inv_r = 1.0 / r_m;
+        double inv_r3 = inv_r / dm_r2;
+        double inv_r5 = inv_r3 / dm_r2;
+        double u_thole = r_m * inv_alpha_cbrt;
+        double au3 = trappe_co2::THOLE_A * u_thole * u_thole * u_thole;
+        double exp_t = (au3 < 50.0) ? exp(-au3) : 0.0;
+        double fe = 1.0 - exp_t;
+        double ft = 1.0 - (1.0 + au3) * exp_t;
+        double mu1_dot_mu2 = mu1x * mu2x + mu1y * mu2y + mu1z * mu2z;
+        double mu1_dot_r = mu1x * dm_x + mu1y * dm_y + mu1z * dm_z;
+        double mu2_dot_r = mu2x * dm_x + mu2y * dm_y + mu2z * dm_z;
+        energy += KE_K * (fe * mu1_dot_mu2 * inv_r3 - 3.0 * ft * mu1_dot_r * mu2_dot_r * inv_r5);
+    }
+
     return energy;
 }
 
@@ -139,8 +160,11 @@ struct SharedProposal {
     int fw_overlap;
     int skip_gg;
     double cx, cy, cz, ux, uy, uz;
+    double mux, muy, muz;
     double u_fw_new;
     double u_fw_old;
+    double u_pol_new;
+    double u_pol_old;
 };
 
 __global__ void gcmc_batched_kernel(
@@ -156,14 +180,18 @@ __global__ void gcmc_batched_kernel(
     int tid = threadIdx.x;
     BoxSpec spec = specs[box_id];
 
-    // Molecule positions stored in shared memory for fast parallel pair loops
+    // Molecule positions & framework-induced dipoles stored in shared memory
     __shared__ float s_cx[SMEM_MAX_MOL];
     __shared__ float s_cy[SMEM_MAX_MOL];
     __shared__ float s_cz[SMEM_MAX_MOL];
     __shared__ float s_ux[SMEM_MAX_MOL];
     __shared__ float s_uy[SMEM_MAX_MOL];
     __shared__ float s_uz[SMEM_MAX_MOL];
-    __shared__ float s_ufw[SMEM_MAX_MOL]; // cached framework energy per molecule
+    __shared__ float s_mux[SMEM_MAX_MOL];
+    __shared__ float s_muy[SMEM_MAX_MOL];
+    __shared__ float s_muz[SMEM_MAX_MOL];
+    __shared__ float s_ufw[SMEM_MAX_MOL];  // cached total framework energy per molecule
+    __shared__ float s_upol[SMEM_MAX_MOL]; // cached framework polarization energy per molecule
 
     __shared__ SharedProposal prop;
     __shared__ double warp_u[4];
@@ -176,6 +204,7 @@ __global__ void gcmc_batched_kernel(
 
     int cur_N = 0;
     double U_total = 0.0;
+    double U_pol_total = 0.0;
     double delta_trans = 1.2; // Angstrom, adapted during equilibration
     double max_angle = 0.65;  // radians
 
@@ -183,7 +212,7 @@ __global__ void gcmc_batched_kernel(
     constexpr double KB_SI = 1.380649e-23;
     double beta_f_V = (spec.fugacity_Pa * (cell.volume_super * 1.0e-30)) / (KB_SI * cfg.T_K);
 
-    // Precompute DSF shift constants
+    // Precompute DSF shift & Thole constants
     double rc = cfg.r_cut_A;
     double rc2 = rc * rc;
     double a_dsf = cfg.dsf_alpha;
@@ -192,6 +221,7 @@ __global__ void gcmc_batched_kernel(
     double exp_rc = exp(-a_dsf * a_dsf * rc2);
     double dsf_shift = erfc_rc / rc;
     double dsf_deriv = erfc_rc / rc2 + (2.0 * a_dsf * INV_SQRT_PI) * exp_rc / rc;
+    double inv_alpha_cbrt = 1.0 / cbrt(trappe_co2::ALPHA_ISO_A3);
 
     // Stats accumulators (thread 0)
     long long att_t = 0, acc_t = 0;
@@ -201,7 +231,7 @@ __global__ void gcmc_batched_kernel(
     long long win_att_t = 0, win_acc_t = 0;
 
     long long n_samples = 0;
-    double sum_N = 0.0, sum_N2 = 0.0, sum_U = 0.0, sum_UN = 0.0;
+    double sum_N = 0.0, sum_N2 = 0.0, sum_U = 0.0, sum_UN = 0.0, sum_Upol = 0.0;
 
     int total_steps = cfg.eq_steps + cfg.prod_steps;
 
@@ -214,6 +244,9 @@ __global__ void gcmc_batched_kernel(
             prop.skip_gg = 0;
             prop.u_fw_new = 0.0;
             prop.u_fw_old = 0.0;
+            prop.u_pol_new = 0.0;
+            prop.u_pol_old = 0.0;
+            prop.mux = prop.muy = prop.muz = 0.0;
 
             double r_mv = rng_u01(rng);
             int mv = (int)(r_mv * 4.0);
@@ -228,6 +261,7 @@ __global__ void gcmc_batched_kernel(
                     if (idx >= cur_N) idx = cur_N - 1;
                     prop.target_idx = idx;
                     prop.u_fw_old = (double)s_ufw[idx];
+                    prop.u_pol_old = (double)s_upol[idx];
 
                     double ox = (double)s_cx[idx], oy = (double)s_cy[idx], oz = (double)s_cz[idx];
                     double oux = (double)s_ux[idx], ouy = (double)s_uy[idx], ouz = (double)s_uz[idx];
@@ -245,15 +279,20 @@ __global__ void gcmc_batched_kernel(
                         rotate_rodrigues(rng, max_angle, oux, ouy, ouz, prop.ux, prop.uy, prop.uz);
                     }
 
-                    double ulj = 0.0, uel = 0.0;
-                    bool ovl = eval_co2_framework_grid(
+                    double ulj = 0.0, uel = 0.0, upol = 0.0, mx = 0.0, my = 0.0, mz = 0.0;
+                    bool ovl = eval_co2_framework_pol_grid(
                         grid, cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
-                        trappe_co2::BOND_CO_A, trappe_co2::Q_C, trappe_co2::Q_O, ulj, uel);
+                        trappe_co2::BOND_CO_A, trappe_co2::Q_C, trappe_co2::Q_O,
+                        cfg.pol_mode, trappe_co2::ALPHA_PAR_A3, trappe_co2::ALPHA_PERP_A3,
+                        trappe_co2::W_POL_C, trappe_co2::W_POL_O, KE_K, cfg.pol_scale,
+                        ulj, uel, upol, mx, my, mz);
                     if (ovl) {
                         prop.fw_overlap = 1;
                         prop.skip_gg = 1;
                     } else {
-                        prop.u_fw_new = ulj + uel;
+                        prop.u_fw_new = ulj + uel + upol;
+                        prop.u_pol_new = upol;
+                        prop.mux = mx; prop.muy = my; prop.muz = mz;
                     }
                 }
             } else if (mv == 2) { // Insertion
@@ -267,15 +306,20 @@ __global__ void gcmc_batched_kernel(
                     cell.super_frac_to_cart(sa, sb, sc, prop.cx, prop.cy, prop.cz);
                     random_unit_sphere(rng, prop.ux, prop.uy, prop.uz);
 
-                    double ulj = 0.0, uel = 0.0;
-                    bool ovl = eval_co2_framework_grid(
+                    double ulj = 0.0, uel = 0.0, upol = 0.0, mx = 0.0, my = 0.0, mz = 0.0;
+                    bool ovl = eval_co2_framework_pol_grid(
                         grid, cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
-                        trappe_co2::BOND_CO_A, trappe_co2::Q_C, trappe_co2::Q_O, ulj, uel);
+                        trappe_co2::BOND_CO_A, trappe_co2::Q_C, trappe_co2::Q_O,
+                        cfg.pol_mode, trappe_co2::ALPHA_PAR_A3, trappe_co2::ALPHA_PERP_A3,
+                        trappe_co2::W_POL_C, trappe_co2::W_POL_O, KE_K, cfg.pol_scale,
+                        ulj, uel, upol, mx, my, mz);
                     if (ovl) {
                         prop.fw_overlap = 1;
                         prop.skip_gg = 1;
                     } else {
-                        prop.u_fw_new = ulj + uel;
+                        prop.u_fw_new = ulj + uel + upol;
+                        prop.u_pol_new = upol;
+                        prop.mux = mx; prop.muy = my; prop.muz = mz;
                     }
                 }
             } else { // Deletion
@@ -286,12 +330,16 @@ __global__ void gcmc_batched_kernel(
                     if (idx >= cur_N) idx = cur_N - 1;
                     prop.target_idx = idx;
                     prop.u_fw_old = (double)s_ufw[idx];
+                    prop.u_pol_old = (double)s_upol[idx];
                     prop.cx = (double)s_cx[idx];
                     prop.cy = (double)s_cy[idx];
                     prop.cz = (double)s_cz[idx];
                     prop.ux = (double)s_ux[idx];
                     prop.uy = (double)s_uy[idx];
                     prop.uz = (double)s_uz[idx];
+                    prop.mux = (double)s_mux[idx];
+                    prop.muy = (double)s_muy[idx];
+                    prop.muz = (double)s_muz[idx];
                 }
             }
         }
@@ -309,23 +357,28 @@ __global__ void gcmc_batched_kernel(
             if (mv == 0 || mv == 1) {
                 double ox = (double)s_cx[tgt], oy = (double)s_cy[tgt], oz = (double)s_cz[tgt];
                 double oux = (double)s_ux[tgt], ouy = (double)s_uy[tgt], ouz = (double)s_uz[tgt];
+                double omux = (double)s_mux[tgt], omuy = (double)s_muy[tgt], omuz = (double)s_muz[tgt];
                 for (int j = tid; j < N; j += BLOCK_THREADS) {
                     if (j == tgt) continue;
                     double jx = (double)s_cx[j], jy = (double)s_cy[j], jz = (double)s_cz[j];
                     double jux = (double)s_ux[j], juy = (double)s_uy[j], juz = (double)s_uz[j];
+                    double jmux = (double)s_mux[j], jmuy = (double)s_muy[j], jmuz = (double)s_muz[j];
 
                     int ov_new = 0, ov_old = 0;
                     double enew = pair_energy_co2(
                         cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
-                        jx, jy, jz, jux, juy, juz,
+                        prop.mux, prop.muy, prop.muz,
+                        jx, jy, jz, jux, juy, juz, jmux, jmuy, jmuz,
+                        cfg.pol_mode, inv_alpha_cbrt,
                         rc, rc2, a_dsf, dsf_shift, dsf_deriv, ov_new);
                     if (ov_new) {
                         local_ovl = 1;
                         break;
                     }
                     double eold = pair_energy_co2(
-                        cell, ox, oy, oz, oux, ouy, ouz,
-                        jx, jy, jz, jux, juy, juz,
+                        cell, ox, oy, oz, oux, ouy, ouz, omux, omuy, omuz,
+                        jx, jy, jz, jux, juy, juz, jmux, jmuy, jmuz,
+                        cfg.pol_mode, inv_alpha_cbrt,
                         rc, rc2, a_dsf, dsf_shift, dsf_deriv, ov_old);
                     local_du_gg += (enew - eold);
                 }
@@ -334,8 +387,11 @@ __global__ void gcmc_batched_kernel(
                     int ov_new = 0;
                     double enew = pair_energy_co2(
                         cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
+                        prop.mux, prop.muy, prop.muz,
                         (double)s_cx[j], (double)s_cy[j], (double)s_cz[j],
                         (double)s_ux[j], (double)s_uy[j], (double)s_uz[j],
+                        (double)s_mux[j], (double)s_muy[j], (double)s_muz[j],
+                        cfg.pol_mode, inv_alpha_cbrt,
                         rc, rc2, a_dsf, dsf_shift, dsf_deriv, ov_new);
                     if (ov_new) {
                         local_ovl = 1;
@@ -349,8 +405,11 @@ __global__ void gcmc_batched_kernel(
                     int ov_old = 0;
                     double eold = pair_energy_co2(
                         cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
+                        prop.mux, prop.muy, prop.muz,
                         (double)s_cx[j], (double)s_cy[j], (double)s_cz[j],
                         (double)s_ux[j], (double)s_uy[j], (double)s_uz[j],
+                        (double)s_mux[j], (double)s_muy[j], (double)s_muz[j],
+                        cfg.pol_mode, inv_alpha_cbrt,
                         rc, rc2, a_dsf, dsf_shift, dsf_deriv, ov_old);
                     local_du_gg -= eold;
                 }
@@ -386,8 +445,13 @@ __global__ void gcmc_batched_kernel(
                         s_cx[tgt] = (float)prop.cx;
                         s_cy[tgt] = (float)prop.cy;
                         s_cz[tgt] = (float)prop.cz;
+                        s_mux[tgt] = (float)prop.mux;
+                        s_muy[tgt] = (float)prop.muy;
+                        s_muz[tgt] = (float)prop.muz;
                         s_ufw[tgt] = (float)prop.u_fw_new;
+                        s_upol[tgt] = (float)prop.u_pol_new;
                         U_total += dU;
+                        U_pol_total += (prop.u_pol_new - prop.u_pol_old);
                         if (in_prod) ++acc_t; else ++win_acc_t;
                     }
                 }
@@ -402,8 +466,13 @@ __global__ void gcmc_batched_kernel(
                         s_ux[tgt] = (float)prop.ux;
                         s_uy[tgt] = (float)prop.uy;
                         s_uz[tgt] = (float)prop.uz;
+                        s_mux[tgt] = (float)prop.mux;
+                        s_muy[tgt] = (float)prop.muy;
+                        s_muz[tgt] = (float)prop.muz;
                         s_ufw[tgt] = (float)prop.u_fw_new;
+                        s_upol[tgt] = (float)prop.u_pol_new;
                         U_total += dU;
+                        U_pol_total += (prop.u_pol_new - prop.u_pol_old);
                         if (in_prod) ++acc_r;
                     }
                 }
@@ -421,9 +490,14 @@ __global__ void gcmc_batched_kernel(
                         s_ux[cur_N] = (float)prop.ux;
                         s_uy[cur_N] = (float)prop.uy;
                         s_uz[cur_N] = (float)prop.uz;
+                        s_mux[cur_N] = (float)prop.mux;
+                        s_muy[cur_N] = (float)prop.muy;
+                        s_muz[cur_N] = (float)prop.muz;
                         s_ufw[cur_N] = (float)prop.u_fw_new;
+                        s_upol[cur_N] = (float)prop.u_pol_new;
                         ++cur_N;
                         U_total += dU;
+                        U_pol_total += prop.u_pol_new;
                         if (in_prod) ++acc_i;
                     }
                 }
@@ -444,10 +518,15 @@ __global__ void gcmc_batched_kernel(
                             s_ux[tgt] = s_ux[last];
                             s_uy[tgt] = s_uy[last];
                             s_uz[tgt] = s_uz[last];
+                            s_mux[tgt] = s_mux[last];
+                            s_muy[tgt] = s_muy[last];
+                            s_muz[tgt] = s_muz[last];
                             s_ufw[tgt] = s_ufw[last];
+                            s_upol[tgt] = s_upol[last];
                         }
                         --cur_N;
                         U_total += dU;
+                        U_pol_total -= prop.u_pol_old;
                         if (in_prod) ++acc_d;
                     }
                 }
@@ -472,6 +551,7 @@ __global__ void gcmc_batched_kernel(
                 sum_N2 += dN * dN;
                 sum_U += U_total;
                 sum_UN += U_total * dN;
+                sum_Upol += U_pol_total;
 
                 if (spec.record_density_hist && hist_out != nullptr && cur_N > 0) {
                     // Record every 5th sample across existing molecules for smooth 2D pore density
@@ -501,6 +581,7 @@ __global__ void gcmc_batched_kernel(
         double mean_N2 = sum_N2 / ns;
         double mean_U = sum_U / ns;
         double mean_UN = sum_UN / ns;
+        double mean_Upol = sum_Upol / ns;
 
         double var_N = mean_N2 - mean_N * mean_N;
         if (var_N < 0.0) var_N = 0.0;
@@ -520,6 +601,7 @@ __global__ void gcmc_batched_kernel(
         r.std_N = std_N;
         r.uptake_mmol_g = mean_N * 1000.0 / cfg.framework_mass_super_gmol;
         r.avg_U_K = mean_U;
+        r.avg_U_pol_per_mol_kJ = (mean_N > 1.0e-6) ? ((mean_Upol / mean_N) * K_TO_KJMOL) : 0.0;
         r.Qst_kJ_mol = qst_kj_mol;
         r.acc_trans = (att_t > 0) ? (double)acc_t / (double)att_t : 0.0;
         r.acc_rot   = (att_r > 0) ? (double)acc_r / (double)att_r : 0.0;

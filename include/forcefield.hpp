@@ -67,6 +67,18 @@ namespace trappe_co2 {
     constexpr double SIG_O_A  = 3.050;
 
     constexpr double BOND_CO_A = 1.160;
+
+    // Experimental & ab-initio anisotropic CO2 polarizability tensor (Angstrom^3)
+    constexpr double ALPHA_PAR_A3  = 4.05;
+    constexpr double ALPHA_PERP_A3 = 1.95;
+    constexpr double ALPHA_ISO_A3  = (ALPHA_PAR_A3 + 2.0 * ALPHA_PERP_A3) / 3.0; // 2.65 A^3
+
+    // 3-site distributed polarizability weights (sum = 1.0)
+    constexpr double W_POL_C = 0.40;
+    constexpr double W_POL_O = 0.30;
+
+    // Standard Thole damping parameter for induced-dipole-induced-dipole interaction
+    constexpr double THOLE_A = 2.1304;
 }
 
 // Lorentz-Berthelot combining rules
