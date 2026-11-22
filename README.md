@@ -14,8 +14,8 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
   - Precomputes 6 periodic 3D unit-cell grids (`U_lj_C`, `U_lj_O`, `Phi_elec`, `Ex`, `Ey`, `Ez`) via exact 12-6 LJ + 3D Ewald summation on GPU, runs 32 independent pressure/replica boxes concurrently (`128` threads/box, shared-memory molecules, exact hexagonal MIC, Marsaglia/Rodrigues rotation, DSF electrostatics, Peng–Robinson fugacity), and verifies detailed balance + replica convergence.
 - **[Done] Step 2 (Branch B1) — Explicit $\text{Mg}^{2+}$ Electric-Field Polarization + Thole Coupling**
   - Activates the precomputed `(Ex, Ey, Ez)` 3D Ewald electric-field grids with anisotropic $\text{CO}_2$ polarizability ($\alpha_\parallel = 4.05\ \text{\AA}^3,\ \alpha_\perp = 1.95\ \text{\AA}^3,\ \bar{\alpha} = 2.65\ \text{\AA}^3$), comparing COM polarization (`Pol-COM`) and 3-site distributed polarization (`Pol-3Site`, $w_C = 0.40, w_O = 0.30$) with Thole-damped induced-dipole–induced-dipole guest interactions ($a = 2.1304$).
-- **[Planned] Step 3 — Competitive Multi-Component Co-Adsorption**
-  - Extends the batched GPU engine with identity-swap moves for $\text{CO}_2/\text{N}_2$, $\text{CO}_2/\text{CH}_4$, and $\text{CO}_2/\text{H}_2\text{O}$ mixtures.
+- **[Done] Step 3 — Competitive Multi-Component Co-Adsorption ($\text{CO}_2/\text{N}_2$ & $\text{CO}_2/\text{CH}_4$)**
+  - Extends the GPU 3D-grid + anisotropic polarization engine (`build\mof_gcmc_mix.exe`) with TraPPE $\text{N}_2$ (`3`-site) / $\text{CH}_4$ (`1`-site UA), binary Peng–Robinson EOS mixture fugacities, Thole-damped cross-species induced dipoles, and symmetric **Identity Swap (`A <-> B`)** moves verified via both an analytical ideal-gas Poisson test and a real-pore `Swap-ON` vs. `Swap-OFF` check.
 
 ---
 
@@ -64,20 +64,40 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 
 ---
 
+## Step 3: Competitive Multi-Component Co-Adsorption ($\text{CO}_2/\text{N}_2$ & $\text{CO}_2/\text{CH}_4$ @ 298 K)
+
+![Step 3 Mg-MOF-74 Binary Co-Adsorption](assets/step3_mof74_binary_coadsorption.png)
+
+### 1. Multi-Species Grids & Identity-Swap Detailed Balance
+- **8 Precomputed Grids (`128x128x36`)**: Built in **`410.76 ms`** (`U_lj[C_CO2, O_CO2, N_N2, CH4]`, `Phi_elec`, `Ex`, `Ey`, `Ez`); `MAE` vs. direct reference ($\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$, `1,000` pore points) = `0.844 / 2.493 / 2.974 / 14.415 K` (LJ), `3.9038 K/e` (`Phi`), `7.535 K/(e·Å)` (`|E|`).
+- **Test A (Ideal-Gas Identity Swap)**: `<N0> = 11.9827` (exact `12.0`), `<N1> = 39.8378` (exact `40.0`).
+- **Test B (`1.0 bar` Flue Gas `Pol-3Site` Swap Consistency)**: `Swap-ON` (`CO2 = 2.5498`, `N2 = 0.2774 mmol/g`) vs. `Swap-OFF` (`CO2 = 2.4995`, `N2 = 0.2772 mmol/g`).
+
+### 2. Competitive Selectivity Boost on RTX 5070 (`24` boxes × `350k` steps per sweep)
+
+| Mixture (`298 K`) | Pressure | `NonPol` Uptake (mmol/g) | `NonPol` $S$ | `Pol-3Site` Uptake (mmol/g) | `Pol-3Site` $S$ | Selectivity Gain |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Flue Gas $\text{CO}_2/\text{N}_2$ (`15:85`)** | `1.0 bar` | `1.159 / 0.254` | `25.8` | **`2.751 / 0.276`** | **`56.4`** | **`2.19×`** |
+| **Flue Gas $\text{CO}_2/\text{N}_2$ (`15:85`)** | `2.0 bar` | `2.290 / 0.471` | `27.5` | **`4.648 / 0.450`** | **`58.6`** | **`2.13×`** |
+| **Biogas $\text{CO}_2/\text{CH}_4$ (`50:50`)** | `0.5 bar` | `1.967 / 0.196` | `10.0` | **`3.995 / 0.201`** | **`19.9`** | **`1.99×`** |
+| **Biogas $\text{CO}_2/\text{CH}_4$ (`50:50`)** | `1.0 bar` | `3.765 / 0.363` | `10.4` | **`6.296 / 0.340`** | **`18.5`** | **`1.78×`** |
+
+---
+
 ## Build & Run
 
 ```powershell
-# Compile for RTX 5070 (sm_120)
+# Compile all targets (build\mof_gcmc.exe & build\mof_gcmc_mix.exe) for RTX 5070 (sm_120)
 cmd /c build.bat
 
-# Run Step 1 + Step 2 (NonPol, Pol-COM, Pol-3Site: ~49 s total) -> exports CSVs to build/
+# Step 1 + Step 2 single-component runs & plots
 .\build\mof_gcmc.exe
-
-# Run Step 1 checks & plot
 uv run --with matplotlib --with numpy python scripts\verify_physics.py
-
-# Run Step 2 checks & 300 DPI comparison plot
 uv run --with matplotlib --with numpy python scripts\verify_step2.py
+
+# Step 3 binary competitive adsorption (CO2/N2 & CO2/CH4) + PR check & plot
+.\build\mof_gcmc_mix.exe
+uv run --with matplotlib --with numpy python scripts\verify_step3.py
 ```
 
 ---
@@ -90,22 +110,28 @@ cuda-mof-gcmc/
 │   └── MgMOF-74.cif              # Official RASPA2 R-3 Mg-MOF-74 crystal structure
 ├── include/
 │   ├── cell.hpp                  # Hexagonal/triclinic cell transform & exact 5-candidate MIC
-│   ├── forcefield.hpp            # UFF, REPEAT, TraPPE CO2 & Peng-Robinson EOS fugacity
+│   ├── forcefield.hpp            # UFF, REPEAT, TraPPE (CO2/N2/CH4) & single/binary PR EOS fugacity
 │   ├── grid3d.hpp                # Periodic 3D grid view (U_lj, Phi, Ex, Ey, Ez) & trilinear lookup
 │   ├── cif_loader.hpp            # CIF symmetry expander & geometry checker interface
-│   └── gcmc_gpu.hpp              # Grid builder & batched GCMC host API
+│   ├── gcmc_gpu.hpp              # Step 1/2 grid builder & single-component batched GCMC API
+│   └── mix_gcmc.hpp              # Step 3 multi-species 8-grid builder & binary GCMC API
 ├── src/
 │   ├── cif_loader.cpp            # Symmetry expansion -> 162 atoms & bond/charge validation
-│   ├── grid_builder.cu           # GPU 3D LJ + Ewald potential & E-field precomputation
-│   ├── gcmc_kernel.cu            # Multi-box GPU GCMC (128 threads/box, DSF + detailed balance)
-│   └── main.cu                   # Driver, unit checks, 32-box isotherm & CSV export
+│   ├── grid_builder.cu           # Step 1/2 GPU 3D LJ + Ewald potential & E-field precomputation
+│   ├── gcmc_kernel.cu            # Step 1/2 batched GCMC (128 threads/box, DSF + Thole coupling)
+│   ├── main.cu                   # Step 1/2 driver (NonPol vs Pol-COM vs Pol-3Site)
+│   ├── mix_grid_builder.cu       # Step 3 GPU 8-grid precomputation (C_CO2, O_CO2, N_N2, CH4 + E-field)
+│   ├── mix_gcmc_kernel.cu        # Step 3 binary GCMC (5 moves incl. Identity Swap + Thole coupling)
+│   └── main_mix.cu               # Step 3 driver (Ideal-gas & swap checks + CO2/N2 & CO2/CH4 sweeps)
 ├── scripts/
 │   ├── verify_physics.py         # Independent MIC/PR checks & Step 1 300 DPI plot
-│   └── verify_step2.py           # Step 2 polarization verification & 300 DPI comparison plot
+│   ├── verify_step2.py           # Step 2 polarization verification & 300 DPI comparison plot
+│   └── verify_step3.py           # Binary PR EOS verification & Step 3 300 DPI comparison plot
 ├── assets/
-│   ├── step1_mof74_co2_298K.png  # Step 1: 298 K isotherm, Qst & pore density
-│   └── step2_mof74_pol_comparison.png  # Step 2: NonPol vs Pol-COM vs Pol-3Site comparison
-├── build.bat                     # VS2019 + nvcc (sm_120) build script
+│   ├── step1_mof74_co2_298K.png          # Step 1: 298 K isotherm, Qst & pore density
+│   ├── step2_mof74_pol_comparison.png    # Step 2: NonPol vs Pol-COM vs Pol-3Site comparison
+│   └── step3_mof74_binary_coadsorption.png # Step 3: CO2/N2 & CO2/CH4 selectivity & competitive map
+├── build.bat                     # VS2019 + nvcc (sm_120) build script (all / single / mix)
 ├── README.md                     # English documentation
 └── README.zh-CN.md               # Chinese documentation
 ```

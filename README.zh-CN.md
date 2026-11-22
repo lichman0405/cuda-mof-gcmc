@@ -14,8 +14,8 @@
   - 在 GPU 上一次性预计算 6 张周期 3D 单胞网格（`U_lj_C`、`U_lj_O`、`Phi_elec`、`Ex`、`Ey`、`Ez`；包含精确 12-6 LJ 与 3D Ewald 求和），随后以单 Block 128 线程并行跑 32 个独立压力/副本盒子（共享内存存客体分子、精确六方 MIC、Marsaglia/Rodrigues 球面无偏旋转、DSF 静电、Peng–Robinson 逸度换算），并校验细致平衡与副本一致性。
 - **[已完成] 第二步（支线 B1）：$\text{Mg}^{2+}$ 开放金属位点显式静电场极化 + Thole 诱导偶极耦合**
   - 正式激活预计算的 `(Ex, Ey, Ez)` 三维电场网格与 $\text{CO}_2$ 各向异性极化率张量（$\alpha_\parallel = 4.05\ \text{\AA}^3,\ \alpha_\perp = 1.95\ \text{\AA}^3,\ \bar{\alpha} = 2.65\ \text{\AA}^3$），对比质心极化（`Pol-COM`）与三点分布极化（`Pol-3Site`，$w_C = 0.40, w_O = 0.30$）及客体间 Thole 阻尼诱导偶极作用（$a = 2.1304$）。
-- **[规划中] 第三步：多组分竞争共吸附**
-  - 加入组分身份交换（Identity Swap）动作，扩展至 $\text{CO}_2/\text{N}_2$、$\text{CO}_2/\text{CH}_4$ 与 $\text{CO}_2/\text{H}_2\text{O}$ 共吸附筛选。
+- **[已完成] 第三步：多组分竞争共吸附（$\text{CO}_2/\text{N}_2$ 烟道气 & $\text{CO}_2/\text{CH}_4$ 沼气）**
+  - 将 GPU 3D 网格与各向异性极化框架扩展为独立多组分求解器 [`build\mof_gcmc_mix.exe`](src/main_mix.cu)，内置 TraPPE $\text{N}_2$（3 位点）与 $\text{CH}_4$（单点 UA）力场、二元 Peng–Robinson 混合逸度、跨组分 Thole 阻尼诱导偶极作用以及严格满足细致平衡的**身份交换（Identity Swap）**蒙卡动作（通过理想气体解析验证与 `Swap-ON` vs `Swap-OFF` 孔道一致性双检）。
 
 ---
 
@@ -64,20 +64,40 @@
 
 ---
 
+## 第三步：多组分竞争共吸附（$\text{CO}_2/\text{N}_2$ 与 $\text{CO}_2/\text{CH}_4$ @ 298 K）
+
+![Step 3 Mg-MOF-74 Binary Co-Adsorption](assets/step3_mof74_binary_coadsorption.png)
+
+### 1. 八通道三维网格与 Identity Swap 细致平衡校验
+- **8 张 `128x128x36` 三维网格预计算**：耗时 **`410.76 ms`**（`U_lj[C_CO2, O_CO2, N_N2, CH4]`、`Phi_elec`、`Ex`、`Ey`、`Ez`）；`1,000` 个孔道点与独立参考（$\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$）对比得 `MAE = 0.844 / 2.493 / 2.974 / 14.415 K`（LJ）、`3.9038 K/e`（`Phi`）、`7.535 K/(e·Å)`（`|E|`）。
+- **Test A（理想气体 Identity Swap 解析自检）**：`<N0> = 11.9827`（精确真值 `12.0`），`<N1> = 39.8378`（精确真值 `40.0`）。
+- **Test B（`1.0 bar` 烟道气 `Pol-3Site` 真实孔道换牌一致性）**：`Swap-ON`（`CO2 = 2.5498`、`N2 = 0.2774 mmol/g`）与 `Swap-OFF`（`CO2 = 2.4995`、`N2 = 0.2772 mmol/g`）在统计涨落内完全一致。
+
+### 2. RTX 5070 竞争吸附与选择性跃升实测（每组 `24` 盒子 × `350k` 步）
+
+| 混合气体（`298 K`） | 总压 | `NonPol` 吸附量 (mmol/g) | `NonPol` 选择性 $S$ | `Pol-3Site` 吸附量 (mmol/g) | `Pol-3Site` 选择性 $S$ | 极化带来选择性增幅 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **烟道气 $\text{CO}_2/\text{N}_2$ (`15:85`)** | `1.0 bar` | `1.159 / 0.254` | `25.8` | **`2.751 / 0.276`** | **`56.4`** | **`2.19×`** |
+| **烟道气 $\text{CO}_2/\text{N}_2$ (`15:85`)** | `2.0 bar` | `2.290 / 0.471` | `27.5` | **`4.648 / 0.450`** | **`58.6`** | **`2.13×`** |
+| **沼气 $\text{CO}_2/\text{CH}_4$ (`50:50`)** | `0.5 bar` | `1.967 / 0.196` | `10.0` | **`3.995 / 0.201`** | **`19.9`** | **`1.99×`** |
+| **沼气 $\text{CO}_2/\text{CH}_4$ (`50:50`)** | `1.0 bar` | `3.765 / 0.363` | `10.4` | **`6.296 / 0.340`** | **`18.5`** | **`1.78×`** |
+
+---
+
 ## 编译与运行命令
 
 ```powershell
-# 针对 RTX 5070 (sm_120) 编译
+# 针对 RTX 5070 (sm_120) 编译全部目标（build\mof_gcmc.exe 与 build\mof_gcmc_mix.exe）
 cmd /c build.bat
 
-# 运行第一步 + 第二步全部三组对比（约 49 秒，CSV 导出至 build/）
+# 第一步 + 第二步单组分对比及绘图
 .\build\mof_gcmc.exe
-
-# 运行第一步校验与出图
 uv run --with matplotlib --with numpy python scripts\verify_physics.py
-
-# 运行第二步校验并绘制 300 DPI 对比三联图
 uv run --with matplotlib --with numpy python scripts\verify_step2.py
+
+# 第三步双组分竞争吸附（CO2/N2 与 CO2/CH4）及混合逸度校验出图
+.\build\mof_gcmc_mix.exe
+uv run --with matplotlib --with numpy python scripts\verify_step3.py
 ```
 
 ---
@@ -90,22 +110,28 @@ cuda-mof-gcmc/
 │   └── MgMOF-74.cif              # RASPA2 官方 R-3 Mg-MOF-74 晶体结构文件
 ├── include/
 │   ├── cell.hpp                  # 六方/三斜晶胞坐标变换与精确 5 候选 MIC
-│   ├── forcefield.hpp            # UFF、REPEAT、TraPPE CO2 参数与 Peng-Robinson 逸度计算
+│   ├── forcefield.hpp            # UFF、REPEAT、TraPPE (CO2/N2/CH4) 参数与单/双组分 PR 逸度
 │   ├── grid3d.hpp                # 周期性三维网格视图（U_lj, Phi, Ex, Ey, Ez）与三线性插值
 │   ├── cif_loader.hpp            # CIF 对称展开与几何检查接口
-│   └── gcmc_gpu.hpp              # 网格构建与 Batched GCMC 调用接口
+│   ├── gcmc_gpu.hpp              # 第一/二步网格构建与单组分 Batched GCMC 接口
+│   └── mix_gcmc.hpp              # 第三步多组分 8 网格构建与二元共吸附 GCMC 接口
 ├── src/
 │   ├── cif_loader.cpp            # 18 对称操作展开 -> 162 原子与键长/电中性校验
-│   ├── grid_builder.cu           # GPU 3D LJ + Ewald 静电势与电场网格预计算
-│   ├── gcmc_kernel.cu            # 多盒子 GPU GCMC 主核函数（128 线程/盒，DSF + 细致平衡）
-│   └── main.cu                   # 主程序、单元测试、32 副本等温线模拟与 CSV 导出
+│   ├── grid_builder.cu           # 第一/二步 GPU 3D LJ + Ewald 势能与电场网格预计算
+│   ├── gcmc_kernel.cu            # 第一/二步单组分 GPU GCMC（128 线程/盒，DSF + Thole 耦合）
+│   ├── main.cu                   # 第一/二步主程序（NonPol vs Pol-COM vs Pol-3Site）
+│   ├── mix_grid_builder.cu       # 第三步 GPU 八网格预计算（C_CO2, O_CO2, N_N2, CH4 + 电场）
+│   ├── mix_gcmc_kernel.cu        # 第三步二元 GCMC（5 动作含 Identity Swap + Thole 耦合）
+│   └── main_mix.cu               # 第三步主程序（理想气体与换牌检验 + CO2/N2 与 CO2/CH4 扫描）
 ├── scripts/
 │   ├── verify_physics.py         # 独立 MIC/PR 校验与第一步 300 DPI 出图脚本
-│   └── verify_step2.py           # 第二步极化校验与 300 DPI 对比三联图脚本
+│   ├── verify_step2.py           # 第二步极化校验与 300 DPI 对比三联图脚本
+│   └── verify_step3.py           # 混合 PR EOS 校验与第三步 300 DPI 共吸附对比图脚本
 ├── assets/
-│   ├── step1_mof74_co2_298K.png  # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
-│   └── step2_mof74_pol_comparison.png  # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
-├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本
+│   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
+│   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
+│   └── step3_mof74_binary_coadsorption.png # 第三步：CO2/N2 & CO2/CH4 选择性与孔道竞争占位图
+├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（支持 all / single / mix）
 ├── README.md                     # 英文项目文档
 └── README.zh-CN.md               # 中文项目文档
 ```
