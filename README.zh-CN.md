@@ -2,9 +2,26 @@
 
 # `cuda-mof-gcmc`: 面向开放金属位点 MOF 的 GPU 并行 GCMC 模拟引擎
 
+![CUDA C++](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?style=flat-square&logo=nvidia)
+![Target GPU](https://img.shields.io/badge/RTX%205070-sm__120-2563EB?style=flat-square)
+![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
+![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
+
 面向 **NVIDIA GeForce RTX 5070**（`sm_120`）从零构建的纯 CUDA 金属有机框架（MOF）气体吸附巨正则蒙特卡洛（GCMC）引擎，核心聚焦开放金属位点（OMS）的物理吸附建模（典型基准体系：**Mg-MOF-74 / $\text{Mg}_2(\text{dobdc})$ 吸附 $\text{CO}_2$**）。
 
 ![Step 4 Mg-MOF-74 Tricubic Validation](assets/step4_validated_mercado_raspa3.png)
+
+---
+
+## 核心成果与实测指标
+
+- **与工业标准 `RASPA3 (3.0.29)` 统计误差内逐点对齐**：在 `Mg-MOF-74`（`298 K`, UFF+REPEAT）基准上，`0.10 Å` `O(h⁴)` 三维 Tricubic GPU 内核与原生 RASPA3 网格版在 `0.15 / 1.0 / 5.0 bar` 偏差仅 **`+2.32% / +1.39% / -0.41%`**（全部 **`≤ 0.54σ`**，$\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$），近程 `Mg–O` 径向插值误差较三线性压缩 **`290.3×`**（`190.46 K → 0.656 K`，Mercado 2016 低至 `0.092 K`）。
+- **单卡百倍级真实加速（RTX 5070）**：`6,400 万` 步耗时 `106.9 s`（**`598,669 MC-steps/s`**），对比同算法单核 RASPA3 Tricubic 网格版（`3,908 steps/s`）加速 **`153.2×`**，对比精确 Ewald（`1,215 steps/s`）加速 **`492.6×`**，三维网格构建加速 **`38.9×`**（`3.03 s` vs `117.98 s`）。
+- **GPU 原生 Level 2 全自洽多体极化（`Pol-SCF`）**：Block 级共享内存 Applequist-Thole 自洽求解器与 `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**，在 `15:85` $\text{CO}_2/\text{N}_2$ 烟道气中清晰捕捉客体间多体相互退极化屏蔽效应（选择性由单骨架场 `Pol-3Site` 的 `64.6 / 67.4` 物理回落至 `37.3 / 43.2`）。
+- **全双精度零能量漂移**：全程 `double` 共享内存状态 + 周期全盒重算，常规/一阶极化最大能量漂移低至 **`2.0e-09 ~ 1.0e-08 K`**，全自洽多体极化 **`≤ 7.25e-07 K`**，全工况细致平衡偏差 `|acc_ins - acc_del| ≤ 0.003`。
+- **零依赖统一 JSON/CLI 通用引擎**：单一可执行文件（[`mof_gcmc_cli.exe`](src/main_cli.cu)）集成通用 CIF 解析（`19` 种 MOF 元素）、UFF / Mercado 2016 第一性原理力场、二元 Identity Swap、Peng–Robinson 逸度、自动化检验套件与 5 张 300 DPI 可视化图表。
+
+> **适用边界与当前局限**：当前引擎面向**刚性 MOF 骨架与刚性小分子**（$\text{CO}_2/\text{N}_2/\text{CH}_4$，暂不支持柔性长链 CBMC 与骨架呼吸效应）。`NonPol` 与 `Pol-3Site` 可在秒级至百秒级完成数千万步扫描；`Pol-SCF` 每步需在 FP64 下求解 $O(N^2)$ 自洽迭代，算力开销显著更高（`12 × 120k` 步纯 $\text{CO}_2$ 耗时 `791 s`），且当前沿用标准 TraPPE/UFF 参数叠加极化，定量预测需配合去双重计数可极化力场（如 PHAST / mBSSP）。
 
 ---
 

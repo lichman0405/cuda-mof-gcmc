@@ -2,9 +2,26 @@
 
 # `cuda-mof-gcmc`: GPU-Accelerated Batched GCMC for Open-Metal-Site MOFs
 
+![CUDA C++](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?style=flat-square&logo=nvidia)
+![Target GPU](https://img.shields.io/badge/RTX%205070-sm__120-2563EB?style=flat-square)
+![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
+![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
+
 A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs) on **NVIDIA GeForce RTX 5070** (`sm_120`), built specifically around open-metal-site (OMS) adsorption physics such as **$\text{CO}_2$ capture in Mg-MOF-74 ($\text{Mg}_2(\text{dobdc})$)**.
 
 ![Step 4 Mg-MOF-74 Tricubic Validation](assets/step4_validated_mercado_raspa3.png)
+
+---
+
+## Key Highlights
+
+- **Verified Against `RASPA3 (3.0.29)` Within `0.54σ`**: On `Mg-MOF-74` (`298 K`, UFF+REPEAT), the `0.10 Å` `O(h⁴)` 3D tricubic GPU kernel matches native RASPA3 Tricubic Grid within **`+2.32% / +1.39% / -0.41%`** (`0.15 / 1.0 / 5.0 bar`, $\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$) and cuts radial `Mg–O` interpolation MAE by **`290.3×`** (`190.46 K → 0.656 K`; Mercado 2016 `0.092 K`).
+- **Two-Order-of-Magnitude GPU Speedup (RTX 5070)**: Sustains **`598,669 MC-steps/s`** (`64M` steps in `106.9 s`) — **`153.2×`** faster than single-core RASPA3 Tricubic Grid (`3,908 steps/s`), **`492.6×`** faster than Exact Ewald (`1,215 steps/s`), and **`38.9×`** faster in 3D grid construction (`3.03 s` vs. `117.98 s`).
+- **Level 2 Full Many-Body SCF Polarization on GPU**: Block-collective shared-memory Applequist-Thole SCF solver (`polarization: "scf"`) agrees with exact `36×36` Python matrix inversion to **`1.83e-08 K`** and **`1.13e-11 e·Å`**, capturing many-body mutual depolarization in `15:85` $\text{CO}_2/\text{N}_2$ flue gas (`S = 37.3 / 43.2` vs. `64.6 / 67.4` for unscreened framework-only `Pol-3Site`).
+- **Zero-Drift Statistical Mechanics**: Full double-precision shared-memory state with periodic full-box energy recomputation keeps maximum energy drift at **`2.0e-09 – 1.0e-08 K`** (`NonPol / Mercado / Pol-3Site`) and **`≤ 7.25e-07 K`** (`Pol-SCF`), with detailed balance `|acc_ins - acc_del| ≤ 0.003`.
+- **Self-Contained Unified JSON/CLI Engine**: Single CUDA binary ([`mof_gcmc_cli.exe`](src/main_cli.cu)) supporting generic CIF frameworks (`19` MOF elements), UFF / Mercado 2016 DFT-FF, binary Identity Swap, Peng–Robinson EOS, automated verification suites, and 5 publication-ready 300 DPI figures.
+
+> **Scope & Current Limitations**: Designed for **rigid MOF frameworks and small rigid adsorbates** ($\text{CO}_2/\text{N}_2/\text{CH}_4$; no CBMC flexible chains or framework breathing). While `NonPol` / `Pol-3Site` achieve sub-second to ~100 s sweeps, `Pol-SCF` solves $O(N^2)$ FP64 iterations per trial move (`791 s` for `12 × 120k` $\text{CO}_2$ steps on RTX 5070) and pairs induction with standard TraPPE/UFF parameters (non-negligible induction double counting unless coupled with dedicated polarizable parameters such as PHAST/mBSSP).
 
 ---
 
