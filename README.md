@@ -7,7 +7,7 @@
 ![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
 
-A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs) on **NVIDIA GeForce RTX 5070** (`sm_120`), built specifically around open-metal-site (OMS) adsorption physics such as **$\text{CO}_2$ capture in Mg-MOF-74 ($\text{Mg}_2(\text{dobdc})$)**.
+A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs) on **NVIDIA GeForce RTX 5070** (`sm_120`), built specifically around open-metal-site (OMS) adsorption physics such as **CO₂ capture in Mg-MOF-74 (Mg₂(dobdc))**.
 
 ![Step 4 Mg-MOF-74 Tricubic Validation](assets/step4_validated_mercado_raspa3.png)
 
@@ -17,11 +17,11 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 
 - **Verified Against `RASPA3 (3.0.29)` Within `0.54σ`**: On `Mg-MOF-74` (`298 K`, UFF+REPEAT), the `0.10 Å` `O(h⁴)` 3D tricubic GPU kernel matches native RASPA3 Tricubic Grid within **`+2.32% / +1.39% / -0.41%`** (`0.15 / 1.0 / 5.0 bar`, $\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$) and cuts radial `Mg–O` interpolation MAE by **`290.3×`** (`190.46 K → 0.656 K`; Mercado 2016 `0.092 K`).
 - **Two-Order-of-Magnitude GPU Speedup (RTX 5070)**: Sustains **`598,669 MC-steps/s`** (`64M` steps in `106.9 s`) — **`153.2×`** faster than single-core RASPA3 Tricubic Grid (`3,908 steps/s`), **`492.6×`** faster than Exact Ewald (`1,215 steps/s`), and **`38.9×`** faster in 3D grid construction (`3.03 s` vs. `117.98 s`).
-- **Level 2 Full Many-Body SCF Polarization on GPU**: Block-collective shared-memory Applequist-Thole SCF solver (`polarization: "scf"`) agrees with exact `36×36` Python matrix inversion to **`1.83e-08 K`** and **`1.13e-11 e·Å`**, capturing many-body mutual depolarization in `15:85` $\text{CO}_2/\text{N}_2$ flue gas (`S = 37.3 / 43.2` vs. `64.6 / 67.4` for unscreened framework-only `Pol-3Site`).
+- **Level 2 Full Many-Body SCF Polarization on GPU**: Block-collective shared-memory Applequist-Thole SCF solver (`polarization: "scf"`) agrees with exact `36×36` Python matrix inversion to **`1.83e-08 K`** and **`1.13e-11 e·Å`**, capturing many-body mutual depolarization in `15:85` CO₂/N₂ flue gas (`S = 37.3 / 43.2` vs. `64.6 / 67.4` for unscreened framework-only `Pol-3Site`).
 - **Zero-Drift Statistical Mechanics**: Full double-precision shared-memory state with periodic full-box energy recomputation keeps maximum energy drift at **`2.0e-09 – 1.0e-08 K`** (`NonPol / Mercado / Pol-3Site`) and **`≤ 7.25e-07 K`** (`Pol-SCF`), with detailed balance `|acc_ins - acc_del| ≤ 0.003`.
 - **Self-Contained Unified JSON/CLI Engine**: Single CUDA binary ([`mof_gcmc_cli.exe`](src/main_cli.cu)) supporting generic CIF frameworks (`19` MOF elements), UFF / Mercado 2016 DFT-FF, binary Identity Swap, Peng–Robinson EOS, automated verification suites, and 5 publication-ready 300 DPI figures.
 
-> **Scope & Current Limitations**: Designed for **rigid MOF frameworks and small rigid adsorbates** ($\text{CO}_2/\text{N}_2/\text{CH}_4$; no CBMC flexible chains or framework breathing). While `NonPol` / `Pol-3Site` achieve sub-second to ~100 s sweeps, `Pol-SCF` solves $O(N^2)$ FP64 iterations per trial move (`791 s` for `12 × 120k` $\text{CO}_2$ steps on RTX 5070) and pairs induction with standard TraPPE/UFF parameters (non-negligible induction double counting unless coupled with dedicated polarizable parameters such as PHAST/mBSSP).
+> **Scope & Current Limitations**: Designed for **rigid MOF frameworks and small rigid adsorbates** (CO₂/N₂/CH₄; no CBMC flexible chains or framework breathing). While `NonPol` / `Pol-3Site` achieve sub-second to ~100 s sweeps, `Pol-SCF` solves $O(N^2)$ FP64 iterations per trial move (`791 s` for `12 × 120k` CO₂ steps on RTX 5070) and pairs induction with standard TraPPE/UFF parameters (non-negligible induction double counting unless coupled with dedicated polarizable parameters such as PHAST/mBSSP).
 
 ---
 
@@ -29,41 +29,41 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 
 - **[Done] Step 1 — GPU Rigid 3D Framework Grid + Batched GCMC Baseline (UFF + REPEAT + TraPPE)**
   - Precomputes 6 periodic 3D unit-cell grids (`U_lj_C`, `U_lj_O`, `Phi_elec`, `Ex`, `Ey`, `Ez`) via exact 12-6 LJ + 3D Ewald summation on GPU, runs 32 independent pressure/replica boxes concurrently (`128` threads/box, shared-memory molecules, exact hexagonal MIC, Marsaglia/Rodrigues rotation, DSF electrostatics, Peng–Robinson fugacity), and verifies detailed balance + replica convergence.
-- **[Done] Step 2 (Branch B1) — Explicit $\text{Mg}^{2+}$ Electric-Field Polarization + Thole Coupling**
-  - Activates the precomputed `(Ex, Ey, Ez)` 3D Ewald electric-field grids with anisotropic $\text{CO}_2$ polarizability ($\alpha_\parallel = 4.05\ \text{\AA}^3,\ \alpha_\perp = 1.95\ \text{\AA}^3,\ \bar{\alpha} = 2.65\ \text{\AA}^3$), comparing COM polarization (`Pol-COM`) and 3-site distributed polarization (`Pol-3Site`, $w_C = 0.40, w_O = 0.30$) with Thole-damped induced-dipole–induced-dipole guest interactions ($a = 2.1304$).
-- **[Done] Step 3 — Competitive Multi-Component Co-Adsorption ($\text{CO}_2/\text{N}_2$ & $\text{CO}_2/\text{CH}_4$)**
-  - Extends the GPU 3D-grid + anisotropic polarization engine (`build\mof_gcmc_mix.exe`) with TraPPE $\text{N}_2$ (`3`-site) / $\text{CH}_4$ (`1`-site UA), binary Peng–Robinson EOS mixture fugacities, Thole-damped cross-species induced dipoles, and symmetric **Identity Swap (`A <-> B`)** moves verified via both an analytical ideal-gas Poisson test and a real-pore `Swap-ON` vs. `Swap-OFF` check.
+- **[Done] Step 2 (Branch B1) — Explicit Mg²⁺ Electric-Field Polarization + Thole Coupling**
+  - Activates the precomputed `(Ex, Ey, Ez)` 3D Ewald electric-field grids with anisotropic CO₂ polarizability ($\alpha_\parallel = 4.05\ \text{Å}^3,\ \alpha_\perp = 1.95\ \text{Å}^3,\ \bar{\alpha} = 2.65\ \text{Å}^3$), comparing COM polarization (`Pol-COM`) and 3-site distributed polarization (`Pol-3Site`, $w_C = 0.40, w_O = 0.30$) with Thole-damped induced-dipole–induced-dipole guest interactions ($a = 2.1304$).
+- **[Done] Step 3 — Competitive Multi-Component Co-Adsorption (CO₂/N₂ & CO₂/CH₄)**
+  - Extends the GPU 3D-grid + anisotropic polarization engine (`build\mof_gcmc_mix.exe`) with TraPPE N₂ (`3`-site) / CH₄ (`1`-site UA), binary Peng–Robinson EOS mixture fugacities, Thole-damped cross-species induced dipoles, and symmetric **Identity Swap (`A <-> B`)** moves verified via both an analytical ideal-gas Poisson test and a real-pore `Swap-ON` vs. `Swap-OFF` check.
 - **[Done] Step 4 (Publication-Grade Credibility Upgrades) — `0.10 Å` Zero-Drift Engine, Official Mercado 2016 DFT-FF & Native RASPA3 3.0.29 Back-to-Back Verification**
-  - Upgrades numerical precision (`256x256x72` `0.10 Å` grids, `double` shared-memory coordinates, periodic full-box recomputation every `50k` steps, `4 × 1.0M` replicas = `64M` steps/sweep in `build\mof_gcmc_v2.exe`), integrates the official **Mercado et al. (*J. Phys. Chem. C* 2016, 120, 12590)** DFT-derived Buckingham/LJ + EPM2 force field, and verifies the UFF baseline head-to-head against native **RASPA3 (`3.0.29`)** exact Ewald simulations on Windows (`623×` GPU speedup).
+  - Upgrades numerical precision (`256x256x72` `0.10 Å` grids, `double` shared-memory coordinates, periodic full-box recomputation every `50k` steps, `4 × 1.0M` replicas = `64M` steps/sweep in `build\mof_gcmc_v2.exe`), integrates the official **Mercado et al. (*J. Phys. Chem. C* 2016, 120, 12590)** DFT-derived Buckingham/LJ + EPM2 force field, and verifies the UFF baseline head-to-head against native **RASPA3 (`3.0.29`)** on Windows (`153.2×` vs. Tricubic Grid, `492.6×` vs. Exact Ewald).
 
 ---
 
 ## Step 1 Physical & Numerical Verification (RTX 5070)
 
 ### 1. Crystal Structure & Symmetry ([`data/MgMOF-74.cif`](data/MgMOF-74.cif))
-- **Unit Cell (`R -3`, hexagonal setting)**: $a = b = 26.136\ \text{\AA},\ c = 6.942\ \text{\AA},\ \alpha = \beta = 90^\circ,\ \gamma = 120^\circ$
+- **Unit Cell (`R -3`, hexagonal setting)**: $a = b = 26.136\ \text{Å},\ c = 6.942\ \text{Å},\ \alpha = \beta = 90^\circ,\ \gamma = 120^\circ$
 - **Expanded Unit Cell (`1x1x1`)**: `162` atoms (`18 Mg`, `54 O`, `72 C`, `18 H`), REPEAT charge sum = `0.000000 e`, molar mass = `2184.372 g/mol`
 - **Minimum Bond Lengths**: `Mg–O = 1.948 Å`, `C–O = 1.337 Å`, `C–C = 1.420 Å`, `C–H = 1.123 Å`
-- **GCMC Supercell (`1x1x4`)**: $V = 16,426.82\ \text{\AA}^3$, mass = `8737.488 g/mol`, minimum perpendicular width = `22.634 Å > 2 * 11.0 Å`
+- **GCMC Supercell (`1x1x4`)**: $V = 16,426.82\ \text{Å}^3$, mass = `8737.488 g/mol`, minimum perpendicular width = `22.634 Å > 2 * 11.0 Å`
 - **Exact Hexagonal MIC**: `0 / 10,000` mismatches against `3x3x3` brute-force search (verified in both C++ and Python)
 
 ### 2. GPU 3D Grid Precomputation (`128 x 128 x 36`)
-- **Build Time**: **`356.79 ms`** for all 6 grids (`U_lj_C`, `U_lj_O`, `Phi_elec`, `Ex`, `Ey`, `Ez`, Ewald $\alpha = 0.30\ \text{\AA}^{-1}, r_{\text{cut}} = 11.0\ \text{\AA}$)
-- **Independent Verification** (vs. direct Ewald $\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$ across `1,000` pore points):
+- **Build Time**: **`356.79 ms`** for all 6 grids (`U_lj_C`, `U_lj_O`, `Phi_elec`, `Ex`, `Ey`, `Ez`, Ewald $\alpha = 0.30\ \text{Å}^{-1}, r_{\text{cut}} = 11.0\ \text{Å}$)
+- **Independent Verification** (vs. direct Ewald $\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$ across `1,000` pore points):
   - `MAE(U_lj_C) = 3.491 K`, `MAE(U_lj_O) = 10.482 K`, `MAE(Phi) = 4.4038 K/e`
 
-### 3. Batched GCMC Performance & 298 K $\text{CO}_2$ Isotherm
+### 3. Batched GCMC Performance & 298 K CO₂ Isotherm
 - **Configuration**: `32` boxes (`16` pressures `0.005–20.0 bar` × `2` independent replicas), `100k` equilibration + `200k` production steps/box (**`9.6M` total MC steps**)
 - **Runtime**: **`13.906 s`** (`0.69 M MC-steps/sec`)
 - **Key Isotherm Results (UFF + REPEAT + TraPPE baseline)**:
-  - `0.150 bar` ($\phi = 0.9992$): **`1.1724 ± 0.0301 mmol/g`**, $Q_{\text{st}} = \mathbf{26.07\ \text{kJ/mol}}$ (`acc_ins = acc_del = 0.09`)
-  - `1.000 bar` ($\phi = 0.9945$): **`6.7019 ± 0.0769 mmol/g`**, $Q_{\text{st}} = \mathbf{27.49\ \text{kJ/mol}}$ (`acc_ins = acc_del = 0.05`)
-  - `20.000 bar` ($\phi = 0.8934$): **`14.7214 ± 0.1619 mmol/g`**, $Q_{\text{st}} = \mathbf{36.46\ \text{kJ/mol}}$
+  - `0.150 bar` ($\phi = 0.9992$): **`1.1724 ± 0.0301 mmol/g`**, $Q_{\text{st}} = 26.07\ \text{kJ/mol}$ (`acc_ins = acc_del = 0.09`)
+  - `1.000 bar` ($\phi = 0.9945$): **`6.7019 ± 0.0769 mmol/g`**, $Q_{\text{st}} = 27.49\ \text{kJ/mol}$ (`acc_ins = acc_del = 0.05`)
+  - `20.000 bar` ($\phi = 0.8934$): **`14.7214 ± 0.1619 mmol/g`**, $Q_{\text{st}} = 36.46\ \text{kJ/mol}$
 - **Physical Diagnostic**: Just as established in the MOF literature, generic non-polarizable UFF+REPEAT underpredicts the 298 K, `0.15 bar` uptake (`1.17` vs experimental `~3.6–4.6 mmol/g`) and zero-loading heat (`~25.6` vs `~40–47 kJ/mol`), directly motivating **Step 2 (Branch B1)** polarization.
 
 ---
 
-## Step 2 (Branch B1): Anisotropic $\text{Mg}^{2+}$ Electric-Field Polarization (RTX 5070)
+## Step 2 (Branch B1): Anisotropic Mg²⁺ Electric-Field Polarization (RTX 5070)
 
 ![Step 2 Mg-MOF-74 Polarization Comparison](assets/step2_mof74_pol_comparison.png)
 
@@ -79,16 +79,16 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 | **`Pol-COM`** | `16.627 s` | `1.5406 ± 0.0125` | **`7.6421 ± 0.0038`** | `14.9957 ± 0.15` | `26.5–27.6` | `-0.67 → -0.45` |
 | **`Pol-3Site` (Step 2 B1)** | `18.014 s` | **`2.3890 ± 0.0392`** (`+104%`) | `9.1446 ± 0.1418` | `15.3591 ± 0.43` | **`29.2–31.4`** | **`-2.50 → -1.58`** |
 
-- **Key Physical Insight**: Distributing polarizability onto the 3 molecular sites (`Pol-3Site`) captures the steep $r^{-4}$ electric-field gradient right at the coordinating $\text{O}_{\text{CO}_2}\text{–Mg}^{2+}$ contact—boosting polarization energy **3.7×** (`-2.50` vs. `-0.67 kJ/mol` for `Pol-COM`), doubling `0.15 bar` uptake (`1.17 → 2.39 mmol/g`), and demonstrating OMS saturation as `-U_pol/N` drops from `2.50` (low loading) to `1.58 kJ/mol` (`20 bar`). Detailed balance holds across every pressure (`max|acc_ins - acc_del| <= 0.0007`). The remaining ~10 kJ/mol gap vs. experimental `40–47 kJ/mol` reflects short-range orbital charge transfer/exchange beyond generic UFF `sigma_Mg` (bridged by DFT-derived OMS parameters or MLIP Nested MC).
+- **Key Physical Insight**: Distributing polarizability onto the 3 molecular sites (`Pol-3Site`) captures the steep $r^{-4}$ electric-field gradient right at the coordinating `O(CO₂)–Mg²⁺` contact—boosting polarization energy **3.7×** (`-2.50` vs. `-0.67 kJ/mol` for `Pol-COM`), doubling `0.15 bar` uptake (`1.17 → 2.39 mmol/g`), and demonstrating OMS saturation as `-U_pol/N` drops from `2.50` (low loading) to `1.58 kJ/mol` (`20 bar`). Detailed balance holds across every pressure (`max|acc_ins - acc_del| <= 0.0007`). The remaining ~10 kJ/mol gap vs. experimental `40–47 kJ/mol` reflects short-range orbital charge transfer/exchange beyond generic UFF `sigma_Mg` (bridged by DFT-derived OMS parameters or MLIP Nested MC).
 
 ---
 
-## Step 3: Competitive Multi-Component Co-Adsorption ($\text{CO}_2/\text{N}_2$ & $\text{CO}_2/\text{CH}_4$ @ 298 K)
+## Step 3: Competitive Multi-Component Co-Adsorption (CO₂/N₂ & CO₂/CH₄ @ 298 K)
 
 ![Step 3 Mg-MOF-74 Binary Co-Adsorption](assets/step3_mof74_binary_coadsorption.png)
 
 ### 1. Multi-Species Grids & Identity-Swap Detailed Balance
-- **8 Precomputed Grids (`128x128x36`)**: Built in **`410.76 ms`** (`U_lj[C_CO2, O_CO2, N_N2, CH4]`, `Phi_elec`, `Ex`, `Ey`, `Ez`); `MAE` vs. direct reference ($\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$, `1,000` pore points) = `0.844 / 2.493 / 2.974 / 14.415 K` (LJ), `3.9038 K/e` (`Phi`), `7.535 K/(e·Å)` (`|E|`).
+- **8 Precomputed Grids (`128x128x36`)**: Built in **`410.76 ms`** (`U_lj[C_CO2, O_CO2, N_N2, CH4]`, `Phi_elec`, `Ex`, `Ey`, `Ez`); `MAE` vs. direct reference ($\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$, `1,000` pore points) = `0.844 / 2.493 / 2.974 / 14.415 K` (LJ), `3.9038 K/e` (`Phi`), `7.535 K/(e·Å)` (`|E|`).
 - **Test A (Ideal-Gas Identity Swap)**: `<N0> = 11.9827` (exact `12.0`), `<N1> = 39.8378` (exact `40.0`).
 - **Test B (`1.0 bar` Flue Gas `Pol-3Site` Swap Consistency)**: `Swap-ON` (`CO2 = 2.5498`, `N2 = 0.2774 mmol/g`) vs. `Swap-OFF` (`CO2 = 2.4995`, `N2 = 0.2772 mmol/g`).
 
@@ -96,10 +96,10 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 
 | Mixture (`298 K`) | Pressure | `NonPol` Uptake (mmol/g) | `NonPol` $S$ | `Pol-3Site` Uptake (mmol/g) | `Pol-3Site` $S$ | Selectivity Gain |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Flue Gas $\text{CO}_2/\text{N}_2$ (`15:85`)** | `1.0 bar` | `1.159 / 0.254` | `25.8` | **`2.751 / 0.276`** | **`56.4`** | **`2.19×`** |
-| **Flue Gas $\text{CO}_2/\text{N}_2$ (`15:85`)** | `2.0 bar` | `2.290 / 0.471` | `27.5` | **`4.648 / 0.450`** | **`58.6`** | **`2.13×`** |
-| **Biogas $\text{CO}_2/\text{CH}_4$ (`50:50`)** | `0.5 bar` | `1.967 / 0.196` | `10.0` | **`3.995 / 0.201`** | **`19.9`** | **`1.99×`** |
-| **Biogas $\text{CO}_2/\text{CH}_4$ (`50:50`)** | `1.0 bar` | `3.765 / 0.363` | `10.4` | **`6.296 / 0.340`** | **`18.5`** | **`1.78×`** |
+| **Flue Gas CO₂/N₂ (`15:85`)** | `1.0 bar` | `1.159 / 0.254` | `25.8` | **`2.751 / 0.276`** | **`56.4`** | **`2.19×`** |
+| **Flue Gas CO₂/N₂ (`15:85`)** | `2.0 bar` | `2.290 / 0.471` | `27.5` | **`4.648 / 0.450`** | **`58.6`** | **`2.13×`** |
+| **Biogas CO₂/CH₄ (`50:50`)** | `0.5 bar` | `1.967 / 0.196` | `10.0` | **`3.995 / 0.201`** | **`19.9`** | **`1.99×`** |
+| **Biogas CO₂/CH₄ (`50:50`)** | `1.0 bar` | `3.765 / 0.363` | `10.4` | **`6.296 / 0.340`** | **`18.5`** | **`1.78×`** |
 
 ---
 
@@ -111,12 +111,12 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 - **Grid & Interpolation Refinement (`128×128×36` Trilinear → `256×256×72` Trilinear → `256×256×72` 4-pt Lagrange Tricubic)**:
   - Grid build time = **`3.03 s`** (UFF, 6 grids = `113 MB` VRAM) — **`38.9×`** faster than single-core CPU RASPA3's `117.98 s` (`151×151×46`).
   - Near-field `Mg–O` radial MAE (`2.3–3.8 Å`) drops **`290.3×`**: **`190.46 K`** (`128`-Trilin) → **`12.53 K`** (`256`-Trilin) → **`0.656 K`** (`256`-Tricubic); Mercado 2016 drops `4.99 K → 0.092 K`.
-  - Pore MAE (`1,000` pts vs. direct Ewald $\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$): `U_lj_C` drops `0.793 K → 0.061 K`, `U_lj_O` drops `2.387 K → 0.148 K` (Mercado: `C = 0.055 K, O = 0.035 K`).
+  - Pore MAE (`1,000` pts vs. direct Ewald $\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$): `U_lj_C` drops `0.793 K → 0.061 K`, `U_lj_O` drops `2.387 K → 0.148 K` (Mercado: `C = 0.055 K, O = 0.035 K`).
 - **Zero-Drift Double Precision**: Guest coordinates and energies stay in `double` shared memory with full fresh `u_fw + u_gg` periodic recomputation every `50,000` steps — maximum drift across all `128` boxes (`64M` steps/FF) is **`5.879e-09 K`** (UFF) and **`1.024e-08 K`** (Mercado 2016), with detailed balance `max|acc_ins - acc_del| <= 0.000253`.
 
 ### 2. Upgrade 2 — Official Mercado 2016 DFT-Derived Buckingham/LJ + EPM2 Force Field
-- Integrated directly from [`data/mercado2016/`](data/mercado2016/) (`rociomer/DFT-derived-force-field`, *J. Phys. Chem. C* 2016, 120, 12590; `Mg_O_CO2` Buckingham potential with exact turnover clamp + shifted `r_cut = 11.0 Å` + Mercado partial charges + EPM2 $\text{CO}_2$).
-- **Low-Pressure Open-Metal Physics (`0.15 bar`, 298 K)**: Low-loading $Q_{\text{st}}$ rises from `26.94 kJ/mol` (UFF) to **`35.65 kJ/mol`**, ideal-crystal uptake rises from `1.43` to **`7.15 mmol/g`** (`11.11 mmol/g` at `1.0 bar`), and the radial $\text{Mg}^{2+}\text{–O}_{\text{CO}_2}$ peak contracts **`-0.25 Å`** inward (`2.775 Å → 2.525 Å`), illustrating both sharper metal coordination and why idealized rigid 100%-accessible crystals overshoot defect-limited experiments (`3.6–4.6 mmol/g @ 0.15 bar`, `7.5–8.6 mmol/g @ 1.0 bar`; see `×0.80` effective-site curve).
+- Integrated directly from [`data/mercado2016/`](data/mercado2016/) (`rociomer/DFT-derived-force-field`, *J. Phys. Chem. C* 2016, 120, 12590; `Mg_O_CO2` Buckingham potential with exact turnover clamp + shifted `r_cut = 11.0 Å` + Mercado partial charges + EPM2 CO₂).
+- **Low-Pressure Open-Metal Physics (`0.15 bar`, 298 K)**: Low-loading $Q_{\text{st}}$ rises from `26.94 kJ/mol` (UFF) to **`35.65 kJ/mol`**, ideal-crystal uptake rises from `1.43` to **`7.15 mmol/g`** (`11.11 mmol/g` at `1.0 bar`), and the radial `Mg²⁺–O(CO₂)` peak contracts **`-0.25 Å`** inward (`2.775 Å → 2.525 Å`), illustrating both sharper metal coordination and why idealized rigid 100%-accessible crystals overshoot defect-limited experiments (`3.6–4.6 mmol/g @ 0.15 bar`, `7.5–8.6 mmol/g @ 1.0 bar`; see `×0.80` effective-site curve).
 
 ### 3. Upgrade 3 — Dual Head-to-Head Verification vs. Native `RASPA3 3.0.29` (Exact Ewald & Tricubic Grid)
 
@@ -143,14 +143,18 @@ Converges the `O(h⁴)` 3D tricubic interpolation, Mercado 2016 DFT-FF / UFF sup
 
 | JSON Preset (`0.10 Å` Tricubic, 4 Replicas) | Condition | Verified Output Highlights | Max Drift ($T$-full recompute) |
 | :--- | :---: | :--- | :---: |
-| [`mg_mof74_co2_298K_uff.json`](configs/mg_mof74_co2_298K_uff.json) | `298 K`, UFF, $\text{CO}_2$ | `1.3987 / 7.3723 / 13.2996 mmol/g` (`+0.25% / -2.10% / +0.45%` vs. RASPA3 Grid) | `4.66e-09 K` |
-| [`mg_mof74_co2_298K_mercado.json`](configs/mg_mof74_co2_298K_mercado.json) | `298 K`, Mercado 2016, $\text{CO}_2$ | `7.0587 / 11.1077 / 14.9680 mmol/g` ($Q_{\text{st}} = 35.63\ \text{kJ/mol}$ @ `0.15 bar`) | `4.37e-09 K` |
-| [`mg_mof74_co2_313K_psa.json`](configs/mg_mof74_co2_313K_psa.json) | `313 K`, Mercado 2016, $\text{CO}_2$ | `5.0424 / 9.7915 / 13.3012 mmol/g` (clean `-2.02 / -1.32 / -1.67` thermal swing) | `4.13e-09 K` |
-| [`mg_mof74_fluegas_298K_pol3site.json`](configs/mg_mof74_fluegas_298K_pol3site.json) | `298 K`, `Pol-3Site`, $\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 60.39` (`0.5 bar`), **`64.58`** (`1.0 bar`), **`67.38`** (`2.0 bar`); `double` SMEM dipoles | `2.04e-09 K` |
-| [`mg_mof74_co2_298K_scf.json`](configs/mg_mof74_co2_298K_scf.json) | `298 K`, `Pol-SCF`, $\text{CO}_2$ | `2.1322 / 8.3536 / 12.8982 mmol/g` (`+52.4%` @ `0.15 bar` vs. NonPol); mean `16.63` SCF iters | `7.25e-07 K` |
-| [`mg_mof74_fluegas_298K_scf.json`](configs/mg_mof74_fluegas_298K_scf.json) | `298 K`, `Pol-SCF`, $\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 37.28` (`1.0 bar`), **`43.24`** (`2.0 bar`) with mutual depolarization; `14.78` iters | `2.69e-07 K` |
+| [`mg_mof74_co2_298K_uff.json`](configs/mg_mof74_co2_298K_uff.json) | `298 K`, UFF, CO₂ | `1.3987 / 7.3723 / 13.2996 mmol/g` (`+0.25% / -2.10% / +0.45%` vs. RASPA3 Grid) | `4.66e-09 K` |
+| [`mg_mof74_co2_298K_mercado.json`](configs/mg_mof74_co2_298K_mercado.json) | `298 K`, Mercado 2016, CO₂ | `7.0587 / 11.1077 / 14.9680 mmol/g` ($Q_{\text{st}} = 35.63\ \text{kJ/mol}$ @ `0.15 bar`) | `4.37e-09 K` |
+| [`mg_mof74_co2_313K_psa.json`](configs/mg_mof74_co2_313K_psa.json) | `313 K`, Mercado 2016, CO₂ | `5.0424 / 9.7915 / 13.3012 mmol/g` (clean `-2.02 / -1.32 / -1.67` thermal swing) | `4.13e-09 K` |
+| [`mg_mof74_fluegas_298K_pol3site.json`](configs/mg_mof74_fluegas_298K_pol3site.json) | `298 K`, `Pol-3Site`, CO₂/N₂ (`15:85`) | `S(CO2/N2) = 60.39` (`0.5 bar`), **`64.58`** (`1.0 bar`), **`67.38`** (`2.0 bar`); `double` SMEM dipoles | `2.04e-09 K` |
+| [`mg_mof74_co2_298K_scf.json`](configs/mg_mof74_co2_298K_scf.json) | `298 K`, `Pol-SCF`, CO₂ | `2.1322 / 8.3536 / 12.8982 mmol/g` (`+52.4%` @ `0.15 bar` vs. NonPol); mean `16.63` SCF iters | `7.25e-07 K` |
+| [`mg_mof74_fluegas_298K_scf.json`](configs/mg_mof74_fluegas_298K_scf.json) | `298 K`, `Pol-SCF`, CO₂/N₂ (`15:85`) | `S(CO2/N2) = 37.28` (`1.0 bar`), **`43.24`** (`2.0 bar`) with mutual depolarization; `14.78` iters | `2.69e-07 K` |
 
-> **Level 2 Many-Body `Pol-SCF` (`polarization: "scf"`)**: Block-collective shared-memory Applequist-Thole SCF solver (`SCF_TOL = 1e-10 e·Å`, $O(N)$ incremental permanent field $\mathbf{E}_0$ update, warm-started induced dipoles, pre-SCF repulsion filter, and `s_scf_conv` convergence guard) solving $\boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i(\mathbf{E}_i^{\text{fw}} + \sum_{j\neq i}\mathbf{E}_{j\to i}^{\text{DSF,perm}} + \sum_{j\neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j)$ across every trial move (`1.83e-08 K` & `1.13e-11 e·Å` match against exact `36×36` Python matrix inversion in `--test-scf`).
+> **Level 2 Many-Body `Pol-SCF` (`polarization: "scf"`)**: Block-collective shared-memory Applequist-Thole SCF solver (`SCF_TOL = 1e-10 e·Å`, $O(N)$ incremental permanent field $\mathbf{E}_0$ update, warm-started induced dipoles, pre-SCF repulsion filter, and `s_scf_conv` convergence guard) solving the coupled dipole system across every trial move (`1.83e-08 K` & `1.13e-11 e·Å` match against exact `36×36` Python matrix inversion in `--test-scf`):
+
+$$
+\boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i\left(\mathbf{E}_i^{\text{fw}} + \sum_{j \neq i}\mathbf{E}_{j \to i}^{\text{DSF,perm}} + \sum_{j \neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j\right),\qquad U_{\text{pol}}^{\text{SCF}} = -\frac{1}{2}\sum_i \boldsymbol{\mu}_i \cdot \mathbf{E}_i^0
+$$
 
 ![Level 2 Pol-SCF Visualization](assets/step5_level2_scf_polarization.png)
 

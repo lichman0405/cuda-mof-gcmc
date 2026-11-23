@@ -7,7 +7,7 @@
 ![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
 
-面向 **NVIDIA GeForce RTX 5070**（`sm_120`）从零构建的纯 CUDA 金属有机框架（MOF）气体吸附巨正则蒙特卡洛（GCMC）引擎，核心聚焦开放金属位点（OMS）的物理吸附建模（典型基准体系：**Mg-MOF-74 / $\text{Mg}_2(\text{dobdc})$ 吸附 $\text{CO}_2$**）。
+面向 **NVIDIA GeForce RTX 5070**（`sm_120`）从零构建的纯 CUDA 金属有机框架（MOF）气体吸附巨正则蒙特卡洛（GCMC）引擎，核心聚焦开放金属位点（OMS）的物理吸附建模（典型基准体系：**Mg-MOF-74 / Mg₂(dobdc) 吸附 CO₂**）。
 
 ![Step 4 Mg-MOF-74 Tricubic Validation](assets/step4_validated_mercado_raspa3.png)
 
@@ -17,11 +17,11 @@
 
 - **与工业标准 `RASPA3 (3.0.29)` 统计误差内逐点对齐**：在 `Mg-MOF-74`（`298 K`, UFF+REPEAT）基准上，`0.10 Å` `O(h⁴)` 三维 Tricubic GPU 内核与原生 RASPA3 网格版在 `0.15 / 1.0 / 5.0 bar` 偏差仅 **`+2.32% / +1.39% / -0.41%`**（全部 **`≤ 0.54σ`**，$\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$），近程 `Mg–O` 径向插值误差较三线性压缩 **`290.3×`**（`190.46 K → 0.656 K`，Mercado 2016 低至 `0.092 K`）。
 - **单卡百倍级真实加速（RTX 5070）**：`6,400 万` 步耗时 `106.9 s`（**`598,669 MC-steps/s`**），对比同算法单核 RASPA3 Tricubic 网格版（`3,908 steps/s`）加速 **`153.2×`**，对比精确 Ewald（`1,215 steps/s`）加速 **`492.6×`**，三维网格构建加速 **`38.9×`**（`3.03 s` vs `117.98 s`）。
-- **GPU 原生 Level 2 全自洽多体极化（`Pol-SCF`）**：Block 级共享内存 Applequist-Thole 自洽求解器与 `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**，在 `15:85` $\text{CO}_2/\text{N}_2$ 烟道气中清晰捕捉客体间多体相互退极化屏蔽效应（选择性由单骨架场 `Pol-3Site` 的 `64.6 / 67.4` 物理回落至 `37.3 / 43.2`）。
+- **GPU 原生 Level 2 全自洽多体极化（`Pol-SCF`）**：Block 级共享内存 Applequist-Thole 自洽求解器与 `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**，在 `15:85` CO₂/N₂ 烟道气中清晰捕捉客体间多体相互退极化屏蔽效应（选择性由单骨架场 `Pol-3Site` 的 `64.6 / 67.4` 物理回落至 `37.3 / 43.2`）。
 - **全双精度零能量漂移**：全程 `double` 共享内存状态 + 周期全盒重算，常规/一阶极化最大能量漂移低至 **`2.0e-09 ~ 1.0e-08 K`**，全自洽多体极化 **`≤ 7.25e-07 K`**，全工况细致平衡偏差 `|acc_ins - acc_del| ≤ 0.003`。
 - **零依赖统一 JSON/CLI 通用引擎**：单一可执行文件（[`mof_gcmc_cli.exe`](src/main_cli.cu)）集成通用 CIF 解析（`19` 种 MOF 元素）、UFF / Mercado 2016 第一性原理力场、二元 Identity Swap、Peng–Robinson 逸度、自动化检验套件与 5 张 300 DPI 可视化图表。
 
-> **适用边界与当前局限**：当前引擎面向**刚性 MOF 骨架与刚性小分子**（$\text{CO}_2/\text{N}_2/\text{CH}_4$，暂不支持柔性长链 CBMC 与骨架呼吸效应）。`NonPol` 与 `Pol-3Site` 可在秒级至百秒级完成数千万步扫描；`Pol-SCF` 每步需在 FP64 下求解 $O(N^2)$ 自洽迭代，算力开销显著更高（`12 × 120k` 步纯 $\text{CO}_2$ 耗时 `791 s`），且当前沿用标准 TraPPE/UFF 参数叠加极化，定量预测需配合去双重计数可极化力场（如 PHAST / mBSSP）。
+> **适用边界与当前局限**：当前引擎面向**刚性 MOF 骨架与刚性小分子**（CO₂/N₂/CH₄，暂不支持柔性长链 CBMC 与骨架呼吸效应）。`NonPol` 与 `Pol-3Site` 可在秒级至百秒级完成数千万步扫描；`Pol-SCF` 每步需在 FP64 下求解 $O(N^2)$ 自洽迭代，算力开销显著更高（`12 × 120k` 步纯 CO₂ 耗时 `791 s`），且当前沿用标准 TraPPE/UFF 参数叠加极化，定量预测需配合去双重计数可极化力场（如 PHAST / mBSSP）。
 
 ---
 
@@ -29,47 +29,47 @@
 
 - **[已完成] 第一步：纯 CUDA 刚性 3D 骨架网格 + Batched GCMC 底座（UFF + REPEAT + TraPPE）**
   - 在 GPU 上一次性预计算 6 张周期 3D 单胞网格（`U_lj_C`、`U_lj_O`、`Phi_elec`、`Ex`、`Ey`、`Ez`；包含精确 12-6 LJ 与 3D Ewald 求和），随后以单 Block 128 线程并行跑 32 个独立压力/副本盒子（共享内存存客体分子、精确六方 MIC、Marsaglia/Rodrigues 球面无偏旋转、DSF 静电、Peng–Robinson 逸度换算），并校验细致平衡与副本一致性。
-- **[已完成] 第二步（支线 B1）：$\text{Mg}^{2+}$ 开放金属位点显式静电场极化 + Thole 诱导偶极耦合**
-  - 正式激活预计算的 `(Ex, Ey, Ez)` 三维电场网格与 $\text{CO}_2$ 各向异性极化率张量（$\alpha_\parallel = 4.05\ \text{\AA}^3,\ \alpha_\perp = 1.95\ \text{\AA}^3,\ \bar{\alpha} = 2.65\ \text{\AA}^3$），对比质心极化（`Pol-COM`）与三点分布极化（`Pol-3Site`，$w_C = 0.40, w_O = 0.30$）及客体间 Thole 阻尼诱导偶极作用（$a = 2.1304$）。
-- **[已完成] 第三步：多组分竞争共吸附（$\text{CO}_2/\text{N}_2$ 烟道气 & $\text{CO}_2/\text{CH}_4$ 沼气）**
-  - 将 GPU 3D 网格与各向异性极化框架扩展为独立多组分求解器 [`build\mof_gcmc_mix.exe`](src/main_mix.cu)，内置 TraPPE $\text{N}_2$（3 位点）与 $\text{CH}_4$（单点 UA）力场、二元 Peng–Robinson 混合逸度、跨组分 Thole 阻尼诱导偶极作用以及严格满足细致平衡的**身份交换（Identity Swap）**蒙卡动作（通过理想气体解析验证与 `Swap-ON` vs `Swap-OFF` 孔道一致性双检）。
+- **[已完成] 第二步（支线 B1）：Mg²⁺ 开放金属位点显式静电场极化 + Thole 诱导偶极耦合**
+  - 正式激活预计算的 `(Ex, Ey, Ez)` 三维电场网格与 CO₂ 各向异性极化率张量（$\alpha_\parallel = 4.05\ \text{Å}^3,\ \alpha_\perp = 1.95\ \text{Å}^3,\ \bar{\alpha} = 2.65\ \text{Å}^3$），对比质心极化（`Pol-COM`）与三点分布极化（`Pol-3Site`，$w_C = 0.40, w_O = 0.30$）及客体间 Thole 阻尼诱导偶极作用（$a = 2.1304$）。
+- **[已完成] 第三步：多组分竞争共吸附（CO₂/N₂ 烟道气 & CO₂/CH₄ 沼气）**
+  - 将 GPU 3D 网格与各向异性极化框架扩展为独立多组分求解器 [`build\mof_gcmc_mix.exe`](src/main_mix.cu)，内置 TraPPE N₂（3 位点）与 CH₄（单点 UA）力场、二元 Peng–Robinson 混合逸度、跨组分 Thole 阻尼诱导偶极作用以及严格满足细致平衡的**身份交换（Identity Swap）**蒙卡动作（通过理想气体解析验证与 `Swap-ON` vs `Swap-OFF` 孔道一致性双检）。
 - **[已完成] 第四步（发表级可信度升级）：`0.10 Å` 零漂移高精度内核 + Mercado 2016 DFT 力场 + 原生 RASPA3 背靠背验证**
-  - 在独立高精度求解器 [`build\mof_gcmc_v2.exe`](src/main_v2.cu) 中实现 `256x256x72`（`0.10 Å`）加密网格、`double` 共享内存坐标、每 `50k` 步全盒周期重算（零能量漂移）与 `4 × 1.0M` 步采样，接入官方 **Mercado et al. (*J. Phys. Chem. C* 2016, 120, 12590)** DFT Buckingham/LJ + EPM2 力场，并与 Windows 原生 **RASPA3 (`3.0.29`)** 精确 Ewald 进行同条件背靠背校验（实现 **`623×`** 吞吐加速）。
+  - 在独立高精度求解器 [`build\mof_gcmc_v2.exe`](src/main_v2.cu) 中实现 `256x256x72`（`0.10 Å`）加密网格、`double` 共享内存坐标、每 `50k` 步全盒周期重算（零能量漂移）与 `4 × 1.0M` 步采样，接入官方 **Mercado et al. (*J. Phys. Chem. C* 2016, 120, 12590)** DFT Buckingham/LJ + EPM2 力场，并与 Windows 原生 **RASPA3 (`3.0.29`)** 进行同条件背靠背校验（对比 Tricubic 网格版加速 **`153.2×`**、对比精确 Ewald 加速 **`492.6×`**）。
 
 ---
 
 ## 第一步实测校验与物理结果（RTX 5070）
 
 ### 1. 晶体结构与几何校验（[`data/MgMOF-74.cif`](data/MgMOF-74.cif)）
-- **单胞晶格（`R -3` 六方晶系）**：$a = b = 26.136\ \text{\AA},\ c = 6.942\ \text{\AA},\ \alpha = \beta = 90^\circ,\ \gamma = 120^\circ$
+- **单胞晶格（`R -3` 六方晶系）**：$a = b = 26.136\ \text{Å},\ c = 6.942\ \text{Å},\ \alpha = \beta = 90^\circ,\ \gamma = 120^\circ$
 - **对称展开后单胞（`1x1x1`）**：`162` 原子（`18 Mg`、`54 O`、`72 C`、`18 H`），REPEAT 总电荷 = `0.000000 e`，单胞摩尔质量 = `2184.372 g/mol`
 - **最短成键距离自检**：`Mg–O = 1.948 Å`、`C–O = 1.337 Å`、`C–C = 1.420 Å`、`C–H = 1.123 Å`
-- **GCMC 超胞（`1x1x4`）**：$V = 16,426.82\ \text{\AA}^3$，质量 = `8737.488 g/mol`，最小垂直晶面间距 = `22.634 Å > 2 * 11.0 Å`
+- **GCMC 超胞（`1x1x4`）**：$V = 16,426.82\ \text{Å}^3$，质量 = `8737.488 g/mol`，最小垂直晶面间距 = `22.634 Å > 2 * 11.0 Å`
 - **精确六方最小镜像（MIC）**：与 `3x3x3` 暴力穷举对比 **`0 / 10,000` 偏差**（C++ 与 Python 双重通过）
 
 ### 2. GPU 三维势能与电场网格预计算（`128 x 128 x 36`）
-- **生成耗时**：**`356.79 ms`** 完成全部 6 张网格（`U_lj_C`、`U_lj_O`、`Phi_elec`、`Ex`、`Ey`、`Ez`，Ewald $\alpha = 0.30\ \text{\AA}^{-1},\ r_{\text{cut}} = 11.0\ \text{\AA}$）
-- **独立对拍验证**（与不同 Ewald 参数 $\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$ 在 `1,000` 个孔道随机采样点直接求和对比）：
+- **生成耗时**：**`356.79 ms`** 完成全部 6 张网格（`U_lj_C`、`U_lj_O`、`Phi_elec`、`Ex`、`Ey`、`Ez`，Ewald $\alpha = 0.30\ \text{Å}^{-1},\ r_{\text{cut}} = 11.0\ \text{Å}$）
+- **独立对拍验证**（与不同 Ewald 参数 $\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$ 在 `1,000` 个孔道随机采样点直接求和对比）：
   - `MAE(U_lj_C) = 3.491 K`、`MAE(U_lj_O) = 10.482 K`、`MAE(Phi) = 4.4038 K/e`
 
-### 3. Batched GCMC 性能与 298 K $\text{CO}_2$ 吸附等温线
+### 3. Batched GCMC 性能与 298 K CO₂ 吸附等温线
 - **运行配置**：`32` 个并行盒子（`0.005–20.0 bar` 共 `16` 个压力点 × `2` 独立副本），每盒 `100k` 平衡步 + `200k` 采样步（累计 **`960 万` MC 步**）
 - **GPU 总耗时**：**`13.906 s`**（`0.69 M MC-steps/sec`）
 - **典型压力点结果（UFF + REPEAT + TraPPE 基线）**：
-  - `0.150 bar`（$\phi = 0.9992$）：**`1.1724 ± 0.0301 mmol/g`**，$Q_{\text{st}} = \mathbf{26.07\ \text{kJ/mol}}$（`acc_ins = acc_del = 0.09`）
-  - `1.000 bar`（$\phi = 0.9945$）：**`6.7019 ± 0.0769 mmol/g`**，$Q_{\text{st}} = \mathbf{27.49\ \text{kJ/mol}}$（`acc_ins = acc_del = 0.05`）
-  - `20.000 bar`（$\phi = 0.8934$）：**`14.7214 ± 0.1619 mmol/g`**，$Q_{\text{st}} = \mathbf{36.46\ \text{kJ/mol}}$
+  - `0.150 bar`（$\phi = 0.9992$）：**`1.1724 ± 0.0301 mmol/g`**，$Q_{\text{st}} = 26.07\ \text{kJ/mol}$（`acc_ins = acc_del = 0.09`）
+  - `1.000 bar`（$\phi = 0.9945$）：**`6.7019 ± 0.0769 mmol/g`**，$Q_{\text{st}} = 27.49\ \text{kJ/mol}$（`acc_ins = acc_del = 0.05`）
+  - `20.000 bar`（$\phi = 0.8934$）：**`14.7214 ± 0.1619 mmol/g`**，$Q_{\text{st}} = 36.46\ \text{kJ/mol}$
 - **物理诊断**：与 MOF 经典文献完全一致，不带极化的通用 UFF+REPEAT 力场会显著低估 `0.15 bar` 低压吸附量（`1.17` vs 实验 `~3.6–4.6 mmol/g`）与零覆盖度吸附热（`~25.6` vs 实验 `~40–47 kJ/mol`）——这正是**第二步（支线 B1）引入极化效应**要解决的核心物理差异。
 
 ---
 
-## 第二步（支线 B1）：$\text{Mg}^{2+}$ 开放金属位点各向异性极化（RTX 5070）
+## 第二步（支线 B1）：Mg²⁺ 开放金属位点各向异性极化（RTX 5070）
 
 ![Step 2 Mg-MOF-74 Polarization Comparison](assets/step2_mof74_pol_comparison.png)
 
 ### 1. 三维电场有限差分与插值精度校验
-- **解析 Ewald 梯度校验**：在 `100` 个孔道点上对比解析 `E_direct` 与中心有限差分 $-\nabla\Phi_{\text{FD}}$（$h = 10^{-4}\ \text{\AA}$），误差低至 **`MAE = 2.21e-06 K/(e·Å)`**。
-- **三维插值精度**：`128x128x36` 网格 `(Ex, Ey, Ez)` 与独立 $\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$ 在 `1,000` 个孔道点对比得 **`MAE(|E|) = 8.909 K/(e·Å)`**。
+- **解析 Ewald 梯度校验**：在 `100` 个孔道点上对比解析 `E_direct` 与中心有限差分 $-\nabla\Phi_{\text{FD}}$（$h = 10^{-4}\ \text{Å}$），误差低至 **`MAE = 2.21e-06 K/(e·Å)`**。
+- **三维插值精度**：`128x128x36` 网格 `(Ex, Ey, Ez)` 与独立 $\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$ 在 `1,000` 个孔道点对比得 **`MAE(|E|) = 8.909 K/(e·Å)`**。
 
 ### 2. 三种模型同台实测对比（每组在 RTX 5070 上跑 `960 万` MC 步）
 
@@ -79,16 +79,16 @@
 | **`Pol-COM`（质心各向异性极化）** | `16.627 s` | `1.5406 ± 0.0125` | **`7.6421 ± 0.0038`** | `14.9957 ± 0.15` | `26.5–27.6` | `-0.67 → -0.45` |
 | **`Pol-3Site`（第二步 B1 分布极化）** | `18.014 s` | **`2.3890 ± 0.0392`** (`+104%`) | `9.1446 ± 0.1418` | `15.3591 ± 0.43` | **`29.2–31.4`** | **`-2.50 → -1.58`** |
 
-- **核心物理发现**：三点分布极化（`Pol-3Site`）能准确捕捉配位氧原子靠近 $\text{Mg}^{2+}$ 时的强烈 $r^{-4}$ 非均匀电场梯度，将平均极化能提升至质心模型的 **3.7 倍**（`-2.50` vs `-0.67 kJ/mol`），使 `0.15 bar` 烟道气分压下 $\text{CO}_2$ 吸附量直接翻倍（`1.17 → 2.39 mmol/g`），并在高压饱和过程中清晰展现 OMS 饱和特征（`-U_pol/N` 从 `2.50` 降至 `1.58 kJ/mol`）。全压力范围严格满足细致平衡（`max|acc_ins - acc_del| <= 0.0007`）。而距离实验 `40–47 kJ/mol` 剩余约 `10 kJ/mol` 的差距，则对应通用 UFF `sigma_Mg` 无法描述的近程轨道电荷转移与极化耦合（需结合 DFT 拟合 OMS 短程力场或 MLIP Nested MC）。
+- **核心物理发现**：三点分布极化（`Pol-3Site`）能准确捕捉配位氧原子靠近 Mg²⁺ 时的强烈 $r^{-4}$ 非均匀电场梯度，将平均极化能提升至质心模型的 **3.7 倍**（`-2.50` vs `-0.67 kJ/mol`），使 `0.15 bar` 烟道气分压下 CO₂ 吸附量直接翻倍（`1.17 → 2.39 mmol/g`），并在高压饱和过程中清晰展现 OMS 饱和特征（`-U_pol/N` 从 `2.50` 降至 `1.58 kJ/mol`）。全压力范围严格满足细致平衡（`max|acc_ins - acc_del| <= 0.0007`）。而距离实验 `40–47 kJ/mol` 剩余约 `10 kJ/mol` 的差距，则对应通用 UFF `sigma_Mg` 无法描述的近程轨道电荷转移与极化耦合（需结合 DFT 拟合 OMS 短程力场或 MLIP Nested MC）。
 
 ---
 
-## 第三步：多组分竞争共吸附（$\text{CO}_2/\text{N}_2$ 与 $\text{CO}_2/\text{CH}_4$ @ 298 K）
+## 第三步：多组分竞争共吸附（CO₂/N₂ 与 CO₂/CH₄ @ 298 K）
 
 ![Step 3 Mg-MOF-74 Binary Co-Adsorption](assets/step3_mof74_binary_coadsorption.png)
 
 ### 1. 八通道三维网格与 Identity Swap 细致平衡校验
-- **8 张 `128x128x36` 三维网格预计算**：耗时 **`410.76 ms`**（`U_lj[C_CO2, O_CO2, N_N2, CH4]`、`Phi_elec`、`Ex`、`Ey`、`Ez`）；`1,000` 个孔道点与独立参考（$\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$）对比得 `MAE = 0.844 / 2.493 / 2.974 / 14.415 K`（LJ）、`3.9038 K/e`（`Phi`）、`7.535 K/(e·Å)`（`|E|`）。
+- **8 张 `128x128x36` 三维网格预计算**：耗时 **`410.76 ms`**（`U_lj[C_CO2, O_CO2, N_N2, CH4]`、`Phi_elec`、`Ex`、`Ey`、`Ez`）；`1,000` 个孔道点与独立参考（$\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$）对比得 `MAE = 0.844 / 2.493 / 2.974 / 14.415 K`（LJ）、`3.9038 K/e`（`Phi`）、`7.535 K/(e·Å)`（`|E|`）。
 - **Test A（理想气体 Identity Swap 解析自检）**：`<N0> = 11.9827`（精确真值 `12.0`），`<N1> = 39.8378`（精确真值 `40.0`）。
 - **Test B（`1.0 bar` 烟道气 `Pol-3Site` 真实孔道换牌一致性）**：`Swap-ON`（`CO2 = 2.5498`、`N2 = 0.2774 mmol/g`）与 `Swap-OFF`（`CO2 = 2.4995`、`N2 = 0.2772 mmol/g`）在统计涨落内完全一致。
 
@@ -96,10 +96,10 @@
 
 | 混合气体（`298 K`） | 总压 | `NonPol` 吸附量 (mmol/g) | `NonPol` 选择性 $S$ | `Pol-3Site` 吸附量 (mmol/g) | `Pol-3Site` 选择性 $S$ | 极化带来选择性增幅 |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **烟道气 $\text{CO}_2/\text{N}_2$ (`15:85`)** | `1.0 bar` | `1.159 / 0.254` | `25.8` | **`2.751 / 0.276`** | **`56.4`** | **`2.19×`** |
-| **烟道气 $\text{CO}_2/\text{N}_2$ (`15:85`)** | `2.0 bar` | `2.290 / 0.471` | `27.5` | **`4.648 / 0.450`** | **`58.6`** | **`2.13×`** |
-| **沼气 $\text{CO}_2/\text{CH}_4$ (`50:50`)** | `0.5 bar` | `1.967 / 0.196` | `10.0` | **`3.995 / 0.201`** | **`19.9`** | **`1.99×`** |
-| **沼气 $\text{CO}_2/\text{CH}_4$ (`50:50`)** | `1.0 bar` | `3.765 / 0.363` | `10.4` | **`6.296 / 0.340`** | **`18.5`** | **`1.78×`** |
+| **烟道气 CO₂/N₂ (`15:85`)** | `1.0 bar` | `1.159 / 0.254` | `25.8` | **`2.751 / 0.276`** | **`56.4`** | **`2.19×`** |
+| **烟道气 CO₂/N₂ (`15:85`)** | `2.0 bar` | `2.290 / 0.471` | `27.5` | **`4.648 / 0.450`** | **`58.6`** | **`2.13×`** |
+| **沼气 CO₂/CH₄ (`50:50`)** | `0.5 bar` | `1.967 / 0.196` | `10.0` | **`3.995 / 0.201`** | **`19.9`** | **`1.99×`** |
+| **沼气 CO₂/CH₄ (`50:50`)** | `1.0 bar` | `3.765 / 0.363` | `10.4` | **`6.296 / 0.340`** | **`18.5`** | **`1.78×`** |
 
 ---
 
@@ -111,12 +111,12 @@
 - **网格加密 + 高阶插值（`128×128×36` 三线性 → `256×256×72` 三线性 → `256×256×72` 四点拉格朗日 Tricubic）**：
   - 6 张网格构建耗时 **`3.03 s`**（`113 MB` 显存）——对比单核 CPU `RASPA3` 构建 `151×151×46` 三维网格的 `117.98 s` 提速 **`38.9×`**。
   - 近程 `Mg–O` 径向插值 MAE（`2.3–3.8 Å`）狂降 **`290.3×`**：**`190.46 K`**（`128` 三线性）→ **`12.53 K`**（`256` 三线性）→ **`0.656 K`**（`256` Tricubic）；Mercado 2016 从 `4.99 K` 降至 **`0.092 K`**。
-  - `1,000` 个孔道点对直接 Ewald（$\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$）MAE：`U_lj_C` 从 `0.793 K → 0.061 K`，`U_lj_O` 从 `2.387 K → 0.148 K`（Mercado 2016 仅 `C = 0.055 K, O = 0.035 K`）。
+  - `1,000` 个孔道点对直接 Ewald（$\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$）MAE：`U_lj_C` 从 `0.793 K → 0.061 K`，`U_lj_O` 从 `2.387 K → 0.148 K`（Mercado 2016 仅 `C = 0.055 K, O = 0.035 K`）。
 - **零能量漂移架构**：客体坐标与累计能量全程采用共享内存 `double`，每 `50,000` 步从头全盒重算（含 `u_fw + u_gg`）——`128` 个 GPU 盒子（每力场 `6,400 万` 步）最大漂移仅 **`5.879e-09 K`**（UFF）与 **`1.024e-08 K`**（Mercado 2016），细致平衡偏差 `max|acc_ins - acc_del| <= 0.000253`。
 
 ### 2. 升级二：官方 Mercado 2016 DFT 拟合 Buckingham/LJ + EPM2 力场
-- 完整导入 [`data/mercado2016/`](data/mercado2016/)（源自 `rociomer/DFT-derived-force-field`, *J. Phys. Chem. C* 2016, 120, 12590；对 `Mg–O_CO2` 采用带峰值钳位保护的 Buckingham 指数排斥势与 $r_{\text{cut}} = 11.0\ \text{\AA}$ 平移截断 + Mercado 骨架电荷 + EPM2 $\text{CO}_2$）。
-- **低压开放金属位点物理重现（`298 K, 0.15 bar`）**：低载吸附热 $Q_{\text{st}}$ 从 UFF 的 `26.94 kJ/mol` 跃升至 **`35.65 kJ/mol`**，完美晶体低压吸附量从 `1.43` 提升至 **`7.15 mmol/g`**（`1.0 bar` 为 `11.11 mmol/g`），且 $\text{Mg}^{2+}\text{–O}_{\text{CO}_2}$ 径向配位主峰向内收缩 **`-0.25 Å`**（`2.775 Å → 2.525 Å`），清晰对比了理想刚性完美晶体与含缺陷实际样品（实验 `3.6–4.6 mmol/g @ 0.15 bar`、`7.5–8.6 mmol/g @ 1.0 bar`；图中 `×0.80` 有效位点线）的物理边界。
+- 完整导入 [`data/mercado2016/`](data/mercado2016/)（源自 `rociomer/DFT-derived-force-field`, *J. Phys. Chem. C* 2016, 120, 12590；对 `Mg–O_CO2` 采用带峰值钳位保护的 Buckingham 指数排斥势与 $r_{\text{cut}} = 11.0\ \text{Å}$ 平移截断 + Mercado 骨架电荷 + EPM2 CO₂）。
+- **低压开放金属位点物理重现（`298 K, 0.15 bar`）**：低载吸附热 $Q_{\text{st}}$ 从 UFF 的 `26.94 kJ/mol` 跃升至 **`35.65 kJ/mol`**，完美晶体低压吸附量从 `1.43` 提升至 **`7.15 mmol/g`**（`1.0 bar` 为 `11.11 mmol/g`），且 `Mg²⁺–O(CO₂)` 径向配位主峰向内收缩 **`-0.25 Å`**（`2.775 Å → 2.525 Å`），清晰对比了理想刚性完美晶体与含缺陷实际样品（实验 `3.6–4.6 mmol/g @ 0.15 bar`、`7.5–8.6 mmol/g @ 1.0 bar`；图中 `×0.80` 有效位点线）的物理边界。
 
 ### 3. 升级三：Windows 原生 `RASPA3 3.0.29` 精确 Ewald 与 Tricubic 网格双重背靠背对标
 
@@ -143,14 +143,18 @@
 
 | JSON 预设（`0.10 Å` Tricubic，4 副本） | 工况条件 | 实测关键物理结果 | 最大漂移（全重算） |
 | :--- | :---: | :--- | :---: |
-| [`mg_mof74_co2_298K_uff.json`](configs/mg_mof74_co2_298K_uff.json) | `298 K`，UFF，$\text{CO}_2$ | `1.3987 / 7.3723 / 13.2996 mmol/g`（相对 RASPA3 网格偏差 `+0.25% / -2.10% / +0.45%`） | `4.66e-09 K` |
-| [`mg_mof74_co2_298K_mercado.json`](configs/mg_mof74_co2_298K_mercado.json) | `298 K`，Mercado 2016，$\text{CO}_2$ | `7.0587 / 11.1077 / 14.9680 mmol/g`（`0.15 bar` 下 $Q_{\text{st}} = 35.63\ \text{kJ/mol}$） | `4.37e-09 K` |
-| [`mg_mof74_co2_313K_psa.json`](configs/mg_mof74_co2_313K_psa.json) | `313 K`，Mercado 2016，$\text{CO}_2$ | `5.0424 / 9.7915 / 13.3012 mmol/g`（相对 298 K 清晰脱附 `-2.02 / -1.32 / -1.67`） | `4.13e-09 K` |
-| [`mg_mof74_fluegas_298K_pol3site.json`](configs/mg_mof74_fluegas_298K_pol3site.json) | `298 K`，`Pol-3Site`，$\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 60.39` (`0.5 bar`)、**`64.58`** (`1.0 bar`)、**`67.38`** (`2.0 bar`)；全 `double` 偶极存储 | `2.04e-09 K` |
-| [`mg_mof74_co2_298K_scf.json`](configs/mg_mof74_co2_298K_scf.json) | `298 K`，`Pol-SCF`，$\text{CO}_2$ | `2.1322 / 8.3536 / 12.8982 mmol/g`（`0.15 bar` 较 NonPol 提升 `+52.4%`）；平均 `16.63` 次迭代 | `7.25e-07 K` |
-| [`mg_mof74_fluegas_298K_scf.json`](configs/mg_mof74_fluegas_298K_scf.json) | `298 K`，`Pol-SCF`，$\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 37.28` (`1.0 bar`)、**`43.24`** (`2.0 bar`)（含客体间相互退极化屏蔽）；`14.78` 次迭代 | `2.69e-07 K` |
+| [`mg_mof74_co2_298K_uff.json`](configs/mg_mof74_co2_298K_uff.json) | `298 K`，UFF，CO₂ | `1.3987 / 7.3723 / 13.2996 mmol/g`（相对 RASPA3 网格偏差 `+0.25% / -2.10% / +0.45%`） | `4.66e-09 K` |
+| [`mg_mof74_co2_298K_mercado.json`](configs/mg_mof74_co2_298K_mercado.json) | `298 K`，Mercado 2016，CO₂ | `7.0587 / 11.1077 / 14.9680 mmol/g`（`0.15 bar` 下 $Q_{\text{st}} = 35.63\ \text{kJ/mol}$） | `4.37e-09 K` |
+| [`mg_mof74_co2_313K_psa.json`](configs/mg_mof74_co2_313K_psa.json) | `313 K`，Mercado 2016，CO₂ | `5.0424 / 9.7915 / 13.3012 mmol/g`（相对 298 K 清晰脱附 `-2.02 / -1.32 / -1.67`） | `4.13e-09 K` |
+| [`mg_mof74_fluegas_298K_pol3site.json`](configs/mg_mof74_fluegas_298K_pol3site.json) | `298 K`，`Pol-3Site`，CO₂/N₂ (`15:85`) | `S(CO2/N2) = 60.39` (`0.5 bar`)、**`64.58`** (`1.0 bar`)、**`67.38`** (`2.0 bar`)；全 `double` 偶极存储 | `2.04e-09 K` |
+| [`mg_mof74_co2_298K_scf.json`](configs/mg_mof74_co2_298K_scf.json) | `298 K`，`Pol-SCF`，CO₂ | `2.1322 / 8.3536 / 12.8982 mmol/g`（`0.15 bar` 较 NonPol 提升 `+52.4%`）；平均 `16.63` 次迭代 | `7.25e-07 K` |
+| [`mg_mof74_fluegas_298K_scf.json`](configs/mg_mof74_fluegas_298K_scf.json) | `298 K`，`Pol-SCF`，CO₂/N₂ (`15:85`) | `S(CO2/N2) = 37.28` (`1.0 bar`)、**`43.24`** (`2.0 bar`)（含客体间相互退极化屏蔽）；`14.78` 次迭代 | `2.69e-07 K` |
 
-> **Level 2 全自洽多体极化 `Pol-SCF`（`polarization: "scf"`）**：Block 级共享内存 Applequist-Thole 自洽求解器（`SCF_TOL = 1e-10 e·Å`、`O(N)` 增量永久电场 $\mathbf{E}_0$ 更新、热启动偶极子复用、试探前强排斥预筛与 `s_scf_conv` 收敛/有限性守卫），在每步试探中全自洽求解 $\boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i(\mathbf{E}_i^{\text{fw}} + \sum_{j\neq i}\mathbf{E}_{j\to i}^{\text{DSF,perm}} + \sum_{j\neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j)$；`--test-scf` 与 Python `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**。
+> **Level 2 全自洽多体极化 `Pol-SCF`（`polarization: "scf"`）**：Block 级共享内存 Applequist-Thole 自洽求解器（`SCF_TOL = 1e-10 e·Å`、$O(N)$ 增量永久电场 $\mathbf{E}_0$ 更新、热启动偶极子复用、试探前强排斥预筛与 `s_scf_conv` 收敛/有限性守卫），在每步试探中全自洽求解耦合多体偶极方程；`--test-scf` 与 Python `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**：
+
+$$
+\boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i\left(\mathbf{E}_i^{\text{fw}} + \sum_{j \neq i}\mathbf{E}_{j \to i}^{\text{DSF,perm}} + \sum_{j \neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j\right),\qquad U_{\text{pol}}^{\text{SCF}} = -\frac{1}{2}\sum_i \boldsymbol{\mu}_i \cdot \mathbf{E}_i^0
+$$
 
 ![Level 2 Pol-SCF Visualization](assets/step5_level2_scf_polarization.png)
 
