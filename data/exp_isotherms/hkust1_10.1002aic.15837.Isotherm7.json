@@ -1,0 +1,487 @@
+{
+  "mof": "HKUST-1",
+  "filename": "10.1002aic.15837.Isotherm7",
+  "DOI": "10.1002/aic.15837",
+  "temperature_K": 298,
+  "adsorbent_name": "CuBTC",
+  "original_pressure_units": "bar",
+  "original_adsorption_units": "mmol/g",
+  "category": "exp",
+  "isotherm_type": "",
+  "points": [
+    {
+      "P_bar": 0.0137,
+      "uptake_mmol_g": 0.12,
+      "P_raw": 0.0137,
+      "uptake_raw": 0.12
+    },
+    {
+      "P_bar": 0.0285,
+      "uptake_mmol_g": 0.2,
+      "P_raw": 0.0285,
+      "uptake_raw": 0.2
+    },
+    {
+      "P_bar": 0.04,
+      "uptake_mmol_g": 0.25,
+      "P_raw": 0.04,
+      "uptake_raw": 0.25
+    },
+    {
+      "P_bar": 0.0525,
+      "uptake_mmol_g": 0.34,
+      "P_raw": 0.0525,
+      "uptake_raw": 0.34
+    },
+    {
+      "P_bar": 0.0662,
+      "uptake_mmol_g": 0.42,
+      "P_raw": 0.0662,
+      "uptake_raw": 0.42
+    },
+    {
+      "P_bar": 0.0799,
+      "uptake_mmol_g": 0.5,
+      "P_raw": 0.0799,
+      "uptake_raw": 0.5
+    },
+    {
+      "P_bar": 0.0925,
+      "uptake_mmol_g": 0.57,
+      "P_raw": 0.0925,
+      "uptake_raw": 0.57
+    },
+    {
+      "P_bar": 0.106,
+      "uptake_mmol_g": 0.65,
+      "P_raw": 0.106,
+      "uptake_raw": 0.65
+    },
+    {
+      "P_bar": 0.119,
+      "uptake_mmol_g": 0.73,
+      "P_raw": 0.119,
+      "uptake_raw": 0.73
+    },
+    {
+      "P_bar": 0.133,
+      "uptake_mmol_g": 0.8,
+      "P_raw": 0.133,
+      "uptake_raw": 0.8
+    },
+    {
+      "P_bar": 0.147,
+      "uptake_mmol_g": 0.88,
+      "P_raw": 0.147,
+      "uptake_raw": 0.88
+    },
+    {
+      "P_bar": 0.159,
+      "uptake_mmol_g": 0.95,
+      "P_raw": 0.159,
+      "uptake_raw": 0.95
+    },
+    {
+      "P_bar": 0.174,
+      "uptake_mmol_g": 1.03,
+      "P_raw": 0.174,
+      "uptake_raw": 1.03
+    },
+    {
+      "P_bar": 0.186,
+      "uptake_mmol_g": 1.1,
+      "P_raw": 0.186,
+      "uptake_raw": 1.1
+    },
+    {
+      "P_bar": 0.2,
+      "uptake_mmol_g": 1.17,
+      "P_raw": 0.2,
+      "uptake_raw": 1.17
+    },
+    {
+      "P_bar": 0.212,
+      "uptake_mmol_g": 1.24,
+      "P_raw": 0.212,
+      "uptake_raw": 1.24
+    },
+    {
+      "P_bar": 0.226,
+      "uptake_mmol_g": 1.31,
+      "P_raw": 0.226,
+      "uptake_raw": 1.31
+    },
+    {
+      "P_bar": 0.24,
+      "uptake_mmol_g": 1.39,
+      "P_raw": 0.24,
+      "uptake_raw": 1.39
+    },
+    {
+      "P_bar": 0.253,
+      "uptake_mmol_g": 1.45,
+      "P_raw": 0.253,
+      "uptake_raw": 1.45
+    },
+    {
+      "P_bar": 0.265,
+      "uptake_mmol_g": 1.53,
+      "P_raw": 0.265,
+      "uptake_raw": 1.53
+    },
+    {
+      "P_bar": 0.28,
+      "uptake_mmol_g": 1.59,
+      "P_raw": 0.28,
+      "uptake_raw": 1.59
+    },
+    {
+      "P_bar": 0.292,
+      "uptake_mmol_g": 1.66,
+      "P_raw": 0.292,
+      "uptake_raw": 1.66
+    },
+    {
+      "P_bar": 0.305,
+      "uptake_mmol_g": 1.73,
+      "P_raw": 0.305,
+      "uptake_raw": 1.73
+    },
+    {
+      "P_bar": 0.319,
+      "uptake_mmol_g": 1.79,
+      "P_raw": 0.319,
+      "uptake_raw": 1.79
+    },
+    {
+      "P_bar": 0.332,
+      "uptake_mmol_g": 1.86,
+      "P_raw": 0.332,
+      "uptake_raw": 1.86
+    },
+    {
+      "P_bar": 0.345,
+      "uptake_mmol_g": 1.92,
+      "P_raw": 0.345,
+      "uptake_raw": 1.92
+    },
+    {
+      "P_bar": 0.36,
+      "uptake_mmol_g": 1.99,
+      "P_raw": 0.36,
+      "uptake_raw": 1.99
+    },
+    {
+      "P_bar": 0.373,
+      "uptake_mmol_g": 2.06,
+      "P_raw": 0.373,
+      "uptake_raw": 2.06
+    },
+    {
+      "P_bar": 0.386,
+      "uptake_mmol_g": 2.12,
+      "P_raw": 0.386,
+      "uptake_raw": 2.12
+    },
+    {
+      "P_bar": 0.4,
+      "uptake_mmol_g": 2.18,
+      "P_raw": 0.4,
+      "uptake_raw": 2.18
+    },
+    {
+      "P_bar": 0.412,
+      "uptake_mmol_g": 2.25,
+      "P_raw": 0.412,
+      "uptake_raw": 2.25
+    },
+    {
+      "P_bar": 0.426,
+      "uptake_mmol_g": 2.31,
+      "P_raw": 0.426,
+      "uptake_raw": 2.31
+    },
+    {
+      "P_bar": 0.439,
+      "uptake_mmol_g": 2.37,
+      "P_raw": 0.439,
+      "uptake_raw": 2.37
+    },
+    {
+      "P_bar": 0.453,
+      "uptake_mmol_g": 2.43,
+      "P_raw": 0.453,
+      "uptake_raw": 2.43
+    },
+    {
+      "P_bar": 0.465,
+      "uptake_mmol_g": 2.49,
+      "P_raw": 0.465,
+      "uptake_raw": 2.49
+    },
+    {
+      "P_bar": 0.479,
+      "uptake_mmol_g": 2.55,
+      "P_raw": 0.479,
+      "uptake_raw": 2.55
+    },
+    {
+      "P_bar": 0.492,
+      "uptake_mmol_g": 2.62,
+      "P_raw": 0.492,
+      "uptake_raw": 2.62
+    },
+    {
+      "P_bar": 0.505,
+      "uptake_mmol_g": 2.67,
+      "P_raw": 0.505,
+      "uptake_raw": 2.67
+    },
+    {
+      "P_bar": 0.518,
+      "uptake_mmol_g": 2.75,
+      "P_raw": 0.518,
+      "uptake_raw": 2.75
+    },
+    {
+      "P_bar": 0.532,
+      "uptake_mmol_g": 2.8,
+      "P_raw": 0.532,
+      "uptake_raw": 2.8
+    },
+    {
+      "P_bar": 0.546,
+      "uptake_mmol_g": 2.85,
+      "P_raw": 0.546,
+      "uptake_raw": 2.85
+    },
+    {
+      "P_bar": 0.558,
+      "uptake_mmol_g": 2.92,
+      "P_raw": 0.558,
+      "uptake_raw": 2.92
+    },
+    {
+      "P_bar": 0.573,
+      "uptake_mmol_g": 2.97,
+      "P_raw": 0.573,
+      "uptake_raw": 2.97
+    },
+    {
+      "P_bar": 0.586,
+      "uptake_mmol_g": 3.02,
+      "P_raw": 0.586,
+      "uptake_raw": 3.02
+    },
+    {
+      "P_bar": 0.599,
+      "uptake_mmol_g": 3.08,
+      "P_raw": 0.599,
+      "uptake_raw": 3.08
+    },
+    {
+      "P_bar": 0.612,
+      "uptake_mmol_g": 3.13,
+      "P_raw": 0.612,
+      "uptake_raw": 3.13
+    },
+    {
+      "P_bar": 0.626,
+      "uptake_mmol_g": 3.2,
+      "P_raw": 0.626,
+      "uptake_raw": 3.2
+    },
+    {
+      "P_bar": 0.64,
+      "uptake_mmol_g": 3.25,
+      "P_raw": 0.64,
+      "uptake_raw": 3.25
+    },
+    {
+      "P_bar": 0.653,
+      "uptake_mmol_g": 3.3,
+      "P_raw": 0.653,
+      "uptake_raw": 3.3
+    },
+    {
+      "P_bar": 0.666,
+      "uptake_mmol_g": 3.36,
+      "P_raw": 0.666,
+      "uptake_raw": 3.36
+    },
+    {
+      "P_bar": 0.679,
+      "uptake_mmol_g": 3.41,
+      "P_raw": 0.679,
+      "uptake_raw": 3.41
+    },
+    {
+      "P_bar": 0.693,
+      "uptake_mmol_g": 3.46,
+      "P_raw": 0.693,
+      "uptake_raw": 3.46
+    },
+    {
+      "P_bar": 0.706,
+      "uptake_mmol_g": 3.51,
+      "P_raw": 0.706,
+      "uptake_raw": 3.51
+    },
+    {
+      "P_bar": 0.719,
+      "uptake_mmol_g": 3.56,
+      "P_raw": 0.719,
+      "uptake_raw": 3.56
+    },
+    {
+      "P_bar": 0.732,
+      "uptake_mmol_g": 3.62,
+      "P_raw": 0.732,
+      "uptake_raw": 3.62
+    },
+    {
+      "P_bar": 0.746,
+      "uptake_mmol_g": 3.67,
+      "P_raw": 0.746,
+      "uptake_raw": 3.67
+    },
+    {
+      "P_bar": 0.759,
+      "uptake_mmol_g": 3.72,
+      "P_raw": 0.759,
+      "uptake_raw": 3.72
+    },
+    {
+      "P_bar": 0.772,
+      "uptake_mmol_g": 3.77,
+      "P_raw": 0.772,
+      "uptake_raw": 3.77
+    },
+    {
+      "P_bar": 0.785,
+      "uptake_mmol_g": 3.82,
+      "P_raw": 0.785,
+      "uptake_raw": 3.82
+    },
+    {
+      "P_bar": 0.799,
+      "uptake_mmol_g": 3.86,
+      "P_raw": 0.799,
+      "uptake_raw": 3.86
+    },
+    {
+      "P_bar": 0.812,
+      "uptake_mmol_g": 3.92,
+      "P_raw": 0.812,
+      "uptake_raw": 3.92
+    },
+    {
+      "P_bar": 0.825,
+      "uptake_mmol_g": 3.96,
+      "P_raw": 0.825,
+      "uptake_raw": 3.96
+    },
+    {
+      "P_bar": 0.838,
+      "uptake_mmol_g": 4.01,
+      "P_raw": 0.838,
+      "uptake_raw": 4.01
+    },
+    {
+      "P_bar": 0.852,
+      "uptake_mmol_g": 4.06,
+      "P_raw": 0.852,
+      "uptake_raw": 4.06
+    },
+    {
+      "P_bar": 0.866,
+      "uptake_mmol_g": 4.1,
+      "P_raw": 0.866,
+      "uptake_raw": 4.1
+    },
+    {
+      "P_bar": 0.879,
+      "uptake_mmol_g": 4.15,
+      "P_raw": 0.879,
+      "uptake_raw": 4.15
+    },
+    {
+      "P_bar": 0.892,
+      "uptake_mmol_g": 4.19,
+      "P_raw": 0.892,
+      "uptake_raw": 4.19
+    },
+    {
+      "P_bar": 0.905,
+      "uptake_mmol_g": 4.24,
+      "P_raw": 0.905,
+      "uptake_raw": 4.24
+    },
+    {
+      "P_bar": 0.918,
+      "uptake_mmol_g": 4.28,
+      "P_raw": 0.918,
+      "uptake_raw": 4.28
+    },
+    {
+      "P_bar": 0.931,
+      "uptake_mmol_g": 4.33,
+      "P_raw": 0.931,
+      "uptake_raw": 4.33
+    },
+    {
+      "P_bar": 0.945,
+      "uptake_mmol_g": 4.36,
+      "P_raw": 0.945,
+      "uptake_raw": 4.36
+    },
+    {
+      "P_bar": 0.959,
+      "uptake_mmol_g": 4.41,
+      "P_raw": 0.959,
+      "uptake_raw": 4.41
+    },
+    {
+      "P_bar": 0.972,
+      "uptake_mmol_g": 4.45,
+      "P_raw": 0.972,
+      "uptake_raw": 4.45
+    },
+    {
+      "P_bar": 0.986,
+      "uptake_mmol_g": 4.5,
+      "P_raw": 0.986,
+      "uptake_raw": 4.5
+    },
+    {
+      "P_bar": 0.998,
+      "uptake_mmol_g": 4.53,
+      "P_raw": 0.998,
+      "uptake_raw": 4.53
+    },
+    {
+      "P_bar": 1.01,
+      "uptake_mmol_g": 4.56,
+      "P_raw": 1.01,
+      "uptake_raw": 4.56
+    },
+    {
+      "P_bar": 1.03,
+      "uptake_mmol_g": 4.61,
+      "P_raw": 1.03,
+      "uptake_raw": 4.61
+    },
+    {
+      "P_bar": 1.04,
+      "uptake_mmol_g": 4.66,
+      "P_raw": 1.04,
+      "uptake_raw": 4.66
+    },
+    {
+      "P_bar": 1.05,
+      "uptake_mmol_g": 4.69,
+      "P_raw": 1.05,
+      "uptake_raw": 4.69
+    }
+  ]
+}

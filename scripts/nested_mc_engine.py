@@ -649,15 +649,17 @@ def run_nested_mc(
             )
 
     dt = time.perf_counter() - t0
-    box_uptakes = (sum_N / prod_cycles) * conv_mmol_g
+    prod_denom = max(1, prod_cycles)
+    tot_denom = max(1, total_cycles)
+    box_uptakes = (sum_N / prod_denom) * conv_mmol_g if prod_cycles > 0 else np.zeros(n_b, dtype=np.float64)
     box_qst = []
     box_molar_bind = []
     box_molar_qst = []
     for b in range(n_b):
-        mN = sum_N[b] / prod_cycles
-        mN2 = sum_N2[b] / prod_cycles
-        mU = sum_U[b] / prod_cycles
-        mUN = sum_UN[b] / prod_cycles
+        mN = sum_N[b] / prod_denom if prod_cycles > 0 else 0.0
+        mN2 = sum_N2[b] / prod_denom if prod_cycles > 0 else 0.0
+        mU = sum_U[b] / prod_denom if prod_cycles > 0 else 0.0
+        mUN = sum_UN[b] / prod_denom if prod_cycles > 0 else 0.0
         varN = mN2 - mN * mN
         mb = (-mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
         mq = (T_K - mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
@@ -695,14 +697,14 @@ def run_nested_mc(
         "mean_molar_binding_kJ_mol": mean_mb,
         "mean_molar_qst_kJ_mol": mean_mq,
         "mean_molar_qst_sem_kJ_mol": sem_mq,
-        "outer_acc_rate": float(np.mean(acc_outer) / total_cycles),
-        "prod_outer_acc_rate": float(np.mean(prod_acc_outer) / prod_cycles),
+        "outer_acc_rate": float(np.mean(acc_outer) / tot_denom),
+        "prod_outer_acc_rate": float(np.mean(prod_acc_outer) / prod_denom) if prod_cycles > 0 else 0.0,
         "prod_ins_att": int(prod_ins_att),
         "prod_ins_acc": int(prod_ins_acc),
         "prod_del_att": int(prod_del_att),
         "prod_del_acc": int(prod_del_acc),
-        "mean_inner_acc_per_burst": float(np.mean(inner_acc_tot) / total_cycles),
-        "effective_mc_steps_per_target_eval": float(k_steps * np.mean(acc_outer) / total_cycles),
+        "mean_inner_acc_per_burst": float(np.mean(inner_acc_tot) / tot_denom),
+        "effective_mc_steps_per_target_eval": float(k_steps * np.mean(acc_outer) / tot_denom),
         "box_N_history": box_N_history,
         "trajectory": trajectory,
     }

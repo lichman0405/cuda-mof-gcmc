@@ -1,0 +1,49 @@
+{
+  "mof": "HKUST-1",
+  "filename": "10.1007s1045001395272.Isotherm50",
+  "DOI": "10.1007/s10450-013-9527-2",
+  "temperature_K": 298,
+  "adsorbent_name": "CuBTC",
+  "original_pressure_units": "bar",
+  "original_adsorption_units": "mmol/g",
+  "category": "exp",
+  "isotherm_type": "",
+  "points": [
+    {
+      "P_bar": 0.13,
+      "uptake_mmol_g": 0.021,
+      "P_raw": 0.13,
+      "uptake_raw": 0.021
+    },
+    {
+      "P_bar": 4.96,
+      "uptake_mmol_g": 7.065,
+      "P_raw": 4.96,
+      "uptake_raw": 7.065
+    },
+    {
+      "P_bar": 9.97,
+      "uptake_mmol_g": 8.332,
+      "P_raw": 9.97,
+      "uptake_raw": 8.332
+    },
+    {
+      "P_bar": 14.96,
+      "uptake_mmol_g": 8.846,
+      "P_raw": 14.96,
+      "uptake_raw": 8.846
+    },
+    {
+      "P_bar": 19.98,
+      "uptake_mmol_g": 9.114,
+      "P_raw": 19.98,
+      "uptake_raw": 9.114
+    },
+    {
+      "P_bar": 24.96,
+      "uptake_mmol_g": 9.298,
+      "P_raw": 24.96,
+      "uptake_raw": 9.298
+    }
+  ]
+}

@@ -1,0 +1,193 @@
+{
+  "mof": "IRMOF-1",
+  "filename": "10.1021acs.jctc.5b00093.Isotherm1",
+  "DOI": "10.1021/acs.jctc.5b00093",
+  "temperature_K": 298,
+  "adsorbent_name": "IRMOF-1",
+  "original_pressure_units": "bar",
+  "original_adsorption_units": "mmol/g",
+  "category": "exp",
+  "isotherm_type": "",
+  "points": [
+    {
+      "P_bar": 2.0744,
+      "uptake_mmol_g": 1.8375,
+      "P_raw": 2.0744,
+      "uptake_raw": 1.8375
+    },
+    {
+      "P_bar": 3.1513,
+      "uptake_mmol_g": 2.8429,
+      "P_raw": 3.1513,
+      "uptake_raw": 2.8429
+    },
+    {
+      "P_bar": 4.0404,
+      "uptake_mmol_g": 3.6896,
+      "P_raw": 4.0404,
+      "uptake_raw": 3.6896
+    },
+    {
+      "P_bar": 5.2402,
+      "uptake_mmol_g": 4.9171,
+      "P_raw": 5.2402,
+      "uptake_raw": 4.9171
+    },
+    {
+      "P_bar": 6.2305,
+      "uptake_mmol_g": 6.1252,
+      "P_raw": 6.2305,
+      "uptake_raw": 6.1252
+    },
+    {
+      "P_bar": 7.1305,
+      "uptake_mmol_g": 7.0794,
+      "P_raw": 7.1305,
+      "uptake_raw": 7.0794
+    },
+    {
+      "P_bar": 8.1714,
+      "uptake_mmol_g": 8.4144,
+      "P_raw": 8.1714,
+      "uptake_raw": 8.4144
+    },
+    {
+      "P_bar": 9.3678,
+      "uptake_mmol_g": 10.0813,
+      "P_raw": 9.3678,
+      "uptake_raw": 10.0813
+    },
+    {
+      "P_bar": 10.3654,
+      "uptake_mmol_g": 11.536,
+      "P_raw": 10.3654,
+      "uptake_raw": 11.536
+    },
+    {
+      "P_bar": 11.4677,
+      "uptake_mmol_g": 12.9832,
+      "P_raw": 11.4677,
+      "uptake_raw": 12.9832
+    },
+    {
+      "P_bar": 12.2629,
+      "uptake_mmol_g": 13.9912,
+      "P_raw": 12.2629,
+      "uptake_raw": 13.9912
+    },
+    {
+      "P_bar": 13.3543,
+      "uptake_mmol_g": 15.1846,
+      "P_raw": 13.3543,
+      "uptake_raw": 15.1846
+    },
+    {
+      "P_bar": 14.3807,
+      "uptake_mmol_g": 16.0362,
+      "P_raw": 14.3807,
+      "uptake_raw": 16.0362
+    },
+    {
+      "P_bar": 15.4829,
+      "uptake_mmol_g": 16.8682,
+      "P_raw": 15.4829,
+      "uptake_raw": 16.8682
+    },
+    {
+      "P_bar": 16.5886,
+      "uptake_mmol_g": 17.5708,
+      "P_raw": 16.5886,
+      "uptake_raw": 17.5708
+    },
+    {
+      "P_bar": 17.5462,
+      "uptake_mmol_g": 18.1002,
+      "P_raw": 17.5462,
+      "uptake_raw": 18.1002
+    },
+    {
+      "P_bar": 18.5941,
+      "uptake_mmol_g": 18.5758,
+      "P_raw": 18.5941,
+      "uptake_raw": 18.5758
+    },
+    {
+      "P_bar": 19.6565,
+      "uptake_mmol_g": 19.0124,
+      "P_raw": 19.6565,
+      "uptake_raw": 19.0124
+    },
+    {
+      "P_bar": 20.5707,
+      "uptake_mmol_g": 19.3806,
+      "P_raw": 20.5707,
+      "uptake_raw": 19.3806
+    },
+    {
+      "P_bar": 21.5643,
+      "uptake_mmol_g": 19.6536,
+      "P_raw": 21.5643,
+      "uptake_raw": 19.6536
+    },
+    {
+      "P_bar": 23.9057,
+      "uptake_mmol_g": 20.2678,
+      "P_raw": 23.9057,
+      "uptake_raw": 20.2678
+    },
+    {
+      "P_bar": 25.6545,
+      "uptake_mmol_g": 20.6186,
+      "P_raw": 25.6545,
+      "uptake_raw": 20.6186
+    },
+    {
+      "P_bar": 27.8838,
+      "uptake_mmol_g": 20.996,
+      "P_raw": 27.8838,
+      "uptake_raw": 20.996
+    },
+    {
+      "P_bar": 30.0878,
+      "uptake_mmol_g": 21.3076,
+      "P_raw": 30.0878,
+      "uptake_raw": 21.3076
+    },
+    {
+      "P_bar": 32.0027,
+      "uptake_mmol_g": 21.5094,
+      "P_raw": 32.0027,
+      "uptake_raw": 21.5094
+    },
+    {
+      "P_bar": 34.0622,
+      "uptake_mmol_g": 21.6745,
+      "P_raw": 34.0622,
+      "uptake_raw": 21.6745
+    },
+    {
+      "P_bar": 36.1614,
+      "uptake_mmol_g": 21.7907,
+      "P_raw": 36.1614,
+      "uptake_raw": 21.7907
+    },
+    {
+      "P_bar": 38.1847,
+      "uptake_mmol_g": 21.8948,
+      "P_raw": 38.1847,
+      "uptake_raw": 21.8948
+    },
+    {
+      "P_bar": 40.2947,
+      "uptake_mmol_g": 21.9452,
+      "P_raw": 40.2947,
+      "uptake_raw": 21.9452
+    },
+    {
+      "P_bar": 42.1843,
+      "uptake_mmol_g": 21.959,
+      "P_raw": 42.1843,
+      "uptake_raw": 21.959
+    }
+  ]
+}

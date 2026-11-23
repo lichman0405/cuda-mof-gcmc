@@ -1,0 +1,79 @@
+{
+  "mof": "IRMOF-1",
+  "filename": "10.1038srep12045.Isotherm2",
+  "DOI": "10.1038/srep12045",
+  "temperature_K": 298,
+  "adsorbent_name": "IRMOF-1",
+  "original_pressure_units": "bar",
+  "original_adsorption_units": "mg/g",
+  "category": "exp",
+  "isotherm_type": "",
+  "points": [
+    {
+      "P_bar": 0.0,
+      "uptake_mmol_g": 0.0,
+      "P_raw": 0,
+      "uptake_raw": 0
+    },
+    {
+      "P_bar": 4.90655,
+      "uptake_mmol_g": 4.757131982867335,
+      "P_raw": 4.90655,
+      "uptake_raw": 209.359
+    },
+    {
+      "P_bar": 10.1604,
+      "uptake_mmol_g": 14.19004987559504,
+      "P_raw": 10.1604,
+      "uptake_raw": 624.497
+    },
+    {
+      "P_bar": 15.3507,
+      "uptake_mmol_g": 19.44364284983924,
+      "P_raw": 15.3507,
+      "uptake_raw": 855.705
+    },
+    {
+      "P_bar": 20.4896,
+      "uptake_mmol_g": 21.31394358036333,
+      "P_raw": 20.4896,
+      "uptake_raw": 938.016
+    },
+    {
+      "P_bar": 25.3357,
+      "uptake_mmol_g": 22.090775855213078,
+      "P_raw": 25.3357,
+      "uptake_raw": 972.204
+    },
+    {
+      "P_bar": 30.4535,
+      "uptake_mmol_g": 22.567968279576,
+      "P_raw": 30.4535,
+      "uptake_raw": 993.205
+    },
+    {
+      "P_bar": 35.5667,
+      "uptake_mmol_g": 22.746679694156942,
+      "P_raw": 35.5667,
+      "uptake_raw": 1001.07
+    },
+    {
+      "P_bar": 40.8119,
+      "uptake_mmol_g": 22.526749906270236,
+      "P_raw": 40.8119,
+      "uptake_raw": 991.391
+    },
+    {
+      "P_bar": 45.6414,
+      "uptake_mmol_g": 22.208977607107553,
+      "P_raw": 45.6414,
+      "uptake_raw": 977.406
+    },
+    {
+      "P_bar": 49.7742,
+      "uptake_mmol_g": 21.49592701575796,
+      "P_raw": 49.7742,
+      "uptake_raw": 946.025
+    }
+  ]
+}

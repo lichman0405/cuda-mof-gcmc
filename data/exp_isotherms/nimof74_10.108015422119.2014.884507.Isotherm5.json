@@ -1,0 +1,67 @@
+{
+  "mof": "Ni-MOF-74",
+  "filename": "10.108015422119.2014.884507.Isotherm5",
+  "DOI": "10.1080/15422119.2014.884507",
+  "temperature_K": 298,
+  "adsorbent_name": "Ni-DOBDC",
+  "original_pressure_units": "bar",
+  "original_adsorption_units": "mmol/g",
+  "category": "exp",
+  "isotherm_type": "",
+  "points": [
+    {
+      "P_bar": 0.0,
+      "uptake_mmol_g": 0.0,
+      "P_raw": 0,
+      "uptake_raw": 0
+    },
+    {
+      "P_bar": 0.013812,
+      "uptake_mmol_g": 0.710303,
+      "P_raw": 0.013812,
+      "uptake_raw": 0.710303
+    },
+    {
+      "P_bar": 0.024862,
+      "uptake_mmol_g": 1.35879,
+      "P_raw": 0.024862,
+      "uptake_raw": 1.35879
+    },
+    {
+      "P_bar": 0.052486,
+      "uptake_mmol_g": 2.31643,
+      "P_raw": 0.052486,
+      "uptake_raw": 2.31643
+    },
+    {
+      "P_bar": 0.096685,
+      "uptake_mmol_g": 3.27459,
+      "P_raw": 0.096685,
+      "uptake_raw": 3.27459
+    },
+    {
+      "P_bar": 0.198895,
+      "uptake_mmol_g": 4.29626,
+      "P_raw": 0.198895,
+      "uptake_raw": 4.29626
+    },
+    {
+      "P_bar": 0.422652,
+      "uptake_mmol_g": 5.1365,
+      "P_raw": 0.422652,
+      "uptake_raw": 5.1365
+    },
+    {
+      "P_bar": 0.69337,
+      "uptake_mmol_g": 5.8856,
+      "P_raw": 0.69337,
+      "uptake_raw": 5.8856
+    },
+    {
+      "P_bar": 0.950276,
+      "uptake_mmol_g": 6.6034,
+      "P_raw": 0.950276,
+      "uptake_raw": 6.6034
+    }
+  ]
+}

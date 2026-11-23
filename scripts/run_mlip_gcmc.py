@@ -47,8 +47,10 @@ def parse_args():
     p.add_argument("--k-steps", type=int, default=25, help="Inner GPU GCMC steps per outer Nested MC cycle")
     p.add_argument("--eq-cycles", type=int, default=120, help="Outer equilibration cycles")
     p.add_argument("--prod-cycles", type=int, default=320, help="Outer production cycles")
+    p.add_argument("--pilot-cycles", type=int, default=60, help="Target-ensemble pilot burn-in cycles for Stage-3 shift calibration (0 disables)")
+    p.add_argument("--shift-override", type=float, default=None, help="Optional fixed chem-pot shift (kJ/mol) overriding auto calibration")
     p.add_argument("--seed", type=int, default=20261400, help="Base PRNG seed")
-    p.add_argument("--shift-mode", choices=["auto", "none"], default="auto", help="Two-stage self-consistent chem-pot shift")
+    p.add_argument("--shift-mode", choices=["auto", "none"], default="auto", help="Multi-stage self-consistent chem-pot shift")
     p.add_argument("--out-json", required=True, help="Output JSON path")
     p.add_argument("--out-csv", default="", help="Optional summary CSV path")
     return p.parse_args()
@@ -70,6 +72,8 @@ def run_pressure_point(
     seed: int,
     shift_mode: str,
     target: FastMaceD3Target,
+    pilot_cycles: int = 60,
+    shift_override=None,
 ):
     prop = CudaGcmcProposer(
         cif_path=cif_path,
@@ -85,7 +89,13 @@ def run_pressure_point(
     )
     conv_mmol_g = 1000.0 / prop.fw_mass_gmol
 
-    if shift_mode == "auto":
+    if shift_override is not None:
+        de_final = float(shift_override)
+        prop.set_chem_pot_shift(de_final)
+        prop.equilibrate(30000)
+        fug_mult = math.exp(-de_final / (K_TO_KJMOL * T_K))
+        print(f"  [P={P_bar:.4g} bar] Override Shift={de_final:.2f} kJ/mol ({fug_mult:.2f}x inner f_ref)")
+    elif shift_mode == "auto":
         prop.equilibrate(20000)
         cal1_st = prop.get_accepted()
         if np.mean([s["N"] for s in cal1_st]) < 4.0:
@@ -100,7 +110,8 @@ def run_pressure_point(
             float(((cal1_u[b][0] - cal1_st[b]["U_ref_K"]) * K_TO_KJMOL) / cal1_st[b]["N"])
             for b in range(n_boxes) if cal1_st[b]["N"] > 0 and not cal1_u[b][1]
         ]
-        de1 = float(max(-12.0, min(12.0, np.mean(diffs1)))) if diffs1 else 0.0
+        # Cap initial classical positive shift to +2.0 kJ/mol to avoid starving inner proposals
+        de1 = float(max(-12.0, min(2.0, np.mean(diffs1)))) if diffs1 else 0.0
         prop.set_chem_pot_shift(de1)
         prop.equilibrate(30000)
 
@@ -110,13 +121,41 @@ def run_pressure_point(
             float(((cal2_u[b][0] - cal2_st[b]["U_ref_K"]) * K_TO_KJMOL) / cal2_st[b]["N"])
             for b in range(n_boxes) if cal2_st[b]["N"] > 0 and not cal2_u[b][1]
         ]
-        de2 = float(max(-12.0, min(12.0, np.mean(diffs2)))) if diffs2 else de1
+        de2 = float(max(-12.0, min(2.0, np.mean(diffs2)))) if diffs2 else de1
         prop.set_chem_pot_shift(de2)
         prop.equilibrate(20000)
-        fug_mult = math.exp(-de2 / (K_TO_KJMOL * T_K))
-        print(f"  [P={P_bar:.4g} bar] Shift Stage1={de1:.2f} -> Stage2={de2:.2f} kJ/mol ({fug_mult:.2f}x inner f_ref)")
+
+        if pilot_cycles > 0:
+            # Stage 3: brief target-ensemble pilot burn-in to refine chem-pot shift
+            _ = run_nested_mc(
+                prop, None,
+                k_steps=k_steps, eq_cycles=pilot_cycles, prod_cycles=0,
+                seed=seed + 5, log_every=pilot_cycles + 10,
+                batch_target_fn=target.eval_batch,
+            )
+            cal3_st = prop.get_accepted()
+            cal3_u = target.eval_batch(cal3_st)
+            diffs3 = [
+                float(((cal3_u[b][0] - cal3_st[b]["U_ref_K"]) * K_TO_KJMOL) / cal3_st[b]["N"])
+                for b in range(n_boxes) if cal3_st[b]["N"] > 0 and not cal3_u[b][1]
+            ]
+            if diffs3:
+                de_final = float(max(-12.0, min(4.0, 0.5 * de2 + 0.5 * float(np.mean(diffs3)))))
+            else:
+                de_final = de2
+            prop.set_chem_pot_shift(de_final)
+            prop.equilibrate(10000)
+            fug_mult = math.exp(-de_final / (K_TO_KJMOL * T_K))
+            print(
+                f"  [P={P_bar:.4g} bar] Shift Stage1={de1:.2f} -> Stage2={de2:.2f} -> "
+                f"PilotStage3({pilot_cycles}cyc)={de_final:.2f} kJ/mol ({fug_mult:.2f}x inner f_ref)"
+            )
+        else:
+            de_final = de2
+            fug_mult = math.exp(-de_final / (K_TO_KJMOL * T_K))
+            print(f"  [P={P_bar:.4g} bar] Shift Stage1={de1:.2f} -> Stage2={de_final:.2f} kJ/mol ({fug_mult:.2f}x inner f_ref)")
     else:
-        de2 = 0.0
+        de_final = 0.0
         prop.equilibrate(30000)
 
     warm_st = prop.get_accepted()
@@ -196,6 +235,8 @@ def main():
             seed=args.seed + i * 100,
             shift_mode=args.shift_mode,
             target=target,
+            pilot_cycles=args.pilot_cycles,
+            shift_override=args.shift_override,
         )
         points.append(pt)
 

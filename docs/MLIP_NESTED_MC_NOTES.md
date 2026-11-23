@@ -1,12 +1,12 @@
 **English** | [简体中文](MLIP_NESTED_MC_NOTES.zh-CN.md) | [Back to README](../README.md)
 
-# Hybrid GPU-GCMC + MLIP Nested Monte Carlo: Verified Mechanics & WIP Notes
+# Hybrid GPU-GCMC + MLIP Nested Monte Carlo: Verified Mechanics & Stage-1 Validation Notes
 
-> **Status: Active Research Engine (WIP)**. The CUDA proposal engine, chemical-potential reweighting math, batched MLIP evaluation, supercell finite-size checks, and short-range MLIP diagnostic findings below are verified. Grand-canonical isotherms, differential heats of adsorption, DFT ground-truth attribution, and cross-topology `HKUST-1` equilibration remain works in progress (see [Known Issues & Open Work](#known-issues--open-work)).
+> **Status: Active Research Engine (Stage-1 Validation Complete; DFT Reference & Fine-Tuning Pending)**. The CUDA proposal engine, chemical-potential reweighting math, batched MLIP evaluation, `float32` vs. `float64` parity, supercell finite-size checks, NIST ISODB experimental tables, equilibrated `HKUST-1` and `IRMOF-1` baselines, and `1,200`-cycle differential $Q_{\text{st}}^{\text{diff}}$ runs below are complete. Periodic DFT single-point ground-truth decomposition and optional MLIP fine-tuning remain open (see [Remaining Open Work](#4-remaining-open-work-stage-2--stage-3)).
 
 ---
 
-## 1. Verified Engine Mechanics & Statistical Proofs
+## 1. Verified Engine Mechanics & Numerical Proofs
 
 ### Phase 1: Latency & Correlation Probe ([`scripts/phase1_mlip_probe.py`](../scripts/phase1_mlip_probe.py))
 ![Phase 1 MLIP Nested MC Probe](../assets/phase1_mlip_nested_mc_probe.png)
@@ -25,16 +25,17 @@
 - **Test 2 (Unshifted Live `MACE-MP-0 + D3` Deadlock Diagnostic, `0.15 bar`)**:
   - Without chemical-potential biasing, `MACE+D3` binds stronger than `Mercado 2016`, yielding **`0` accepted deletions** over `450` outer cycles (`N` climbs monotonically from `30` to `41` -> `8.6223 mmol/g`), proving why inner chemical-potential biasing is required.
 
-### Phase 2.5: Chemical-Potential Shift ($\Delta\mu_{\text{ref}}$), `4.21×` Batched MACE & Supercell Check
+### Phase 2.5: Three-Stage $\Delta\mu_{\text{ref}}$ Calibration, `4.21×` Batched MACE, FP32 Parity & Supercell Check
 ![Phase 2.5 Shifted & Batched Nested MC](../assets/phase25_shifted_batched_mace.png)
 
-- **Exact Grand-Canonical Bias (`proposer_set_chem_pot_shift`)** ([`scripts/verify_phase25_shifted_nested.py`](../scripts/verify_phase25_shifted_nested.py)):
-  - Adjusts inner fugacity $f_{\text{ref}} = f_{\text{tgt}} \exp(-\Delta\varepsilon / k_B T)$ and cancels the exact proposal ratio via $\exp[-\beta(\Delta U_{\text{tgt}} - \Delta U_{\text{ref}} - \Delta\varepsilon\,\Delta N)]$.
-  - **Shifted Null Test (`Pol-3Site -> Mercado`, `Δε = -2.57 kJ/mol`, `2.82×` `f_ref`)**: `5.8723 ± 0.0526` vs. `6.0230 ± 0.0406 mmol/g` (`z = 2.27σ`, $Q_{\text{st}}^{\text{diff}} = 35.55 \pm 0.63$ vs. `36.28 ± 0.25 kJ/mol`) with symmetric sampling (`Ins = 1,288 / 4,274`, `Del = 1,262 / 3,511`, `57.5%` acceptance).
-- **`FastMaceD3Target` (`4.21×` Inference Speedup over ASE)**:
+- **Exact Grand-Canonical Bias (`proposer_set_chem_pot_shift`)** ([`scripts/verify_phase25_shifted_nested.py`](../scripts/verify_phase25_shifted_nested.py), [`scripts/run_mlip_gcmc.py`](../scripts/run_mlip_gcmc.py)):
+  - Adjusts inner fugacity $f_{\text{ref}} = f_{\text{tgt}} \exp(-\Delta\varepsilon / k_B T)$ via three-stage pre-production calibration (two classical stages capped at `+2.0 kJ/mol` plus a `60–80`-cycle target-ensemble `PilotStage3` refinement) and fixes $\Delta\varepsilon$ during equilibration/production while cancelling it identically in $\exp[-\beta(\Delta U_{\text{tgt}} - \Delta U_{\text{ref}} - \Delta\varepsilon\,\Delta N)]$.
+  - **Shifted Null Test (`Pol-3Site -> Mercado`, `Δε = -2.57 kJ/mol`, `2.82× f_ref`)**: `5.8723 ± 0.0526` vs. `6.0230 ± 0.0406 mmol/g` (`z = 2.27σ`, $Q_{\text{st}}^{\text{diff}} = 35.55 \pm 0.63$ vs. `36.28 ± 0.25 kJ/mol`) with symmetric sampling (`Ins = 1,288 / 4,274`, `Del = 1,262 / 3,511`, `57.5%` acceptance).
+- **`FastMaceD3Target` (`4.21×` Speedup) & FP32 vs. FP64 Parity** ([`scripts/verify_fp32_parity.py`](../scripts/verify_fp32_parity.py)):
   - Micro-batched `no_grad` MACE (`compute_force=False`, `mace_chunk=2` for `<550` atoms, `1` for `>=550` atoms) + cached static-framework GPU edge lists for `TorchDFTD3Calculator`: cuts 4-box inference from `157.7 ms/box` (ASE) to **`37.5 ms/box`** (`149.9 ms/batch`), matching ASE within `0.0025–0.0082 kJ/mol/CO2`.
-- **Reversible Exchange Unlocked on Live `MACE-MP-0 + D3` (`298 K, 0.01 bar`)**:
-  - Two-stage self-consistent shift (`-9.19 kJ/mol`, `40.84×` `f_ref`) restores bidirectional exchange (`Ins = 64 / 82`, `Del = 40 / 436`, `50.6%` outer acc, `9.7771 ± 0.2617 mmol/g`).
+  - Across `15` `Mg-MOF-74 1×1×2` snapshots (`N = 1, 13–16, 33–37 CO₂`), live FP32 `FastMaceD3Target` matches full FP64 `MACE + TorchDFTD3`:
+    - `MACE-MatPES-r2SCAN-0 + D3(r2scan)`: max total `|ΔU| = 0.2058 kJ/mol` (`RMS = 0.0951`), max per-molecule `|ΔU/N| = 0.0940 kJ/mol/CO2`, max pairwise transition error `0.3500 kJ/mol` (`0.141 kB*T @ 298 K`).
+    - `MACE-MP-0 (Medium) + D3(pbe)`: max total `|ΔU| = 0.4650 kJ/mol`, max per-molecule `0.3130 kJ/mol/CO2`, max pairwise transition error `0.4712 kJ/mol` (`0.190 kB*T @ 298 K`).
 - **Supercell Finite-Size Convergence (`1×1×2` vs. `1×1×4`, `298 K, 0.01 bar`, [`scripts/paper_exp4_finite_size.py`](../scripts/paper_exp4_finite_size.py))**:
   - Direct `Mercado`: `0.8018 ± 0.0115` (`324` atoms, $r_{\text{cut}} = 6.66$ Å) vs. `0.8030 ± 0.0337 mmol/g` (`648` atoms, $r_{\text{cut}} = 10.86$ Å), **`z = 0.04σ`**.
   - Live `MACE-MP-0 + D3`: `9.3398 ± 0.3610` vs. `9.0615 ± 0.2539 mmol/g`, **`z = 0.63σ`** (`Molar enthalpy -<U>/<N>+RT = 44.99` vs. `45.01 kJ/mol`).
@@ -48,9 +49,8 @@
 Tested across 4 MACE generations in [`scripts/phase3_model_probe.py`](../scripts/phase3_model_probe.py) and [`scripts/paper_exp1_model_mechanism.py`](../scripts/paper_exp1_model_mechanism.py):
 
 - **Far-Field Zero-Offset Proof (`Mg-MOF-74` pore center**, $r_{\min} = 7.31$ Å $> 6.0$ Å MACE cutoff):
-  - Raw MLIP without D3: `MP-0` (`+0.01`), `MPA-0` (`+0.00`), `MP-0b3` (`-0.21`), `MatPES-r2SCAN-0` (`-0.03 kJ/mol`).
-  - With D3 dispersion tail: `-2.38` to `-2.56 kJ/mol`. This confirms zero far-field baseline offset; differences among models arise strictly from short-range interaction physics.
-- **Short-Range Overbinding Collapse in Newer Models (`Mg²⁺–O=C=O` axial ray & `N ≈ 25` pore ensemble)**:
+  - Raw MLIP without D3: `MP-0` (`+0.01`), `MPA-0` (`+0.00`), `MP-0b3` (`-0.21`), `MatPES-r2SCAN-0` (`-0.03 kJ/mol`); with D3 dispersion tail: `-2.38` to `-2.56 kJ/mol`. This confirms zero far-field baseline offset; differences arise from short-range interaction physics and D3 parameterizations.
+- **Short-Range Collapse in `MPA-0` / `MP-0b3` (`Mg²⁺–O=C=O` axial scan & `N ≈ 25` pore ensemble)**:
 
 | Model | Unobstructed `Mg²⁺` Radial Min (`r_min`) | Loaded Mean `-U/N` (`kJ/mol`) | Diagnostic Finding |
 | :--- | :---: | :---: | :--- |
@@ -58,40 +58,52 @@ Tested across 4 MACE generations in [`scripts/phase3_model_probe.py`](../scripts
 | **`MACE-MPA-0 + D3(PBE)`** | **`-93.98 kJ/mol`** (`2.35 Å`) | **`82.84`** | Severe short-range collapse (`-75.26` No-D3) |
 | **`MACE-MP-0b3 + D3(PBE)`** | **`-105.17 kJ/mol`** (`2.20 Å`) | **`92.15`** | Severe short-range collapse (`-85.48` No-D3) |
 | **`MACE-MatPES-r2SCAN-0 (No D3)`** | `-35.39 kJ/mol` (`2.35 Å`) | `25.47` | Underbinds without dispersion tail |
-| **`MACE-MatPES-r2SCAN-0 + D3(r2scan)`** | **`-46.45 kJ/mol`** (`2.20 Å`) | **`40.13`** | Closest static match to OMS binding window |
+| **`MACE-MatPES-r2SCAN-0 + D3(r2scan)`** | **`-46.45 kJ/mol`** (`2.20 Å`) | **`40.13`** | Closest static match to OMS well, yet overpredicts isotherms (see Sec. 3–4) |
 
 ---
 
-## 3. Preliminary Simulation Numbers (WIP — Subject to Open Issues)
+## 3. Curated NIST ISODB Reference & Four-MOF Benchmarks (`298 K` & `313 K`)
 
-> **Thermodynamic Note**: Fluctuation heat $Q_{\text{st}}^{\text{diff}} = RT - \text{Cov}(U, N)/\text{Var}(N)$ measures the **differential** isosteric heat of the $(N+1)$-th adsorbed molecule, whereas $-\langle U/N \rangle + RT$ measures the **integral** mean molar enthalpy over all $N$ molecules. Above 1:1 OMS saturation (`~8.24 mmol/g` in `Mg-MOF-74`), secondary pore sites lower differential $Q_{\text{st}}^{\text{diff}}$ toward `~32 kJ/mol` while integral enthalpy remains `~43–46 kJ/mol`; they are **not** interchangeable estimators of the same quantity except near zero loading.
+All experimental comparisons below use unmodified `298 K CO₂` gravimetric tables downloaded via [`scripts/fetch_nist_isodb.py`](../scripts/fetch_nist_isodb.py) into [`data/exp_isotherms/manifest.json`](../data/exp_isotherms/manifest.json):
+- `Mg-MOF-74`: DOI `10.1021/acs.jpcc.7b08239` (`n=16`, `1e-6–9.995 bar`) & `10.1039/c5dt03137k` (`n=24`)
+- `Ni-MOF-74`: DOI `10.1021/acs.jpcc.5b03700` (`n=18`, `0.0101–1.01 bar`) & `10.1080/15422119.2014.884507` (`n=9`)
+- `HKUST-1`: DOI `10.1002/aic.15837` (`n=79`, `0.0137–1.05 bar`)
+- `IRMOF-1`: DOI `10.1021/acs.jctc.5b00093` (`n=30`, `2.074–42.18 bar`) & `10.1038/srep12045` (`n=11`)
 
-### `Mg-MOF-74` (`298 K`, `1×1×2`, `4` boxes × `K = 25`, [`scripts/run_mlip_gcmc.py`](../scripts/run_mlip_gcmc.py))
+> **Thermodynamic Distinction**: Fluctuation heat $Q_{\text{st}}^{\text{diff}} = RT - \text{Cov}(U, N)/\text{Var}(N)$ measures the **differential** isosteric heat of adding an $(N+1)$-th molecule, whereas $-\langle U/N \rangle + RT$ measures the **integral** mean molar enthalpy over all $N$ molecules. Above 1:1 OMS saturation (`~8.24 mmol/g` in `Mg-MOF-74`), secondary pore sites lower differential $Q_{\text{st}}^{\text{diff}}$ while integral enthalpy stays higher—these are distinct physical quantities.
 
-| Pressure | `MACE-MatPES-r2SCAN-0 + D3(r2scan)` Uptake | Differential $Q_{\text{st}}^{\text{diff}}$ (Fluc) | Integral $-\langle U/N \rangle + RT$ | `Prod Ins / Del` Acc (4 boxes) | Status |
-| :---: | :---: | :---: | :---: | :---: | :--- |
-| `0.002 bar` (`260 prod`) | `2.0200 ± 0.4745 mmol/g` | `43.07 ± 2.03 kJ/mol` | — | `31/148`, `20/134` | WIP (short chain) |
-| `0.010 bar` (`480 prod`) | `5.3589 ± 0.2435 mmol/g` | `47.57 ± 7.59 kJ/mol` | `46.69 ± 0.35 kJ/mol` | `77/240`, `58/184` | WIP (~3.8× vs exp.) |
-| `0.050 bar` (`480 prod`) | `9.6658 ± 0.3747 mmol/g` | `33.07 ± 10.56 kJ/mol` | `45.59 ± 0.21 kJ/mol` | `78/254`, `76/258` | WIP (high Fluc SEM) |
-| `0.150 bar` (`480 prod`) | `11.4721 ± 0.1519 mmol/g` | `31.97 ± 4.23 kJ/mol` | `43.17 ± 0.32 kJ/mol` | `71/199`, `72/302` | WIP (~2.7× vs exp.) |
+### A. Non-OMS Positive Control: `IRMOF-1 (MOF-5)` ([`data/IRMOF-1.cif`](../data/IRMOF-1.cif), `424` atoms, `298 K`)
+- Classical zero-charge `UFF` yields `0.3554 / 0.7447 / 1.5457 / 4.5386 mmol/g` (`0.5 / 1.0 / 2.0 / 5.0 bar`, `Qst = 12.62–14.38 kJ/mol`), closely matching NIST ISODB `10.1021/acs.jctc.5b00093` (`2.074 bar -> 1.838`, `5.240 bar -> 4.917 mmol/g`).
+- In contrast, **`MACE-MatPES-r2SCAN-0 + D3(r2scan)`** (`UFF` proposer, `360 prod` cycles) predicts **`1.2886 ± 0.1831 / 2.1874 ± 0.1978 / 5.2688 ± 0.5154 / 12.2190 ± 0.5134 mmol/g`** (integral molar enthalpy `~18.4–19.0 kJ/mol`, **2.5–2.9× higher than experiment**). Because `IRMOF-1` has **no open metal sites**, this isolates a systematic `+4–5 kJ/mol/CO2` background overbinding in the `r2SCAN-0 + D3(r2scan)` setup itself.
 
-### `Ni-MOF-74` (`298 K`, `1×1×2`, `Pol-3Site -> r2SCAN-0 + D3(r2scan)`)
+### B. Cross-Topology Equilibrated `HKUST-1` ([`data/Cu-BTC.cif`](../data/Cu-BTC.cif), `PilotStage3`, `480 prod` cycles, `298 K`)
+- With `PilotStage3` target-ensemble bias refinement (`-0.28 / +0.90 / +1.34 kJ/mol`), `HKUST-1` (`UFF` proposer -> `r2SCAN-0 + D3(r2scan)`) equilibrates monotonically with balanced outer exchange (overturning the earlier unconverged `200`-cycle `1.27 mmol/g` plateau artifact):
+  - `0.15 bar`: **`1.2199 ± 0.1482 mmol/g`** (`Ins=69/197, Del=56/1271`, $Q_{\text{st}}^{\text{diff}} = 25.49 \pm 3.67$, integral `25.51 ± 0.49 kJ/mol`) vs. NIST ISODB `0.147 bar`: `0.880 mmol/g`.
+  - `0.50 bar`: **`2.3279 ± 0.1678 mmol/g`** (`Ins=79/220, Del=60/1263`, $Q_{\text{st}}^{\text{diff}} = 21.46 \pm 3.61$, integral `23.91 kJ/mol`) vs. NIST ISODB `0.505 bar`: `2.670 mmol/g`.
+  - `1.00 bar`: **`4.0984 ± 0.0657 mmol/g`** (`Ins=76/182, Del=52/1303`, $Q_{\text{st}}^{\text{diff}} = 24.34 \pm 0.62$, integral `23.53 kJ/mol`) vs. NIST ISODB `0.998 bar`: `4.530 mmol/g`.
+- Remarkably, static axial probing along the `Cu²⁺` paddlewheel still yields a weak `-10.07 kJ/mol` minimum (`r2SCAN+D3`) / `-7.72 kJ/mol` (`MP-0+D3`), indicating partial error cancellation between weak `Cu²⁺` axial binding and strong framework/cage dispersion (`~24 kJ/mol` integral heat).
 
-- `0.01 bar` (`260 prod`): `0.5779 ± 0.1437 mmol/g`, $Q_{\text{st}}^{\text{diff}} = 33.83 \pm 1.26\ \text{kJ/mol}$ (`Ins=35/67`, `Del=27/367`)
-- `0.05 bar` (`480 prod`): `1.4671 ± 0.1705 mmol/g`, $Q_{\text{st}}^{\text{diff}} = 35.57 \pm 1.30$, Integral `36.48 ± 0.66 kJ/mol` (`Ins=75/182`, `Del=55/757`)
-- `0.15 bar` (`480 prod`): `4.2921 ± 0.3457 mmol/g`, $Q_{\text{st}}^{\text{diff}} = 35.23 \pm 2.74$, Integral `36.98 ± 0.50 kJ/mol` (`Ins=79/170`, `Del=59/876`)
+### C. `Mg-MOF-74` (`1,200 prod` cycles) & `Ni-MOF-74` (`298 K` & `313 K`)
+
+| MOF & Condition | Uptake (mmol/g) | Differential $Q_{\text{st}}^{\text{diff}}$ (Fluc) | Integral $-\langle U/N \rangle + RT$ | `Prod Ins / Del` Acc | NIST ISODB (`298 K`) Comparison |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **`Mg-MOF-74`, `298 K, 0.01 bar` (`1200 prod`)** | `6.3407 ± 0.4486` | `50.28 ± 1.81 kJ/mol` | `48.07 ± 0.25 kJ/mol` | `133/590`, `112/435` | `0.0101 bar`: `2.102 mmol/g` (MLIP `~3.0×` high) |
+| **`Mg-MOF-74`, `298 K, 0.05 bar` (`1200 prod`)** | `9.4714 ± 0.2595` | `36.31 ± 1.97 kJ/mol` | `45.77 ± 0.27 kJ/mol` | `182/573`, `171/823` | `0.0315 bar`: `4.410`, `0.0992 bar`: `5.867` |
+| **`Mg-MOF-74`, `298 K, 0.15 bar` (`480 prod`)** | `11.4721 ± 0.1519` | `31.97 ± 4.23 kJ/mol` | `43.17 ± 0.32 kJ/mol` | `71/199`, `72/302` | `0.099–0.311 bar`: `5.87–7.04` (MLIP `~1.8×` high) |
+| **`Mg-MOF-74`, `313 K, 0.01 bar` (`480 prod`)** | `3.9595 ± 0.6894` | `42.59 ± 6.03 kJ/mol` | `46.81 ± 0.44 kJ/mol` | `46/338`, `39/135` | Thermal desorption `-2.38 mmol/g` vs. `298 K` |
+| **`Ni-MOF-74`, `298 K, 0.05 bar` (`480 prod`)** | `1.4671 ± 0.1705` | `35.57 ± 1.30 kJ/mol` | `36.48 ± 0.66 kJ/mol` | `75/182`, `55/757` | `0.0512 bar`: `2.091 mmol/g` |
+| **`Ni-MOF-74`, `298 K, 0.15 bar` (`480 prod`)** | `4.2921 ± 0.3457` | `35.23 ± 2.74 kJ/mol` | `36.98 ± 0.50 kJ/mol` | `79/170`, `59/876` | `0.1512 bar`: `4.456 mmol/g` |
+| **`Ni-MOF-74`, `313 K, 0.05 bar` (`480 prod`)** | `1.1449 ± 0.2693` | `38.55 ± 1.71 kJ/mol` | `37.14 ± 0.39 kJ/mol` | `74/270`, `60/641` | Thermal desorption `-0.32 mmol/g` vs. `298 K` |
+
+Notice how `1,200` outer MCMC cycles on `Mg-MOF-74` at `0.05 bar` cut the fluctuation $Q_{\text{st}}^{\text{diff}}$ SEM by **5.4×** (from `±10.56` down to **`±1.97 kJ/mol`**) and cleanly resolve differential heat dropping from `50.28` (`0.01 bar`) to **`36.31 kJ/mol`** (`0.05 bar`, above 1:1 OMS saturation `~8.24 mmol/g`), while integral enthalpy remains `45.77 kJ/mol`.
 
 ---
 
-## 4. Known Issues & Open Work
+## 4. Remaining Open Work (Stage 2 / Stage 3)
 
-1. **`HKUST-1` (`data/Cu-BTC.cif`) Unconverged MLIP Chains (Excluded)**:
-   - Static axial probing shows spin-unaware universal MLIPs severely underbind the antiferromagnetic `Cu²⁺–Cu²⁺` paddlewheel (`-10.07 kJ/mol` for `r2SCAN-0+D3`, `-7.72 kJ/mol` for `MP-0+D3` at `2.40 Å`, vs. `~26–30 kJ/mol` experiment).
-   - However, our `200`-cycle `HKUST-1` GCMC runs with `--proposer uff` (`0.15 / 0.50 / 1.00 bar`: `1.218 / 1.337 / 1.272 mmol/g`) **did not reach grand-canonical equilibrium** at `0.5 / 1.0 bar`: positive Stage-2 shifts (`+3.71 / +4.66 kJ/mol`) suppressed the inner proposer fugacity to `0.22× / 0.15×`, leaving `Ins` (`31, 40`) twice as large as `Del` (`12, 19`) with persistent upward drift between chain halves (`1.17 -> 1.50` and `1.17 -> 1.37 mmol/g`). Warm-start / shift calibration and much longer chains are required before reporting `HKUST-1` MLIP isotherms.
-2. **Missing Periodic DFT Ground-Truth Single Points**:
-   - Even `MACE-MatPES-r2SCAN-0 + D3(r2scan)` overpredicts `Mg-MOF-74` `298 K` uptake by **~2.7–3.8×** (`5.36 / 9.67 / 11.47 mmol/g` vs. Mason *EES* 2011 `~1.4 / 3.1 / 4.3 mmol/g`), far larger than crystal-accessibility losses. Periodic DFT (`r2SCAN`, `r2SCAN+D3`, `PBE+D3`) single-point benchmarks on representative pore snapshots are needed to separate MLIP fitting error, XC functional error, and potential D3 double-counting.
-3. **Sampling Depth for Fluctuation Differential** $Q_{\text{st}}^{\text{diff}}$:
-   - `480` outer cycles accept only ~70 total insertions/deletions across 4 boxes, leaving $\pm 10.56\ \text{kJ/mol}$ SEM on fluctuation $Q_{\text{st}}^{\text{diff}}$ at `0.05 bar`. Longer chains or Clausius–Clapeyron thermodynamic integration are required.
-4. **Experimental Reference Tables, Control MOF & FP32 Validation**:
-   - Exact digitized tables from NIST ISODB / original SI are needed in place of rough literature point checks.
-   - A non-OMS physisorption control MOF (e.g., `ZIF-8` or `UiO-66`) and an explicit `float32` vs. `float64` MLIP energy parity bound across loaded supercells are still pending.
+1. **Periodic DFT Single-Point Ground Truth & D3 Parameter Audit (Priority Next)**:
+   - Even with accurate NIST ISODB references (`Mg-MOF-74`: `2.10–7.04 mmol/g`; `IRMOF-1`: `1.84–4.92 mmol/g`), `MACE-MatPES-r2SCAN-0 + D3(r2scan)` systematically overpredicts uptake on both `Mg-MOF-74` (`~1.8–3.0×`) and non-OMS `IRMOF-1` (`~2.5–2.9×`). Representative snapshots across `Mg-MOF-74`, `Ni-MOF-74`, `HKUST-1`, and `IRMOF-1` must be evaluated with true periodic DFT (`r2SCAN`, `r2SCAN+D3`, `PBE+D3`, plus spin-polarized `Cu²⁺` checks) and audited against `torch-dftd`'s `r2scan` damping parameters to separate MLIP error, XC bias, and dispersion double-counting.
+2. **Optional Small-Sample DFT Fine-Tuning / Δ-Learning**:
+   - Once periodic DFT reference labels are computed, lightweight MACE fine-tuning or a Δ-learning residual head can be plugged directly into [`scripts/run_mlip_gcmc.py`](../scripts/run_mlip_gcmc.py) to test physical isotherm recovery.
+3. **Physical Model Scope Boundaries (Structural Assumptions)**:
+   - Framework and adsorbate geometries are strictly rigid (omitting framework breathing and CO₂ bending), and classical `Pol-SCF` adds many-body Thole induction directly onto unpolarized TraPPE/UFF parameters (induction double-counting relative to polarizable-fit force fields).
