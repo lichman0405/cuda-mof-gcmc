@@ -18,7 +18,7 @@
 - **与工业标准 `RASPA3 (3.0.29)` 统计误差内逐点对齐**：在 `Mg-MOF-74`（`298 K`, UFF+REPEAT）基准上，`0.10 Å` `O(h⁴)` 三维 Tricubic GPU 内核与原生 RASPA3 网格版在 `0.15 / 1.0 / 5.0 bar` 偏差仅 **`+2.32% / +1.39% / -0.41%`**（全部 **`≤ 0.54σ`**，$\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$），近程 `Mg–O` 径向插值误差较三线性压缩 **`290.3×`**（`190.46 K → 0.656 K`，Mercado 2016 低至 `0.092 K`）。
 - **单卡百倍级真实加速（RTX 5070）**：`6,400 万` 步耗时 `106.9 s`（**`598,669 MC-steps/s`**），对比同算法单核 RASPA3 Tricubic 网格版（`3,908 steps/s`）加速 **`153.2×`**，对比精确 Ewald（`1,215 steps/s`）加速 **`492.6×`**，三维网格构建加速 **`38.9×`**（`3.03 s` vs `117.98 s`）。
 - **GPU 原生 Level 2 全自洽多体极化（`Pol-SCF`）**：Block 级共享内存 Applequist-Thole 自洽求解器与 `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**，在 `15:85` CO₂/N₂ 烟道气中清晰捕捉客体间多体相互退极化屏蔽效应（选择性由单骨架场 `Pol-3Site` 的 `64.6 / 67.4` 物理回落至 `37.3 / 43.2`）。
-- **GPU 经典 + MLIP Nested MC 前期摸底通过（`Phase 1`）**：在 60 个孔道构型上，`Mercado 2016` 与 `MACE-MP-0 (Medium) + D3`（最低结合能 `-44.33 kJ/mol`，吻合实验 `40–47 kJ/mol`）相关性达 **`R² = 0.911`**，能量残差方差仅 **`3.42 kJ/mol`（`1.38 k_B T`）**，单分子理论外层接受率 **`84.4%`**（RTX 5070 `1×1×2` 推理 `107.7 ms/eval`）。
+- **GPU 经典提议 + MLIP 嵌套蒙特卡洛闭环跑通（`Phase 1–2` 已完成）**：零磁盘 I/O 的 CUDA 提议器动态库（[`build\mof_gcmc_proposer.dll`](src/proposer_dll.cu)）耦合 PyTorch `MACE-MP-0 (Medium) + D3` 外层精确重加权，先在跨力场零偏差对拍中通过检验（`Pol-3Site -> Mercado 2016`：`5.9668 ± 0.2072` vs 直接模拟 `6.0230 ± 0.0406 mmol/g`，偏差仅 `z = 0.27σ`、$|\Delta Q_{\text{st}}| = 1.23\ \text{kJ/mol}$，能量接口误差 `0.000e+00 K`），随后在 RTX 5070 上端到端跑通 `MACE-MP-0 + D3` 实景 Nested MC（`56.4%` 外层接受率，`84.7 s` 完成 `451` 次 MACE 评估与 `5,400` 步 GPU 内部提议）。
 - **全双精度零能量漂移**：全程 `double` 共享内存状态 + 周期全盒重算，常规/一阶极化最大能量漂移低至 **`2.0e-09 ~ 1.0e-08 K`**，全自洽多体极化 **`≤ 7.25e-07 K`**，全工况细致平衡偏差 `|acc_ins - acc_del| ≤ 0.003`。
 - **零依赖统一 JSON/CLI 通用引擎**：单一可执行文件（[`mof_gcmc_cli.exe`](src/main_cli.cu)）集成通用 CIF 解析（`19` 种 MOF 元素）、UFF / Mercado 2016 第一性原理力场、二元 Identity Swap、Peng–Robinson 逸度、自动化检验套件与 300 DPI 可视化图表。
 
@@ -34,9 +34,10 @@
   - **第三步**：多组分竞争吸附（CO₂/N₂ 与 CO₂/CH₄）、二元 Peng–Robinson 混合逸度与对称 Identity Swap。
   - **第四步**：`0.10 Å` `O(h⁴)` 三维 Tricubic 插值、每 `50k` 步全盒重算零漂移、官方 **Mercado 2016** DFT 力场，以及原生 **RASPA3 (`3.0.29`)** 双重背靠背验证（`153.2×` / `492.6×`）。
   - **第五步 & Level 2**：统一 JSON/CLI 引擎（[`mof_gcmc_cli.exe`](src/main_cli.cu)）+ Block 级共享内存全自洽多体 `Pol-SCF`（`1.83e-08 K` 精确矩阵求逆对齐）。
-- **[进行中] 第六步 — GPU 经典提议 + MLIP 嵌套蒙特卡洛（`Phase 1` 已完成）**
+- **[进行中] 第六步 — GPU 经典提议 + MLIP 嵌套蒙特卡洛（`Phase 1–2` 已完成）**
   - **Phase 1（已完成）**：在 RTX 5070 上实测 `MACE-MP-0 + D3` 推理速度（`1×1×2` 为 `107.7 ms/eval`）、OMS 径向曲线及 60 构型能量相关性（`Mercado 2016` 提议器 `R² = 0.911`、理论单分子外层接受率 `84.4%`）。
-  - **Phase 2–3（下一步）**：封装 CUDA `propose_k_steps` 动态库接口，在 PyTorch 中实现精确外层 Nested MC 重加权并在系列 OMS-MOF 上跑通端到端等温线对标。
+  - **Phase 2（已完成）**：封装零 I/O CUDA 提议器动态库（`build\mof_gcmc_proposer.dll`），完成跨力场无偏证明（`Pol-3Site -> Mercado`, `z = 0.27σ`）与实景 `MACE-MP-0 (Medium) + D3` 端到端 Nested MC（外层接受率 `56.4%`，总耗时 `84.7 s`）。
+  - **Phase 3（下一步）**：多副本多压力稳态等温线（`0.05–5.0 bar`）、`cuequivariance` 等变核加速，以及跨体系 OMS-MOF（`Co-/Ni-MOF-74`、`HKUST-1`、`UiO-66`）泛化评估。
 
 ---
 
@@ -162,7 +163,9 @@ $$
 
 ---
 
-## 第六步（Phase 1）：GPU 经典提议 + MLIP（`MACE-MP-0 + D3`）嵌套蒙特卡洛可行性摸底
+## 第六步（Phase 1–2）：GPU 经典提议 + MLIP（`MACE-MP-0 + D3`）嵌套蒙特卡洛
+
+### Phase 1：可行性与相关性摸底
 
 ![Phase 1 MLIP Nested MC Probe](assets/phase1_mlip_nested_mc_probe.png)
 
@@ -175,12 +178,26 @@ $$
   - `UFF + Pol-3Site`：$R^2 = 0.755$，$\sigma(\Delta\Delta E) = 4.84\ \text{kJ/mol}\ (1.95\ k_B T)$，单分子理论 Nested MC 接受率 = `82.2%`
   - **`Mercado 2016 DFT-FF`**：$R^2 = 0.911$，$\sigma(\Delta\Delta E) = 3.42\ \text{kJ/mol}\ (1.38\ k_B T)$，单分子理论 Nested MC 接受率 = **`84.4%`**
 
+### Phase 2：CUDA 提议器动态库与精确 Nested MC 引擎
+
+![Phase 2 Nested MC Verification](assets/phase2_nested_mc_verification.png)
+
+核心代码位于 [`include/proposer_api.h`](include/proposer_api.h)、[`src/proposer_dll.cu`](src/proposer_dll.cu)（[`build\mof_gcmc_proposer.dll`](build.bat)）、[`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py) 与 [`scripts/verify_nested_mc.py`](scripts/verify_nested_mc.py)：
+
+- **严格无偏巨正则重加权机制**：每个外层循环调用 CUDA 在固定步宽下执行 $K$ 步满足细致平衡的经典 GCMC 提议（`DELTA_TRANS = 1.0 Å`、`MAX_ANGLE = 0.55 rad`，末尾双精度全盒重算消除累进漂移），再于外层按 $\min\{1,\exp[-\beta((U_{\text{tgt}}(\mathbf{x}') - U_{\text{tgt}}(\mathbf{x})) - (U_{\text{ref}}(\mathbf{x}') - U_{\text{ref}}(\mathbf{x})))]\}$ 接受或回滚，既严格保证目标 MLIP 系综无偏，又避免 MLIP 算力浪费在重叠构型上。
+- **Test 1 — 经典跨力场零偏差证明（`Pol-3Site -> Mercado 2016`，`298 K, 0.15 bar`，`1×1×2`，4 副本）**：
+  - `proposer_eval_energy` 与核内 `U_ref_K` 最大绝对误差 = **`0.000e+00 K`**。
+  - `Pol-3Site -> Mercado 2016` Nested MC（`K = 15`，`2,000` 平衡 + `10,000` 生产循环）实测吸附量 **`5.9668 ± 0.2072 mmol/g`**、$Q_{\text{st}} = 35.05 \pm 1.27\ \text{kJ/mol}$（外层接受率 `56.2%`），与直接 `Mercado 2016` GPU GCMC 基准（`200k` 步：**`6.0230 ± 0.0406 mmol/g`**、$Q_{\text{st}} = 36.28 \pm 0.25\ \text{kJ/mol}$）误差仅 **`z = 0.27σ`**、$|\Delta Q_{\text{st}}| = 1.23\ \text{kJ/mol}$。
+- **Test 2 — `MACE-MP-0 (Medium) + D3` 实景端到端 Nested MC（`298 K, 0.15 bar`，`1×1×2`）**：
+  - 以 `Mercado 2016` 为内层 GPU 提议器（`K = 12`，`100` 平衡 + `350` 生产循环，累计 `5,400` 步 GPU 内部运动与 `451` 次 MACE 评估），在 RTX 5070 上耗时 **`84.7 s`**，外层接受率稳定维持 **`56.4%`**。
+  - 实测吸附量 `8.6223 ± 0.2518 mmol/g`（`5`-块标准误），涨落法 $Q_{\text{st}} = 41.24\ \text{kJ/mol}$，平均摩尔结合能 `-U/N = 42.39 kJ/mol`（`-U/N + RT = 44.87 kJ/mol`）。*工程说明*：由于完美无缺陷 `1×1×2` 晶体上 `MACE-MP-0 + D3` 结合能系统性深于 `Mercado 2016`，单链 `450` 循环轨迹从热启动 `N = 30`（`6.87 mmol/g`）平滑爬坡至 `N = 41`（`~9.39 mmol/g`）；Phase 3 将引入更长平衡期与多副本并发以获取完全稳态等温线。
+
 ---
 
 ## 编译与运行命令
 
 ```powershell
-# 针对 RTX 5070 (sm_120) 编译全部 4 个目标（mof_gcmc, mof_gcmc_mix, mof_gcmc_v2, mof_gcmc_cli）
+# 针对 RTX 5070 (sm_120) 编译全部 5 个目标（mof_gcmc, mof_gcmc_mix, mof_gcmc_v2, mof_gcmc_cli, mof_gcmc_proposer.dll）
 cmd /c build.bat all
 
 # 第一步 + 第二步单组分对比及绘图
@@ -205,8 +222,10 @@ uv run --with numpy python scripts\verify_cli.py
 uv run --with numpy python scripts\verify_scf_pol.py --check-only
 uv run --with matplotlib --with numpy python scripts\plot_scf_pol.py
 
-# 第六步（Phase 1）GPU 经典 GCMC + MACE-MP-0 + D3 Nested MC 可行性摸底
+# 第六步（Phase 1–2）CUDA 提议器动态库编译、MLIP 相关性摸底与 MACE-MP-0+D3 实景 Nested MC 验证
+cmd /c build.bat proposer
 .venv-mlip\Scripts\python.exe scripts\phase1_mlip_probe.py
+.venv-mlip\Scripts\python.exe scripts\verify_nested_mc.py
 ```
 
 ---
@@ -228,7 +247,8 @@ cuda-mof-gcmc/
 │   ├── gcmc_gpu.hpp              # 第一/二步网格构建与单组分 Batched GCMC 接口
 │   ├── mix_gcmc.hpp              # 第三步多组分 8 网格构建与二元共吸附 GCMC 接口
 │   ├── v2_gcmc.hpp               # 第四步 0.10 A Tricubic 高精度 UFF 与 Mercado 2016 接口
-│   └── unified_gcmc.hpp          # 第五步统一 Tricubic + 极化 + Swap GPU 求解器接口
+│   ├── unified_gcmc.hpp          # 第五步统一 Tricubic + 极化 + Swap GPU 求解器接口
+│   └── proposer_api.h            # 第六步 Phase 2 零磁盘 I/O CUDA GCMC 提议器动态库 C ABI
 ├── src/
 │   ├── cif_loader.cpp            # 通用及 Mg-MOF-74 CIF 展开与电荷/摩尔质量校验
 │   ├── grid_builder.cu           # 第一/二步 GPU 3D LJ + Ewald 势能与电场网格预计算
@@ -242,7 +262,8 @@ cuda-mof-gcmc/
 │   ├── main_v2.cu                # 第四步主程序（UFF vs Mercado 2016 Tricubic，各 6,400 万步）
 │   ├── unified_grid_builder.cu   # 第五步统一 8 网格 GPU 构建器（UFF & Mercado 2016）
 │   ├── unified_gcmc_kernel.cu    # 第五步统一全 double SMEM Tricubic + Pol-3Site + Identity Swap 内核
-│   └── main_cli.cu               # 第五步 JSON/CLI 命令行主入口
+│   ├── main_cli.cu               # 第五步 JSON/CLI 命令行主入口
+│   └── proposer_dll.cu           # 第六步 Phase 2 GPU K 步提议、提交与精确算能 DLL 实现
 ├── scripts/
 │   ├── verify_physics.py         # 独立 MIC/PR 校验与第一步 300 DPI 出图脚本
 │   ├── verify_step2.py           # 第二步极化校验与 300 DPI 对比三联图脚本
@@ -253,15 +274,18 @@ cuda-mof-gcmc/
 │   ├── verify_cli.py             # 第五步 4 组 JSON 预设端到端自动断言套件
 │   ├── verify_scf_pol.py         # Level 2 精确 36x36 矩阵求逆 & Pol-SCF GCMC 校验套件
 │   ├── plot_scf_pol.py           # Level 2 Pol-SCF 300 DPI 三联对比与对齐图绘制脚本
-│   └── phase1_mlip_probe.py      # 第六步 Phase 1 MACE-MP-0+D3 测速与 Nested MC 相关性摸底脚本
+│   ├── phase1_mlip_probe.py      # 第六步 Phase 1 MACE-MP-0+D3 测速与 Nested MC 相关性摸底脚本
+│   ├── nested_mc_engine.py       # 第六步 Phase 2 ctypes + MACE-MP-0+D3 混合 Nested MC 引擎
+│   └── verify_nested_mc.py       # 第六步 Phase 2 零偏差证明与实景 MACE-MP-0+D3 验证套件
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
 │   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
 │   ├── step3_mof74_binary_coadsorption.png # 第三步：CO2/N2 & CO2/CH4 选择性与孔道竞争占位图
 │   ├── step4_validated_mercado_raspa3.png  # 第四步：0.10 A vs RASPA3 vs Mercado 2016 验证图
 │   ├── step5_level2_scf_polarization.png   # 第五步：Level 2 Pol-SCF 等温线、屏蔽效应与 36x36 核验图
-│   └── phase1_mlip_nested_mc_probe.png     # 第六步 Phase 1：MACE-MP-0+D3 径向、相关性与耗时评估图
-├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2 / cli）
+│   ├── phase1_mlip_nested_mc_probe.png     # 第六步 Phase 1：MACE-MP-0+D3 径向、相关性与耗时评估图
+│   └── phase2_nested_mc_verification.png   # 第六步 Phase 2：零偏差证明与 MACE-MP-0+D3 实景轨迹图
+├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2 / cli / proposer）
 ├── LICENSE                       # MIT 开源协议
 ├── README.md                     # 英文项目文档
 └── README.zh-CN.md               # 中文项目文档

@@ -16,9 +16,10 @@ if /I "%TARGET%"=="single" goto build_single
 if /I "%TARGET%"=="mix" goto build_mix
 if /I "%TARGET%"=="v2" goto build_v2
 if /I "%TARGET%"=="cli" goto build_cli
+if /I "%TARGET%"=="proposer" goto build_proposer
 if /I "%TARGET%"=="all" goto build_single
 
-echo Unknown target "%TARGET%". Usage: build.bat [all^|single^|mix^|v2^|cli]
+echo Unknown target "%TARGET%". Usage: build.bat [all^|single^|mix^|v2^|cli^|proposer]
 exit /b 1
 
 :build_single
@@ -71,6 +72,19 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Build succeeded: build\mof_gcmc_cli.exe
+if /I "%TARGET%"=="cli" goto done
+
+:build_proposer
+echo Building build\mof_gcmc_proposer.dll for sm_120 (RTX 5070)...
+nvcc -O3 -std=c++17 -arch=sm_120 -Iinclude --shared ^
+    -Xcompiler "/O2 /arch:AVX2 /utf-8 /FS /MD" ^
+    src\cif_loader.cpp src\unified_grid_builder.cu src\unified_gcmc_kernel.cu src\proposer_dll.cu ^
+    -o build\mof_gcmc_proposer.dll
+if errorlevel 1 (
+    echo Build mof_gcmc_proposer.dll failed!
+    exit /b 1
+)
+echo Build succeeded: build\mof_gcmc_proposer.dll
 
 :done
 exit /b 0
