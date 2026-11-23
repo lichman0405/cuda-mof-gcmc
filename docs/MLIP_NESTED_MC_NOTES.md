@@ -64,6 +64,8 @@ Tested across 4 MACE generations in [`scripts/phase3_model_probe.py`](../scripts
 
 ## 3. Curated NIST ISODB Reference & Four-MOF Benchmarks (`298 K` & `313 K`)
 
+![Stage-1 Four-MOF Benchmark vs. NIST ISODB](../assets/stage1_four_mof_nist_isodb.png)
+
 All experimental comparisons below use unmodified `298 K CO₂` gravimetric tables downloaded via [`scripts/fetch_nist_isodb.py`](../scripts/fetch_nist_isodb.py) into [`data/exp_isotherms/manifest.json`](../data/exp_isotherms/manifest.json):
 - `Mg-MOF-74`: DOI `10.1021/acs.jpcc.7b08239` (`n=16`, `1e-6–9.995 bar`) & `10.1039/c5dt03137k` (`n=24`)
 - `Ni-MOF-74`: DOI `10.1021/acs.jpcc.5b03700` (`n=18`, `0.0101–1.01 bar`) & `10.1080/15422119.2014.884507` (`n=9`)
@@ -96,6 +98,8 @@ All experimental comparisons below use unmodified `298 K CO₂` gravimetric tabl
 | **`Ni-MOF-74`, `313 K, 0.05 bar` (`480 prod`)** | `1.1449 ± 0.2693` | `38.55 ± 1.71 kJ/mol` | `37.14 ± 0.39 kJ/mol` | `74/270`, `60/641` | Thermal desorption `-0.32 mmol/g` vs. `298 K` |
 
 Notice how `1,200` outer MCMC cycles on `Mg-MOF-74` at `0.05 bar` cut the fluctuation $Q_{\text{st}}^{\text{diff}}$ SEM by **5.4×** (from `±10.56` down to **`±1.97 kJ/mol`**) and cleanly resolve differential heat dropping from `50.28` (`0.01 bar`) to **`36.31 kJ/mol`** (`0.05 bar`, above 1:1 OMS saturation `~8.24 mmol/g`), while integral enthalpy remains `45.77 kJ/mol`.
+
+![Stage-1 FP32 Parity, Differential Qst Convergence & Thermal Desorption](../assets/stage1_qst_fp32_diagnostics.png)
 
 ---
 

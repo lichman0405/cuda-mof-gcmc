@@ -64,6 +64,8 @@
 
 ## 3. NIST ISODB 原始实验表与四类 MOF 对照实测（`298 K` 与 `313 K`）
 
+![Stage-1 四类 MOF 对照 NIST ISODB 原始实验表](../assets/stage1_four_mof_nist_isodb.png)
+
 以下实验参考均通过 [`scripts/fetch_nist_isodb.py`](../scripts/fetch_nist_isodb.py) 从 NIST ISODB 拉取未改性纯净样品原始实验表，并归档于 [`data/exp_isotherms/manifest.json`](../data/exp_isotherms/manifest.json)：
 - `Mg-MOF-74`：DOI `10.1021/acs.jpcc.7b08239`（`n=16`, `1e-6–9.995 bar`）与 `10.1039/c5dt03137k`（`n=24`）
 - `Ni-MOF-74`：DOI `10.1021/acs.jpcc.5b03700`（`n=18`, `0.0101–1.01 bar`）与 `10.1080/15422119.2014.884507`（`n=9`）
@@ -96,6 +98,8 @@
 | **`Ni-MOF-74`, `313 K, 0.05 bar` (`480 prod`)** | `1.1449 ± 0.2693` | `38.55 ± 1.71 kJ/mol` | `37.14 ± 0.39 kJ/mol` | `74/270`, `60/641` | 相对 `298 K` 热脱附 `-0.32 mmol/g` |
 
 将 `Mg-MOF-74` 外层 MCMC 采样轮数提升至 `1,200` 轮后，`0.05 bar` 涨落法微分热 $Q_{\text{st}}^{\text{diff}}$ 标准误较 `480` 轮缩小 **5.4×**（从 `±10.56` 降至 **`±1.97 kJ/mol`**），清晰分辨出超过 1:1 OMS 饱和位点（`~8.24 mmol/g`）后微分热从 `50.28` 回落至 **`36.31 kJ/mol`**（而积分摩尔焓仍停留在 `45.77 kJ/mol`）。
+
+![Stage-1 FP32 误差上界、微分热收敛与 313K 热脱附诊断](../assets/stage1_qst_fp32_diagnostics.png)
 
 ---
 
