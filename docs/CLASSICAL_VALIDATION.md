@@ -18,8 +18,8 @@ Detailed benchmark tables, Ewald/interpolation diagnostics, native `RASPA3 (3.0.
 - **Exact Hexagonal MIC**: `0 / 10,000` mismatches against `3x3x3` brute-force search (verified in both C++ and Python)
 
 ### 2. GPU 3D Grid Precomputation (`128 × 128 × 36`)
-- **Build Time**: **`356.79 ms`** for all 6 grids (`U_lj_C`, `U_lj_O`, `Phi_elec`, `Ex`, `Ey`, `Ez`, Ewald $\alpha = 0.30\ \text{Å}^{-1}$, $r_{\text{cut}} = 11.0$ Å)
-- **Independent Verification** (vs. direct Ewald $\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$ across `1,000` pore points):
+- **Build Time**: **`356.79 ms`** for all 6 grids (`U_lj_C`, `U_lj_O`, `Phi_elec`, `Ex`, `Ey`, `Ez`, Ewald $\alpha = 0.30$ Å⁻¹, $r_{\text{cut}} = 11.0$ Å)
+- **Independent Verification** (vs. direct Ewald $\alpha_{\text{ref}} = 0.25$ Å⁻¹ across `1,000` pore points):
   - `MAE(U_lj_C) = 3.491 K`, `MAE(U_lj_O) = 10.482 K`, `MAE(Phi) = 4.4038 K/e`
 
 ### 3. Batched GCMC Performance & 298 K CO₂ Isotherm
@@ -38,7 +38,7 @@ Detailed benchmark tables, Ewald/interpolation diagnostics, native `RASPA3 (3.0.
 
 ### 1. Electric-Field Verification
 - **Analytical Ewald Gradient Check**: Smooth full-shell $-\nabla \Phi_{\text{FD}}$ vs. analytical `E_direct` across `100` pore points yields **`MAE = 2.21e-06 K/(e·Å)`** (`h = 1e-4 Å`).
-- **Grid Interpolation Accuracy**: Trilinear `(Ex, Ey, Ez)` on `128×128×36` vs. independent $\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$ across `1,000` pore points yields **`MAE(|E|) = 8.909 K/(e·Å)`**.
+- **Grid Interpolation Accuracy**: Trilinear `(Ex, Ey, Ez)` on `128×128×36` vs. independent $\alpha_{\text{ref}} = 0.25$ Å⁻¹ across `1,000` pore points yields **`MAE(|E|) = 8.909 K/(e·Å)`**.
 
 ### 2. Side-by-Side Model Comparison (`9.6M` MC steps per model on RTX 5070)
 
@@ -57,7 +57,7 @@ Detailed benchmark tables, Ewald/interpolation diagnostics, native `RASPA3 (3.0.
 ![Step 3 Mg-MOF-74 Binary Co-Adsorption](../assets/step3_mof74_binary_coadsorption.png)
 
 ### 1. Multi-Species Grids & Identity-Swap Detailed Balance
-- **8 Precomputed Grids (`128×128×36`)**: Built in **`410.76 ms`** (`U_lj[C_CO2, O_CO2, N_N2, CH4]`, `Phi_elec`, `Ex`, `Ey`, `Ez`); `MAE` vs. direct reference ($\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$, `1,000` pore points) = `0.844 / 2.493 / 2.974 / 14.415 K` (LJ), `3.9038 K/e` (`Phi`), `7.535 K/(e·Å)` (`|E|`).
+- **8 Precomputed Grids (`128×128×36`)**: Built in **`410.76 ms`** (`U_lj[C_CO2, O_CO2, N_N2, CH4]`, `Phi_elec`, `Ex`, `Ey`, `Ez`); `MAE` vs. direct reference ($\alpha_{\text{ref}} = 0.25$ Å⁻¹, `1,000` pore points) = `0.844 / 2.493 / 2.974 / 14.415 K` (LJ), `3.9038 K/e` (`Phi`), `7.535 K/(e·Å)` (`|E|`).
 - **Test A (Ideal-Gas Identity Swap)**: `<N0> = 11.9827` (exact `12.0`), `<N1> = 39.8378` (exact `40.0`).
 - **Test B (`1.0 bar` Flue Gas `Pol-3Site` Swap Consistency)**: `Swap-ON` (`CO2 = 2.5498`, `N2 = 0.2774 mmol/g`) vs. `Swap-OFF` (`CO2 = 2.4995`, `N2 = 0.2772 mmol/g`).
 
@@ -80,7 +80,7 @@ Detailed benchmark tables, Ewald/interpolation diagnostics, native `RASPA3 (3.0.
 - **Grid & Interpolation Refinement (`128×128×36` Trilinear → `256×256×72` Trilinear → `256×256×72` 4-pt Lagrange Tricubic)**:
   - Grid build time = **`3.03 s`** (UFF, 6 grids = `113 MB` VRAM) — **`38.9×`** faster than single-core CPU RASPA3's `117.98 s` (`151×151×46`).
   - Near-field `Mg–O` radial MAE (`2.3–3.8 Å`) drops **`290.3×`**: **`190.46 K`** (`128`-Trilin) → **`12.53 K`** (`256`-Trilin) → **`0.656 K`** (`256`-Tricubic); Mercado 2016 drops `4.99 K → 0.092 K`.
-  - Pore MAE (`1,000` pts vs. direct Ewald $\alpha_{\text{ref}} = 0.25\ \text{Å}^{-1}$): `U_lj_C` drops `0.793 K → 0.061 K`, `U_lj_O` drops `2.387 K → 0.148 K` (Mercado: `C = 0.055 K, O = 0.035 K`).
+  - Pore MAE (`1,000` pts vs. direct Ewald $\alpha_{\text{ref}} = 0.25$ Å⁻¹): `U_lj_C` drops `0.793 K → 0.061 K`, `U_lj_O` drops `2.387 K → 0.148 K` (Mercado: `C = 0.055 K, O = 0.035 K`).
 - **Zero-Drift Double Precision**: Guest coordinates and energies stay in `double` shared memory with full fresh `u_fw + u_gg` periodic recomputation every `50,000` steps — maximum drift across all `128` boxes (`64M` steps/FF) is **`5.879e-09 K`** (UFF) and **`1.024e-08 K`** (Mercado 2016), with detailed balance `max|acc_ins - acc_del| <= 0.000253`.
 
 ### 2. Official Mercado 2016 DFT-Derived Buckingham/LJ + EPM2 Force Field ([`data/mercado2016/`](../data/mercado2016/))

@@ -4,7 +4,7 @@
 
 **Abstract**
 
-Universal machine-learning interatomic potentials (MLIPs) offer a route to simulate gas adsorption in metal–organic frameworks (MOFs) without parameterizing custom force fields per metal center or topology, yet direct grand-canonical Monte Carlo (GCMC) evaluation remains bottlenecked by neural-network latency on steric overlaps, while standard nested Monte Carlo (Nested MC) suffers from insertion/deletion asymmetry whenever target MLIP and classical proposal binding energies diverge. Here we present `cuda-mof-gcmc`, a single-GPU hybrid simulation engine (NVIDIA GeForce RTX 5070) combining (i) a verified $O(h^4)$ 3D tricubic classical and many-body self-consistent Applequist–Thole polarizable (`Pol-SCF`) CUDA solver with (ii) a zero-disk-I/O GPU proposal library coupled directly in memory to batched `MACE + TorchDFTD3` evaluation via chemical-potential-shifted reweighting (`Stage 1 -> Stage 2 -> PilotStage3`). On `Mg-MOF-74` at 298 K (UFF+REPEAT), the tricubic classical kernel matches single-core `RASPA3 3.0.29` within $0.54\sigma$ across 0.15–5.0 bar at $598,669\ \text{MC-steps/s}$ ($153.2\times$ faster than single-core `RASPA3` Tricubic Grid), and `Pol-SCF` agrees with exact `36×36` matrix inversion to $1.83 \times 10^{-8}\ \text{K}$ ($1.13 \times 10^{-11}\ e\cdot\text{Å}$). Within the Nested MC framework, we verify exact reweighting zero bias ($z = 0.27\sigma$), `float32` vs. `float64` transition error bounds ($\le 0.190\ k_B T$), and `1×1×2` vs. `1×1×4` supercell finite-size convergence ($z = 0.04\sigma$ classical, $z = 0.63\sigma$ MLIP). Evaluating four MACE generations and four representative MOFs against unmodified NIST ISODB 298 K measurements reveals that while `MACE-MPA-0` and `MACE-MP-0b3` vanish at the far-field pore center ($7.31$ Å), both suffer severe short-range overbinding collapse ($-93.98$ and $-105.17\ \text{kJ/mol}$) near `Mg²⁺` ($2.20$–$2.35$ Å). Even `MACE-MatPES-r2SCAN-0 + D3(r2scan)` systematically overpredicts uptake on both `Mg-MOF-74` (1.8–3.0×) and non-OMS control `IRMOF-1` (2.5–2.9×), whereas apparent proximity on `HKUST-1` ($4.098\ \text{mmol/g}$ vs. $4.530\ \text{mmol/g}$ at 1.0 bar) involves partial cancellation between weak `Cu²⁺` paddlewheel axial binding ($-10.07\ \text{kJ/mol}$) and strong framework/cage dispersion.
+Universal machine-learning interatomic potentials (MLIPs) offer a route to simulate gas adsorption in metal–organic frameworks (MOFs) without parameterizing custom force fields per metal center or topology, yet direct grand-canonical Monte Carlo (GCMC) evaluation remains bottlenecked by neural-network latency on steric overlaps, while standard nested Monte Carlo (Nested MC) suffers from insertion/deletion asymmetry whenever target MLIP and classical proposal binding energies diverge. Here we present `cuda-mof-gcmc`, a single-GPU hybrid simulation engine (NVIDIA GeForce RTX 5070) combining (i) a verified $O(h^4)$ 3D tricubic classical and many-body self-consistent Applequist–Thole polarizable (`Pol-SCF`) CUDA solver with (ii) a zero-disk-I/O GPU proposal library coupled directly in memory to batched `MACE + TorchDFTD3` evaluation via chemical-potential-shifted reweighting (`Stage 1 -> Stage 2 -> PilotStage3`). On `Mg-MOF-74` at 298 K (UFF+REPEAT), the tricubic classical kernel matches single-core `RASPA3 3.0.29` within $0.54\sigma$ across 0.15–5.0 bar at $598,669\ \text{MC-steps/s}$ ($153.2\times$ faster than single-core `RASPA3` Tricubic Grid), and `Pol-SCF` agrees with exact `36×36` matrix inversion to $1.83 \times 10^{-8}\ \text{K}$ ($1.13 \times 10^{-11}$ e·Å). Within the Nested MC framework, we verify exact reweighting zero bias ($z = 0.27\sigma$), `float32` vs. `float64` transition error bounds ($\le 0.190\ k_B T$), and `1×1×2` vs. `1×1×4` supercell finite-size convergence ($z = 0.04\sigma$ classical, $z = 0.63\sigma$ MLIP). Evaluating four MACE generations and four representative MOFs against unmodified NIST ISODB 298 K measurements reveals that while `MACE-MPA-0` and `MACE-MP-0b3` vanish at the far-field pore center ($7.31$ Å), both suffer severe short-range overbinding collapse ($-93.98$ and $-105.17\ \text{kJ/mol}$) near `Mg²⁺` ($2.20$–$2.35$ Å). Even `MACE-MatPES-r2SCAN-0 + D3(r2scan)` systematically overpredicts uptake on both `Mg-MOF-74` (1.8–3.0×) and non-OMS control `IRMOF-1` (2.5–2.9×), whereas apparent proximity on `HKUST-1` ($4.098\ \text{mmol/g}$ vs. $4.530\ \text{mmol/g}$ at 1.0 bar) involves partial cancellation between weak `Cu²⁺` paddlewheel axial binding ($-10.07\ \text{kJ/mol}$) and strong framework/cage dispersion.
 
 **Keywords**: Metal–Organic Frameworks; Grand-Canonical Monte Carlo; Machine-Learning Interatomic Potentials; Nested Monte Carlo; Open Metal Sites; CUDA
 
@@ -17,6 +17,7 @@ Nanoporous metal–organic frameworks (MOFs) bearing coordinatively unsaturated 
 Universal equivariant graph-neural-network interatomic potentials, such as the MACE foundation model family[4], span most of the periodic table and can in principle evaluate arbitrary MOF–adsorbate interactions. In practice, direct grand-canonical Monte Carlo (GCMC) sampling with MLIPs faces two coupled computational obstacles: (1) roughly 90%–95% of random trial insertions in microporous frameworks clash sterically with framework atoms, wasting neural-network evaluations on trivially rejected states; and (2) conventional Nested MC using a classical proposal potential fails to sample reversibly when the MLIP and classical per-molecule binding energies differ by several $k_B T$, because outer Metropolis acceptance drops exponentially for either deletions or insertions. Moreover, while mature GPU classical simulators such as `gRASPA`[5] provide broad classical force-field coverage and configurational-bias Monte Carlo (CBMC) for flexible chain molecules, they do not expose a zero-disk-I/O in-memory GPU proposer ABI for batched PyTorch MLIP reweighting or block-collective self-consistent many-body polarization (`Pol-SCF`).
 
 To address these challenges on a single consumer GPU (NVIDIA GeForce RTX 5070), we implemented `cuda-mof-gcmc`:
+
 1. A rigid-framework CUDA classical and polarizable GCMC solver featuring $O(h^4)$ 3D tricubic potential/field interpolation, periodic full-box double-precision recomputation, and shared-memory Applequist–Thole `Pol-SCF`, benchmarked back-to-back against native `RASPA3 3.0.29`;
 2. A zero-I/O CUDA proposer dynamic library coupled in memory with batched `FastMaceD3Target` evaluation and a three-stage pre-production chemical-potential shift calibration (`Stage 1 -> Stage 2 -> PilotStage3`), validated for exact zero-bias reweighting, `float32` numerical error bounds, and supercell convergence;
 3. A mechanistic audit of four MACE model generations and equilibrated grand-canonical comparisons against curated NIST ISODB experimental isotherms across `Mg-MOF-74`, `Ni-MOF-74`, `HKUST-1`, and non-OMS control `IRMOF-1` (`MOF-5`).
@@ -32,8 +33,9 @@ Under the rigid-framework approximation, host–guest Lennard-Jones (or Buckingh
 ### 2.2 Explicit Polarization and Block-Collective Many-Body `Pol-SCF`
 
 To capture electrostatic induction near OMS centers, the CUDA solver provides two polarization levels beyond non-polarizable (`NonPol`) sampling:
+
 1. **First-Order Framework-Field Induction (`Pol-COM` and `Pol-3Site`)**: Anisotropic polarizability tensors are placed either at the $\text{CO}_2$ center of mass or distributed across its three atomic sites (resolving the steep $r^{-4}$ field gradient at the coordinating oxygen atom), retaining static cross-terms between induced and permanent guest moments;
-2. **Level-2 Self-Consistent Many-Body Polarization (`polarization: "scf"`)**: At every trial move, coupled induced dipoles under both framework permanent fields, guest permanent DSF fields, and short-range Thole-damped dipole tensors $\mathbf{T}_{ij}^{\text{Thole}}$ are solved self-consistently in block shared memory to tolerance $|\Delta\boldsymbol{\mu}| < 10^{-10}\ e\cdot\text{Å}$:
+2. **Level-2 Self-Consistent Many-Body Polarization (`polarization: "scf"`)**: At every trial move, coupled induced dipoles under both framework permanent fields, guest permanent DSF fields, and short-range Thole-damped dipole tensors $\mathbf{T}_{ij}^{\text{Thole}}$ are solved self-consistently in block shared memory to tolerance $|\Delta\boldsymbol{\mu}| < 10^{-10}$ e·Å:
 
 $$
 \boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i\left(\mathbf{E}_i^{\text{fw}} + \sum_{j \neq i}\mathbf{E}_{j \to i}^{\text{DSF,perm}} + \sum_{j \neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j\right),\qquad U_{\text{pol}}^{\text{SCF}} = -\frac{1}{2}\sum_i \boldsymbol{\mu}_i \cdot \mathbf{E}_i^0
@@ -46,30 +48,33 @@ The solver employs $O(N)$ incremental permanent-field updates, warm-started dipo
 To sample the exact target MLIP grand-canonical distribution using a classical inner proposer $U_{\text{ref}}$, the inner GPU fugacity is shifted prior to equilibration and production by a constant per-molecule energy offset $\Delta\varepsilon$:
 
 $$
-f_{\text{ref}} = f_{\text{tgt}} \exp\!\left(-\frac{\Delta\varepsilon}{k_B T}\right)
+f_{\text{ref}} = f_{\text{tgt}} \exp\left(-\frac{\Delta\varepsilon}{k_B T}\right)
 $$
 
 In each outer cycle, the CUDA proposer executes a $K$-step burst of strictly reversible classical GCMC moves (translation, rotation, insertion, and deletion with fixed step sizes $\Delta_{\text{trans}} = 1.0$ Å, $\Delta_{\text{rot}} = 0.55$ rad, and end-of-burst double-precision recomputation) and passes the resulting non-overlapping box configuration $\mathbf{x}'$ to the MLIP. The outer Metropolis acceptance criterion is:
 
 $$
-P_{\text{acc}}(\mathbf{x} \to \mathbf{x}') = \min\left\{1,\ \exp\left[-\beta\Big(\big(U_{\text{tgt}}(\mathbf{x}') - U_{\text{tgt}}(\mathbf{x})\big) - \big(U_{\text{ref}}(\mathbf{x}') - U_{\text{ref}}(\mathbf{x})\big) - \Delta\varepsilon\,\Delta N\Big)\right]\right\}
+P_{\text{acc}}(\mathbf{x} \to \mathbf{x}') = \min\left\lbrace 1,\ \exp\left[-\beta\left((U_{\text{tgt}}(\mathbf{x}') - U_{\text{tgt}}(\mathbf{x})) - (U_{\text{ref}}(\mathbf{x}') - U_{\text{ref}}(\mathbf{x})) - \Delta\varepsilon\,\Delta N\right)\right]\right\rbrace
 $$
 
-Upon rejection, the CUDA library restores the full pre-burst box coordinates, molecule count, and energies. Because $\Delta\varepsilon$ is fixed prior to equilibration and production, the inner fugacity bias factor $\exp(-\beta\,\Delta\varepsilon\,\Delta N)$ cancels identically in $P_{\text{acc}}$, preserving exact detailed balance with respect to $\Pi(\mathbf{x}) \propto \frac{z_{\text{tgt}}^N}{N!}\exp[-\beta U_{\text{tgt}}(\mathbf{x})]$.
+Upon rejection, the CUDA library restores the full pre-burst box coordinates, molecule count, and energies. Because $\Delta\varepsilon$ is fixed prior to equilibration and production, the inner fugacity bias factor $\exp(-\beta\,\Delta\varepsilon\,\Delta N)$ cancels identically in $P_{\text{acc}}$, preserving exact detailed balance with respect to $\Pi(\mathbf{x}) \propto (z_{\text{tgt}}^N / N!) \exp[-\beta U_{\text{tgt}}(\mathbf{x})]$.
 
 When classical and MLIP site preferences differ (for instance in `HKUST-1`, where classical partial charges overestimate $\text{Cu}^{2+}$ binding relative to spin-unaware MLIPs), purely classical Stage-1/2 estimates can produce overly positive shifts that starve inner insertion proposals. Accordingly, [`scripts/run_mlip_gcmc.py`](../scripts/run_mlip_gcmc.py) performs three pre-production calibration stages (`Stage 1 -> Stage 2 -> PilotStage3`):
+
 1. **Stage 1 & Stage 2 (Classical Initializers)**: Two classical equilibration bursts (`20,000` and `30,000` steps, applying negative loading boosts only if $N < 4$) estimate $\Delta\varepsilon_1$ and $\Delta\varepsilon_2 = \langle (U_{\text{tgt}} - U_{\text{ref}})/N \rangle$, with positive classical shifts capped at $+2.0\ \text{kJ/mol}$;
 2. **PilotStage3 (Target-Ensemble Burn-In Refinement)**: A short `60–80`-cycle live Nested MC run (excluded from production statistics) relaxes molecules to MLIP-preferred adsorption pockets, updating $\Delta\varepsilon_{\text{final}} = 0.5\,\Delta\varepsilon_2 + 0.5\,\Delta\varepsilon_{\text{live}}$. This constant shift is then locked before a $10,000$-step inner refresh and the fixed-shift `eq_cycles + prod_cycles` production run.
 
 ### 2.4 Zero-I/O CUDA Proposer DLL and Batched MLIP Inference
 
 The software bridge separates persistent GPU proposal state ([`include/proposer_api.h`](../include/proposer_api.h), [`src/proposer_dll.cu`](../src/proposer_dll.cu)) from batched MLIP evaluation ([`scripts/nested_mc_engine.py`](../scripts/nested_mc_engine.py)):
+
 - **`mof_gcmc_proposer.dll`**: Retains 3D grids, replica states, and rollback buffers in GPU memory across the entire run, exchanging double-precision arrays in memory with Python via `ctypes` (`proposer_set_chem_pot_shift`, `proposer_propose_k`, `proposer_commit`, `proposer_eval_energy`) without file I/O.
 - **`FastMaceD3Target`**: Bypasses ASE calculator overhead by running `torch.no_grad()` batched MACE graph forward passes (`compute_force=False`, micro-batch size `2` for $<550$ framework atoms and `1` for $\ge 550$ atoms within 12 GB VRAM) paired with cached static framework–framework GPU periodic edge lists in `TorchDFTD3Calculator` (`damping="bj"`).
 
 ### 2.5 Differential Isosteric Heat vs. Integral Molar Enthalpy
 
 Two distinct thermodynamic quantities are tracked separately throughout this report:
+
 - **Differential Isosteric Heat** ($Q_{\text{st}}^{\text{diff}}$): Evaluated from grand-canonical particle–energy fluctuations, measuring the differential enthalpy change upon adsorbing the $(N+1)$-th molecule:
 
 $$
@@ -85,6 +90,7 @@ $$
 ### 3.1 Classical Kernel Parity vs. `RASPA3 3.0.29` and `Pol-SCF` Matrix Check
 
 Benchmarks on `Mg-MOF-74` (298 K, UFF+REPEAT and Mercado 2016 DFT-FF) on a single RTX 5070 establish the numerical baseline (Figures 1–2 and Table 1):
+
 - **Grid Construction & Interpolation Accuracy**: Building six `0.10 Å` grids (`256×256×72`, 113 MB VRAM) takes `3.03 s`, achieving a **`38.9×`** speedup over single-core CPU `RASPA3` grid construction (`117.98 s` on `151×151×46`). Near-field `Mg–O` radial MAE (`2.3–3.8 Å`) drops **`290.3×`** relative to `0.20 Å` trilinear grids (`190.46 K` → **`0.656 K`** for UFF; **`0.092 K`** for Mercado 2016).
 - **Zero Drift & Detailed Balance**: Across `128` boxes (`64M` steps per force field), periodic `50k` recomputation caps maximum energy drift at **`5.879e-09 K`** (UFF) and **`1.024e-08 K`** (Mercado 2016), with `max|acc_ins - acc_del| <= 0.000253`.
 - **Throughput**: The `v2` tricubic kernel sustains **`598,669 MC-steps/s`** (`64M` steps in `106.90 s`)—**`153.2×`** faster than single-core `RASPA3 3.0.29` running the same tricubic grid algorithm (`3,908 MC-steps/s`) and **`492.6×`** faster than single-core `RASPA3` Exact Ewald (`1,215 MC-steps/s`).
@@ -109,6 +115,7 @@ Benchmarks on `Mg-MOF-74` (298 K, UFF+REPEAT and Mercado 2016 DFT-FF) on a singl
 ### 3.2 Nested MC Zero-Bias Proof, Chemical-Potential Shifting & Speedup
 
 Before running production MLIP isotherms, reweighting correctness and inference acceleration were verified (Figure 3):
+
 1. **DLL Energy Parity & Null-Bias Proof**: `proposer_eval_energy` matches internal kernel energy `U_ref_K` to **`0.000e+00 K`**. Using `Pol-3Site` proposals to reweight into `Mercado 2016` (`Mg-MOF-74 1×1×2`, `298 K, 0.15 bar`, 4 boxes, $K = 15$, `2,000 eq + 10,000 prod` cycles), Nested MC yields **`5.9668 ± 0.2072 mmol/g`** ($Q_{\text{st}}^{\text{diff}} = 35.05 \pm 1.27\ \text{kJ/mol}$), matching direct `Mercado 2016` GPU GCMC (`6.0230 ± 0.0406 mmol/g`, $Q_{\text{st}}^{\text{diff}} = 36.28 \pm 0.25\ \text{kJ/mol}$) within **`z = 0.27σ`**.
 2. **Shifted Reweighting & Deadlock Resolution**: Applying `Δε = -2.57 kJ/mol` ($2.82\times$ inner fugacity) in the same classical test yields **`5.8723 ± 0.0526 mmol/g`** ($Q_{\text{st}}^{\text{diff}} = 35.55 \pm 0.63\ \text{kJ/mol}$) with symmetric exchange (`Ins = 1,288 / 4,274`, `Del = 1,262 / 3,511`, `57.5%` outer acceptance). On live `MACE-MP-0 + D3`, unshifted Nested MC at `0.15 bar` suffered **`0` accepted deletions** over `450` cycles (`N` climbed monotonically from `30` to `41`), whereas two-stage shifting (`-9.19 kJ/mol`, `40.84×` fugacity) at `0.01 bar` restored bidirectional exchange (`Ins = 64 / 82`, `Del = 40 / 436`, `50.6%` outer acc, `9.7771 ± 0.2617 mmol/g`).
 3. **Batched Inference Throughput**: Across 4 replicas of `Mg-MOF-74 1×1×2`, `FastMaceD3Target` lowers per-box inference latency from `157.7 ms/box` (ASE) to **`37.5 ms/box`** (`149.9 ms/batch`, **`4.21×`** speedup) while agreeing with full ASE evaluation within **`0.0025–0.0082 kJ/mol/CO2`**.
@@ -120,6 +127,7 @@ Before running production MLIP isotherms, reweighting correctness and inference 
 ### 3.3 `float32` Precision Bounds and Supercell Finite-Size Convergence
 
 To bound numerical errors from `float32` inference and finite periodic box sizes, two targeted checks were conducted (Figure 4 and Table 2):
+
 - **`float32` vs. `float64` Parity**: Across 15 non-overlapping `Mg-MOF-74 1×1×2` snapshots spanning `N = 1`, `13–16`, and `33–37` $\text{CO}_2$ molecules (327–435 atoms), `MACE-MatPES-r2SCAN-0 + D3(r2scan)` in `FastMaceD3Target` differs from full `float64` `MACE + TorchDFTD3` by at most **`0.2058 kJ/mol`** total (`RMS = 0.0951 kJ/mol`), **`0.0940 kJ/mol/CO2`** per molecule, and **`0.3500 kJ/mol`** across pairwise transitions (`0.141 kB*T @ 298 K`). For `MACE-MP-0 (Medium) + D3(pbe)`, corresponding maxima are **`0.4650 kJ/mol`**, **`0.3130 kJ/mol/CO2`**, and **`0.4712 kJ/mol`** (`0.190 kB*T @ 298 K`).
 - **Supercell Convergence (`1×1×2` vs. `1×1×4`)**: At `298 K, 0.01 bar` on `Mg-MOF-74`, doubling the supercell from `1×1×2` (324 framework atoms, effective MIC $r_{\text{cut}} = 6.66$ Å) to `1×1×4` (648 framework atoms, $r_{\text{cut}} = 10.86$ Å) changes direct `Mercado` uptake from `0.8018 ± 0.0115` to `0.8030 ± 0.0337 mmol/g` (**`z = 0.04σ`**) and live `MACE-MP-0 + D3` Nested MC uptake from **`9.3398 ± 0.3610`** to **`9.0615 ± 0.2539 mmol/g`** (**`z = 0.63σ`**, integral enthalpy `44.99 ± 0.54` vs. `45.01 ± 0.21 kJ/mol`), ruling out significant finite-size cutoff artifacts.
 
@@ -140,7 +148,7 @@ To bound numerical errors from `float32` inference and finite periodic box sizes
 
 ### 4.1 Far-Field Zero-Offset Proof and Short-Range Overbinding Collapse
 
-Four MACE foundation generations (`MACE-MP-0 (Medium)`, `MACE-MPA-0`, `MACE-MP-0b3`, and `MACE-MatPES-r2SCAN-0`) were audited in `Mg-MOF-74` across loaded ensembles ($N \approx 25$) and static probes (Figure 5 and Table 3). Placing a single $\text{CO}_2$ molecule at the unobstructed 1D pore center ($r_{\min} = 7.31\ \text{Å} > 6.0\ \text{Å}$ MACE graph cutoff) yields near-zero raw MLIP energies without D3 across all four models (**`+0.01`**, **`+0.00`**, **`-0.21`**, and **`-0.03 kJ/mol`**), while D3 adds a consistent `-2.38` to `-2.56 kJ/mol` tail—confirming zero isolated reference or far-field offset.
+Four MACE foundation generations (`MACE-MP-0 (Medium)`, `MACE-MPA-0`, `MACE-MP-0b3`, and `MACE-MatPES-r2SCAN-0`) were audited in `Mg-MOF-74` across loaded ensembles ($N \approx 25$) and static probes (Figure 5 and Table 3). Placing a single $\text{CO}_2$ molecule at the unobstructed 1D pore center ($r_{\min} = 7.31$ Å $> 6.0$ Å MACE graph cutoff) yields near-zero raw MLIP energies without D3 across all four models (**`+0.01`**, **`+0.00`**, **`-0.21`**, and **`-0.03 kJ/mol`**), while D3 adds a consistent `-2.38` to `-2.56 kJ/mol` tail—confirming zero isolated reference or far-field offset.
 
 Along the unobstructed axial $\text{Mg}^{2+}\cdots\text{O}=\text{C}=\text{O}$ coordinate ($2.20$–$2.35$ Å), however, newer `MACE-MPA-0` and `MACE-MP-0b3` suffer acute short-range collapse even with dispersion disabled (**`-75.26`** and **`-85.48 kJ/mol`** No-D3; **`-93.98`** and **`-105.17 kJ/mol`** with D3(PBE)), yielding `-82.84` and `-92.15 kJ/mol` ensemble averages that freeze pore occupancy. By contrast, `MACE-MP-0 + D3(PBE)` (`-48.74 kJ/mol`) and `MACE-MatPES-r2SCAN-0 + D3(r2scan)` (**`-46.45 kJ/mol`**, ensemble `-U/N = 40.13 kJ/mol`) produce physically bounded static wells.
 
@@ -209,6 +217,7 @@ Three physical conclusions follow from Table 4 and static site scans:
 [5] Dubbeldam, D.; Torres-Knoop, A.; Walton, K. S. `RASPA3` (`3.0.29`); Zhou, J.; et al. `gRASPA`: GPU-accelerated Monte Carlo simulation of adsorption in porous materials. *J. Chem. Theory Comput.* **2024**.  
 [6] Ehlert, S.; Huniar, U.; Orio, M.; Grimme, S. $\text{r}^2\text{SCAN-3c}$: A “Swiss army knife” composite electronic-structure method. *J. Chem. Phys.* **2021**, *154*, 061101.  
 [7] NIST/ARPA-E Database of Novel and Emerging Adsorbent Materials (NIST ISODB) archived in [`data/exp_isotherms/manifest.json`](../data/exp_isotherms/manifest.json):  
+
 - `Mg-MOF-74` (298 K $\text{CO}_2$): DOI `10.1021/acs.jpcc.7b08239`, `10.1039/c5dt03137k`  
 - `Ni-MOF-74` (298 K $\text{CO}_2$): DOI `10.1021/acs.jpcc.5b03700`, `10.1080/15422119.2014.884507`  
 - `HKUST-1` (298 K $\text{CO}_2$): DOI `10.1002/aic.15837`, `10.1007/s10450-013-9527-2`  
