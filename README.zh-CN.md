@@ -103,6 +103,7 @@ uv run --with numpy python scripts\verify_cli.py
 
 ## 详细文档与目录结构
 
+- [**项目技术报告（预印本风格）**](docs/TECHNICAL_REPORT.zh-CN.md) — 统一汇总理论方法、`RASPA3` / `Pol-SCF` / Nested MC 校验、基础模型短程诊断及四类 MOF NIST ISODB 基准评测。
 - [**经典与极化 CUDA 引擎基准校验（第一至五步）**](docs/CLASSICAL_VALIDATION.zh-CN.md) — 晶体几何校验、Tricubic 精度、RASPA3 对标表、共吸附选择性与 `Pol-SCF` 核验。
 - [**MLIP 嵌套蒙特卡洛：已验证机制与 WIP 研究记录**](docs/MLIP_NESTED_MC_NOTES.zh-CN.md) — 零偏差重加权证明、$\Delta\mu_{\text{ref}}$ 标定、MACE 批处理加速、基础模型诊断与待解决物理问题。
 

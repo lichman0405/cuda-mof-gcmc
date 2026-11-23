@@ -104,6 +104,7 @@ uv run --with numpy python scripts\verify_cli.py
 
 ## Documentation & Repository Layout
 
+- [**Technical Report (Preprint Draft)**](docs/TECHNICAL_REPORT.md) — Unified methods, `RASPA3` / `Pol-SCF` / Nested MC verification, foundation-model diagnostics & 4-MOF NIST ISODB benchmarks.
 - [**Classical & Polarizable Validation (Steps 1–5)**](docs/CLASSICAL_VALIDATION.md) — Crystal geometry, tricubic MAE, RASPA3 parity tables, co-adsorption selectivity & `Pol-SCF` checks.
 - [**MLIP Nested MC: Verified Mechanics & WIP Notes**](docs/MLIP_NESTED_MC_NOTES.md) — Reweighting null-bias proofs, $\Delta\mu_{\text{ref}}$ calibration, batched MACE speedup, foundation-model diagnostics & open scientific issues.
 
