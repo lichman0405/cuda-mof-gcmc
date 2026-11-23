@@ -7,7 +7,7 @@
 ![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
 
-面向 **NVIDIA GeForce RTX 5070**（`sm_120`）从零构建的纯 CUDA 金属有机框架（MOF）气体吸附巨正则蒙特卡洛（GCMC）引擎，核心聚焦开放金属位点（OMS）的物理吸附建模（典型基准体系：**Mg-MOF-74 / Mg₂(dobdc) 吸附 CO₂**）。
+面向 **NVIDIA GeForce RTX 5070**（`sm_120`）从零构建的纯 CUDA 金属有机框架（MOF）气体吸附巨正则蒙特卡洛（GCMC）引擎，围绕开放金属位点（OMS）物理吸附（典型基准：**Mg-MOF-74 / Mg₂(dobdc) 吸附 CO₂**）持续演进——从经 `RASPA3` 对标验证的 **`153×` GPU 经典/可极化引擎**，进一步拓展至 **GPU 经典提议 + 通用机器学习势（`MACE-MP-0 + D3`）嵌套蒙特卡洛（Nested MC）** 耦合架构。
 
 ![Step 4 Mg-MOF-74 Tricubic Validation](assets/step4_validated_mercado_raspa3.png)
 
@@ -18,23 +18,25 @@
 - **与工业标准 `RASPA3 (3.0.29)` 统计误差内逐点对齐**：在 `Mg-MOF-74`（`298 K`, UFF+REPEAT）基准上，`0.10 Å` `O(h⁴)` 三维 Tricubic GPU 内核与原生 RASPA3 网格版在 `0.15 / 1.0 / 5.0 bar` 偏差仅 **`+2.32% / +1.39% / -0.41%`**（全部 **`≤ 0.54σ`**，$\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$），近程 `Mg–O` 径向插值误差较三线性压缩 **`290.3×`**（`190.46 K → 0.656 K`，Mercado 2016 低至 `0.092 K`）。
 - **单卡百倍级真实加速（RTX 5070）**：`6,400 万` 步耗时 `106.9 s`（**`598,669 MC-steps/s`**），对比同算法单核 RASPA3 Tricubic 网格版（`3,908 steps/s`）加速 **`153.2×`**，对比精确 Ewald（`1,215 steps/s`）加速 **`492.6×`**，三维网格构建加速 **`38.9×`**（`3.03 s` vs `117.98 s`）。
 - **GPU 原生 Level 2 全自洽多体极化（`Pol-SCF`）**：Block 级共享内存 Applequist-Thole 自洽求解器与 `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**，在 `15:85` CO₂/N₂ 烟道气中清晰捕捉客体间多体相互退极化屏蔽效应（选择性由单骨架场 `Pol-3Site` 的 `64.6 / 67.4` 物理回落至 `37.3 / 43.2`）。
+- **GPU 经典 + MLIP Nested MC 前期摸底通过（`Phase 1`）**：在 60 个孔道构型上，`Mercado 2016` 与 `MACE-MP-0 (Medium) + D3`（最低结合能 `-44.33 kJ/mol`，吻合实验 `40–47 kJ/mol`）相关性达 **`R² = 0.911`**，能量残差方差仅 **`3.42 kJ/mol`（`1.38 k_B T`）**，单分子理论外层接受率 **`84.4%`**（RTX 5070 `1×1×2` 推理 `107.7 ms/eval`）。
 - **全双精度零能量漂移**：全程 `double` 共享内存状态 + 周期全盒重算，常规/一阶极化最大能量漂移低至 **`2.0e-09 ~ 1.0e-08 K`**，全自洽多体极化 **`≤ 7.25e-07 K`**，全工况细致平衡偏差 `|acc_ins - acc_del| ≤ 0.003`。
-- **零依赖统一 JSON/CLI 通用引擎**：单一可执行文件（[`mof_gcmc_cli.exe`](src/main_cli.cu)）集成通用 CIF 解析（`19` 种 MOF 元素）、UFF / Mercado 2016 第一性原理力场、二元 Identity Swap、Peng–Robinson 逸度、自动化检验套件与 5 张 300 DPI 可视化图表。
+- **零依赖统一 JSON/CLI 通用引擎**：单一可执行文件（[`mof_gcmc_cli.exe`](src/main_cli.cu)）集成通用 CIF 解析（`19` 种 MOF 元素）、UFF / Mercado 2016 第一性原理力场、二元 Identity Swap、Peng–Robinson 逸度、自动化检验套件与 300 DPI 可视化图表。
 
-> **适用边界与当前局限**：当前引擎面向**刚性 MOF 骨架与刚性小分子**（CO₂/N₂/CH₄，暂不支持柔性长链 CBMC 与骨架呼吸效应）。`NonPol` 与 `Pol-3Site` 可在秒级至百秒级完成数千万步扫描；`Pol-SCF` 每步需在 FP64 下求解 $O(N^2)$ 自洽迭代，算力开销显著更高（`12 × 120k` 步纯 CO₂ 耗时 `791 s`），且当前沿用标准 TraPPE/UFF 参数叠加极化，定量预测需配合去双重计数可极化力场（如 PHAST / mBSSP）。
+> **适用边界与当前局限**：经典/极化 CUDA 引擎面向**刚性 MOF 骨架与刚性小分子**（CO₂/N₂/CH₄，暂不支持柔性长链 CBMC 与骨架呼吸效应）。`NonPol` 与 `Pol-3Site` 可在秒级至百秒级完成数千万步扫描；`Pol-SCF` 每步需在 FP64 下求解 $O(N^2)$ 自洽迭代（`12 × 120k` 步纯 CO₂ 耗时 `791 s`），且当前沿用标准 TraPPE/UFF 参数叠加极化（存在诱导双重计数）。因此项目正推进 **Step 6（GPU-GCMC + MLIP Nested MC）**，以高速 CUDA 内核作为提议器耦合通用机器学习势，摆脱针对每个新 MOF 手调力场参数的瓶颈。
 
 ---
 
-## 整体研发路线（三步走规划）
+## 整体研发路线
 
-- **[已完成] 第一步：纯 CUDA 刚性 3D 骨架网格 + Batched GCMC 底座（UFF + REPEAT + TraPPE）**
-  - 在 GPU 上一次性预计算 6 张周期 3D 单胞网格（`U_lj_C`、`U_lj_O`、`Phi_elec`、`Ex`、`Ey`、`Ez`；包含精确 12-6 LJ 与 3D Ewald 求和），随后以单 Block 128 线程并行跑 32 个独立压力/副本盒子（共享内存存客体分子、精确六方 MIC、Marsaglia/Rodrigues 球面无偏旋转、DSF 静电、Peng–Robinson 逸度换算），并校验细致平衡与副本一致性。
-- **[已完成] 第二步（支线 B1）：Mg²⁺ 开放金属位点显式静电场极化 + Thole 诱导偶极耦合**
-  - 正式激活预计算的 `(Ex, Ey, Ez)` 三维电场网格与 CO₂ 各向异性极化率张量（$\alpha_\parallel = 4.05\ \text{Å}^3,\ \alpha_\perp = 1.95\ \text{Å}^3,\ \bar{\alpha} = 2.65\ \text{Å}^3$），对比质心极化（`Pol-COM`）与三点分布极化（`Pol-3Site`，$w_C = 0.40, w_O = 0.30$）及客体间 Thole 阻尼诱导偶极作用（$a = 2.1304$）。
-- **[已完成] 第三步：多组分竞争共吸附（CO₂/N₂ 烟道气 & CO₂/CH₄ 沼气）**
-  - 将 GPU 3D 网格与各向异性极化框架扩展为独立多组分求解器 [`build\mof_gcmc_mix.exe`](src/main_mix.cu)，内置 TraPPE N₂（3 位点）与 CH₄（单点 UA）力场、二元 Peng–Robinson 混合逸度、跨组分 Thole 阻尼诱导偶极作用以及严格满足细致平衡的**身份交换（Identity Swap）**蒙卡动作（通过理想气体解析验证与 `Swap-ON` vs `Swap-OFF` 孔道一致性双检）。
-- **[已完成] 第四步（发表级可信度升级）：`0.10 Å` 零漂移高精度内核 + Mercado 2016 DFT 力场 + 原生 RASPA3 背靠背验证**
-  - 在独立高精度求解器 [`build\mof_gcmc_v2.exe`](src/main_v2.cu) 中实现 `256x256x72`（`0.10 Å`）加密网格、`double` 共享内存坐标、每 `50k` 步全盒周期重算（零能量漂移）与 `4 × 1.0M` 步采样，接入官方 **Mercado et al. (*J. Phys. Chem. C* 2016, 120, 12590)** DFT Buckingham/LJ + EPM2 力场，并与 Windows 原生 **RASPA3 (`3.0.29`)** 进行同条件背靠背校验（对比 Tricubic 网格版加速 **`153.2×`**、对比精确 Ewald 加速 **`492.6×`**）。
+- **[已完成] 第一至五步 & Level 2 `Pol-SCF` — 高精度经典/全自洽极化 GPU GCMC 底座**
+  - **第一步**：GPU 刚性三维骨架网格（`U_lj`、`Phi_elec`、`Ex/y/z`）+ 32 盒并发 GCMC 基线（UFF + REPEAT + TraPPE）。
+  - **第二步（`Pol-COM` / `Pol-3Site`）**：Mg²⁺ 开放金属位点显式静电场各向异性极化 + Thole 诱导偶极耦合。
+  - **第三步**：多组分竞争吸附（CO₂/N₂ 与 CO₂/CH₄）、二元 Peng–Robinson 混合逸度与对称 Identity Swap。
+  - **第四步**：`0.10 Å` `O(h⁴)` 三维 Tricubic 插值、每 `50k` 步全盒重算零漂移、官方 **Mercado 2016** DFT 力场，以及原生 **RASPA3 (`3.0.29`)** 双重背靠背验证（`153.2×` / `492.6×`）。
+  - **第五步 & Level 2**：统一 JSON/CLI 引擎（[`mof_gcmc_cli.exe`](src/main_cli.cu)）+ Block 级共享内存全自洽多体 `Pol-SCF`（`1.83e-08 K` 精确矩阵求逆对齐）。
+- **[进行中] 第六步 — GPU 经典提议 + MLIP 嵌套蒙特卡洛（`Phase 1` 已完成）**
+  - **Phase 1（已完成）**：在 RTX 5070 上实测 `MACE-MP-0 + D3` 推理速度（`1×1×2` 为 `107.7 ms/eval`）、OMS 径向曲线及 60 构型能量相关性（`Mercado 2016` 提议器 `R² = 0.911`、理论单分子外层接受率 `84.4%`）。
+  - **Phase 2–3（下一步）**：封装 CUDA `propose_k_steps` 动态库接口，在 PyTorch 中实现精确外层 Nested MC 重加权并在系列 OMS-MOF 上跑通端到端等温线对标。
 
 ---
 
@@ -160,6 +162,21 @@ $$
 
 ---
 
+## 第六步（Phase 1）：GPU 经典提议 + MLIP（`MACE-MP-0 + D3`）嵌套蒙特卡洛可行性摸底
+
+![Phase 1 MLIP Nested MC Probe](assets/phase1_mlip_nested_mc_probe.png)
+
+在 RTX 5070 上使用 `PyTorch cu128` + `mace-torch 0.3.17` + `torch-dftd 0.5.3` 对 `Mg-MOF-74`（`1×1×2` 超胞、`324` 骨架原子，$c = 13.884\ \text{Å} > 2 \times 6.0\ \text{Å}$）开展端到端摸底（[`scripts/phase1_mlip_probe.py`](scripts/phase1_mlip_probe.py)），验证结果如下：
+
+- **D3 色散修正不可或缺**：沿 `Mg²⁺–O(CO₂)` 径向接近开放金属位点时，`MACE-MP-0 (Medium) + D3` 在 `2.535 Å` 给出 `-29.10 kJ/mol` 结合阱（60 构型全域最低结合能 **`-44.33 kJ/mol`**，直接落入实验零覆盖度吸附热 `40–47 kJ/mol` 区间）；关闭 D3 后同路径仅余 `-13.20 kJ/mol`。
+- **RTX 5070 推理吞吐实测**：`MACE-Medium + D3` 对 `1×1×2 + 1 CO₂`（327 原子）单步推理耗时 **`107.72 ms`**（`9.3 eval/s`），`16 CO₂`（372 原子）耗时 **`129.89 ms`**（`7.7 eval/s`），较 `1×1×4`（`206.03 ms`）快近一倍。用 `~600k steps/s` 的 CUDA 引擎做 `K` 步无重叠构型提议，可消除纯 MLIP-GCMC 约 95% 的重叠废步计算。
+- **高相关性支撑 Nested MC（`Mercado 2016` 为最佳内层提议势）**：在 60 个非重叠孔道构型上与 `MACE-MP-0 (Medium) + D3` 对比：
+  - `UFF + REPEAT`：$R^2 = 0.719$，$\sigma(\Delta\Delta E) = 5.28\ \text{kJ/mol}\ (2.13\ k_B T)$，单分子理论 Nested MC 接受率 = `87.1%`
+  - `UFF + Pol-3Site`：$R^2 = 0.755$，$\sigma(\Delta\Delta E) = 4.84\ \text{kJ/mol}\ (1.95\ k_B T)$，单分子理论 Nested MC 接受率 = `82.2%`
+  - **`Mercado 2016 DFT-FF`**：$R^2 = 0.911$，$\sigma(\Delta\Delta E) = 3.42\ \text{kJ/mol}\ (1.38\ k_B T)$，单分子理论 Nested MC 接受率 = **`84.4%`**
+
+---
+
 ## 编译与运行命令
 
 ```powershell
@@ -187,6 +204,9 @@ cmd /c build.bat cli
 uv run --with numpy python scripts\verify_cli.py
 uv run --with numpy python scripts\verify_scf_pol.py --check-only
 uv run --with matplotlib --with numpy python scripts\plot_scf_pol.py
+
+# 第六步（Phase 1）GPU 经典 GCMC + MACE-MP-0 + D3 Nested MC 可行性摸底
+.venv-mlip\Scripts\python.exe scripts\phase1_mlip_probe.py
 ```
 
 ---
@@ -232,13 +252,15 @@ cuda-mof-gcmc/
 │   ├── verify_upgrades.py        # 第四步自动化断言校验与 300 DPI 验证三联图脚本
 │   ├── verify_cli.py             # 第五步 4 组 JSON 预设端到端自动断言套件
 │   ├── verify_scf_pol.py         # Level 2 精确 36x36 矩阵求逆 & Pol-SCF GCMC 校验套件
-│   └── plot_scf_pol.py           # Level 2 Pol-SCF 300 DPI 三联对比与对齐图绘制脚本
+│   ├── plot_scf_pol.py           # Level 2 Pol-SCF 300 DPI 三联对比与对齐图绘制脚本
+│   └── phase1_mlip_probe.py      # 第六步 Phase 1 MACE-MP-0+D3 测速与 Nested MC 相关性摸底脚本
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
 │   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
 │   ├── step3_mof74_binary_coadsorption.png # 第三步：CO2/N2 & CO2/CH4 选择性与孔道竞争占位图
 │   ├── step4_validated_mercado_raspa3.png  # 第四步：0.10 A vs RASPA3 vs Mercado 2016 验证图
-│   └── step5_level2_scf_polarization.png   # 第五步：Level 2 Pol-SCF 等温线、屏蔽效应与 36x36 核验图
+│   ├── step5_level2_scf_polarization.png   # 第五步：Level 2 Pol-SCF 等温线、屏蔽效应与 36x36 核验图
+│   └── phase1_mlip_nested_mc_probe.png     # 第六步 Phase 1：MACE-MP-0+D3 径向、相关性与耗时评估图
 ├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2 / cli）
 ├── LICENSE                       # MIT 开源协议
 ├── README.md                     # 英文项目文档

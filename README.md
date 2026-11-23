@@ -7,7 +7,7 @@
 ![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
 
-A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs) on **NVIDIA GeForce RTX 5070** (`sm_120`), built specifically around open-metal-site (OMS) adsorption physics such as **CO₂ capture in Mg-MOF-74 (Mg₂(dobdc))**.
+A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs) on **NVIDIA GeForce RTX 5070** (`sm_120`), built around open-metal-site (OMS) adsorption physics such as **CO₂ capture in Mg-MOF-74 (Mg₂(dobdc))** — evolving from a verified `153×` GPU classical/polarizable GCMC solver into a **Hybrid GPU-GCMC + Machine-Learning Interatomic Potential (MLIP) Nested Monte Carlo** architecture (`MACE-MP-0 + D3`).
 
 ![Step 4 Mg-MOF-74 Tricubic Validation](assets/step4_validated_mercado_raspa3.png)
 
@@ -18,23 +18,25 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 - **Verified Against `RASPA3 (3.0.29)` Within `0.54σ`**: On `Mg-MOF-74` (`298 K`, UFF+REPEAT), the `0.10 Å` `O(h⁴)` 3D tricubic GPU kernel matches native RASPA3 Tricubic Grid within **`+2.32% / +1.39% / -0.41%`** (`0.15 / 1.0 / 5.0 bar`, $\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$) and cuts radial `Mg–O` interpolation MAE by **`290.3×`** (`190.46 K → 0.656 K`; Mercado 2016 `0.092 K`).
 - **Two-Order-of-Magnitude GPU Speedup (RTX 5070)**: Sustains **`598,669 MC-steps/s`** (`64M` steps in `106.9 s`) — **`153.2×`** faster than single-core RASPA3 Tricubic Grid (`3,908 steps/s`), **`492.6×`** faster than Exact Ewald (`1,215 steps/s`), and **`38.9×`** faster in 3D grid construction (`3.03 s` vs. `117.98 s`).
 - **Level 2 Full Many-Body SCF Polarization on GPU**: Block-collective shared-memory Applequist-Thole SCF solver (`polarization: "scf"`) agrees with exact `36×36` Python matrix inversion to **`1.83e-08 K`** and **`1.13e-11 e·Å`**, capturing many-body mutual depolarization in `15:85` CO₂/N₂ flue gas (`S = 37.3 / 43.2` vs. `64.6 / 67.4` for unscreened framework-only `Pol-3Site`).
+- **Hybrid GPU-GCMC + MLIP Nested MC Feasibility (`Phase 1` Verified)**: Across 60 diverse pore configurations, `Mercado 2016` correlates with `MACE-MP-0 (Medium) + D3` (`min E_bind = -44.33 kJ/mol`, matching experiment `40–47 kJ/mol`) at **`R² = 0.911`**, **`σ(ΔΔE) = 3.42 kJ/mol` (`1.38 k_B T`)**, and **`84.4%` theoretical 1-molecule Nested MC acceptance** (`107.7 ms/eval` on `1×1×2` RTX 5070).
 - **Zero-Drift Statistical Mechanics**: Full double-precision shared-memory state with periodic full-box energy recomputation keeps maximum energy drift at **`2.0e-09 – 1.0e-08 K`** (`NonPol / Mercado / Pol-3Site`) and **`≤ 7.25e-07 K`** (`Pol-SCF`), with detailed balance `|acc_ins - acc_del| ≤ 0.003`.
-- **Self-Contained Unified JSON/CLI Engine**: Single CUDA binary ([`mof_gcmc_cli.exe`](src/main_cli.cu)) supporting generic CIF frameworks (`19` MOF elements), UFF / Mercado 2016 DFT-FF, binary Identity Swap, Peng–Robinson EOS, automated verification suites, and 5 publication-ready 300 DPI figures.
+- **Self-Contained Unified JSON/CLI Engine**: Single CUDA binary ([`mof_gcmc_cli.exe`](src/main_cli.cu)) supporting generic CIF frameworks (`19` MOF elements), UFF / Mercado 2016 DFT-FF, binary Identity Swap, Peng–Robinson EOS, automated verification suites, and publication-ready 300 DPI figures.
 
-> **Scope & Current Limitations**: Designed for **rigid MOF frameworks and small rigid adsorbates** (CO₂/N₂/CH₄; no CBMC flexible chains or framework breathing). While `NonPol` / `Pol-3Site` achieve sub-second to ~100 s sweeps, `Pol-SCF` solves $O(N^2)$ FP64 iterations per trial move (`791 s` for `12 × 120k` CO₂ steps on RTX 5070) and pairs induction with standard TraPPE/UFF parameters (non-negligible induction double counting unless coupled with dedicated polarizable parameters such as PHAST/mBSSP).
+> **Scope & Current Limitations**: The classical/polarizable CUDA engine targets **rigid MOF frameworks and small rigid adsorbates** (CO₂/N₂/CH₄; no CBMC flexible chains or framework breathing). While `NonPol` / `Pol-3Site` achieve sub-second to ~100 s sweeps, `Pol-SCF` solves $O(N^2)$ FP64 iterations per trial move (`791 s` for `12 × 120k` CO₂ steps on RTX 5070) and pairs induction with standard TraPPE/UFF parameters (induction double counting without dedicated polarizable parameters). Coupling the fast GPU kernel as a proposal generator for **MLIP Nested MC (`Step 6`)** bypasses manual per-MOF force-field parameterization.
 
 ---
 
-## Roadmap (Three-Step Plan)
+## Roadmap
 
-- **[Done] Step 1 — GPU Rigid 3D Framework Grid + Batched GCMC Baseline (UFF + REPEAT + TraPPE)**
-  - Precomputes 6 periodic 3D unit-cell grids (`U_lj_C`, `U_lj_O`, `Phi_elec`, `Ex`, `Ey`, `Ez`) via exact 12-6 LJ + 3D Ewald summation on GPU, runs 32 independent pressure/replica boxes concurrently (`128` threads/box, shared-memory molecules, exact hexagonal MIC, Marsaglia/Rodrigues rotation, DSF electrostatics, Peng–Robinson fugacity), and verifies detailed balance + replica convergence.
-- **[Done] Step 2 (Branch B1) — Explicit Mg²⁺ Electric-Field Polarization + Thole Coupling**
-  - Activates the precomputed `(Ex, Ey, Ez)` 3D Ewald electric-field grids with anisotropic CO₂ polarizability ($\alpha_\parallel = 4.05\ \text{Å}^3,\ \alpha_\perp = 1.95\ \text{Å}^3,\ \bar{\alpha} = 2.65\ \text{Å}^3$), comparing COM polarization (`Pol-COM`) and 3-site distributed polarization (`Pol-3Site`, $w_C = 0.40, w_O = 0.30$) with Thole-damped induced-dipole–induced-dipole guest interactions ($a = 2.1304$).
-- **[Done] Step 3 — Competitive Multi-Component Co-Adsorption (CO₂/N₂ & CO₂/CH₄)**
-  - Extends the GPU 3D-grid + anisotropic polarization engine (`build\mof_gcmc_mix.exe`) with TraPPE N₂ (`3`-site) / CH₄ (`1`-site UA), binary Peng–Robinson EOS mixture fugacities, Thole-damped cross-species induced dipoles, and symmetric **Identity Swap (`A <-> B`)** moves verified via both an analytical ideal-gas Poisson test and a real-pore `Swap-ON` vs. `Swap-OFF` check.
-- **[Done] Step 4 (Publication-Grade Credibility Upgrades) — `0.10 Å` Zero-Drift Engine, Official Mercado 2016 DFT-FF & Native RASPA3 3.0.29 Back-to-Back Verification**
-  - Upgrades numerical precision (`256x256x72` `0.10 Å` grids, `double` shared-memory coordinates, periodic full-box recomputation every `50k` steps, `4 × 1.0M` replicas = `64M` steps/sweep in `build\mof_gcmc_v2.exe`), integrates the official **Mercado et al. (*J. Phys. Chem. C* 2016, 120, 12590)** DFT-derived Buckingham/LJ + EPM2 force field, and verifies the UFF baseline head-to-head against native **RASPA3 (`3.0.29`)** on Windows (`153.2×` vs. Tricubic Grid, `492.6×` vs. Exact Ewald).
+- **[Done] Step 1–5 & Level 2 `Pol-SCF` — Classical & Self-Consistent Polarizable CUDA Engine**
+  - **Step 1**: GPU rigid 3D framework grids (`U_lj`, `Phi_elec`, `Ex/y/z`) + 32-box batched GCMC baseline (`UFF + REPEAT + TraPPE`).
+  - **Step 2 (`Pol-COM` / `Pol-3Site`)**: Explicit `Mg²⁺` electric-field anisotropic polarization + Thole guest-guest coupling.
+  - **Step 3**: Multi-component co-adsorption (CO₂/N₂ & CO₂/CH₄) with binary Peng–Robinson fugacities and symmetric Identity Swap.
+  - **Step 4**: `0.10 Å` `O(h⁴)` Tricubic interpolation, zero-drift `50k` full recomputation, official **Mercado 2016** DFT-FF, and dual back-to-back verification vs. native **RASPA3 (`3.0.29`)**.
+  - **Step 5 & Level 2**: Unified JSON/CLI engine ([`mof_gcmc_cli.exe`](src/main_cli.cu)) + block-collective many-body `Pol-SCF` solver (`1.83e-08 K` vs. exact `36×36` matrix solve).
+- **[In Progress] Step 6 — Hybrid GPU-GCMC + MLIP Nested Monte Carlo (`Phase 1` Done)**
+  - **Phase 1 (Done)**: Benchmarked `MACE-MP-0 + D3` (`small` & `medium`) speed (`107.7 ms/eval` on `1×1×2`), OMS radial curve, and 60-pose Nested MC acceptance (`84.4%` with `Mercado 2016` proposer, `R² = 0.911`).
+  - **Phase 2–3 (Next)**: Expose a lightweight CUDA `propose_k_steps` shared library (`.dll`) for exact outer Nested MC reweighting in PyTorch + full `MACE-MP-0+D3` isotherm validation across OMS-MOFs.
 
 ---
 
@@ -160,6 +162,21 @@ $$
 
 ---
 
+## Step 6 (Phase 1): Hybrid GPU-GCMC + MLIP (`MACE-MP-0 + D3`) Nested MC Probe
+
+![Phase 1 MLIP Nested MC Probe](assets/phase1_mlip_nested_mc_probe.png)
+
+Using `Mg-MOF-74` (`1×1×2`, `324` framework atoms, $c = 13.884\ \text{Å} > 2 \times 6.0\ \text{Å}$) on RTX 5070 (`PyTorch cu128` + `mace-torch 0.3.17` + `torch-dftd 0.5.3`), [`scripts/phase1_mlip_probe.py`](scripts/phase1_mlip_probe.py) confirms the physical and computational feasibility of **MLIP Nested Monte Carlo**:
+
+- **D3 Dispersion Is Essential**: Along the radial `Mg²⁺–O(CO₂)` OMS approach, `MACE-MP-0 (Medium) + D3` reaches `-29.10 kJ/mol` at `2.535 Å` (`-44.33 kJ/mol` minimum across the 60 unconstrained 3D pore poses, directly inside the experimental `40–47 kJ/mol` zero-loading heat range), whereas disabling D3 drops the radial well to `-13.20 kJ/mol`.
+- **RTX 5070 Inference Latency**: `107.72 ms/eval` (`9.3 eval/s`) for `1×1×2 + 1 CO₂` (`327` atoms) and `129.89 ms/eval` (`7.7 eval/s`) for `1×1×2 + 16 CO₂` (`372` atoms) with `MACE-Medium + D3` (`206.03 ms/eval` on `1×1×4`). Naive MLIP-GCMC would waste ~95% of evaluations on overlapped insertions; using our `~600k steps/s` CUDA kernel as a `K`-step proposal generator eliminates wasted overlap evaluations.
+- **High Nested-MC Correlation (`Mercado 2016` Wins as Inner Proposer)**: Across 60 diverse pore configurations vs. `MACE-MP-0 (Medium) + D3`:
+  - `UFF + REPEAT`: $R^2 = 0.719$, $\sigma(\Delta\Delta E) = 5.28\ \text{kJ/mol}\ (2.13\ k_B T)$, 1-mol Nested Acc = `87.1%`
+  - `UFF + Pol-3Site`: $R^2 = 0.755$, $\sigma(\Delta\Delta E) = 4.84\ \text{kJ/mol}\ (1.95\ k_B T)$, 1-mol Nested Acc = `82.2%`
+  - **`Mercado 2016 DFT-FF`**: $R^2 = 0.911$, $\sigma(\Delta\Delta E) = 3.42\ \text{kJ/mol}\ (1.38\ k_B T)$, 1-mol Nested Acc = **`84.4%`**
+
+---
+
 ## Build & Run
 
 ```powershell
@@ -187,6 +204,9 @@ cmd /c build.bat cli
 uv run --with numpy python scripts\verify_cli.py
 uv run --with numpy python scripts\verify_scf_pol.py --check-only
 uv run --with matplotlib --with numpy python scripts\plot_scf_pol.py
+
+# Step 6 (Phase 1) Hybrid MLIP (MACE-MP-0 + D3) Nested-MC feasibility probe
+.venv-mlip\Scripts\python.exe scripts\phase1_mlip_probe.py
 ```
 
 ---
@@ -232,13 +252,15 @@ cuda-mof-gcmc/
 │   ├── verify_upgrades.py        # Step 4 automated assertions & 300 DPI validation figure
 │   ├── verify_cli.py             # Step 5 end-to-end 4-preset CLI verification suite
 │   ├── verify_scf_pol.py         # Level 2 exact 36x36 matrix inversion & Pol-SCF GCMC test
-│   └── plot_scf_pol.py           # Level 2 Pol-SCF 300 DPI 3-panel visualization script
+│   ├── plot_scf_pol.py           # Level 2 Pol-SCF 300 DPI 3-panel visualization script
+│   └── phase1_mlip_probe.py      # Step 6 Phase 1 MACE-MP-0+D3 speed & Nested-MC correlation probe
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # Step 1: 298 K isotherm, Qst & pore density
 │   ├── step2_mof74_pol_comparison.png    # Step 2: NonPol vs Pol-COM vs Pol-3Site comparison
 │   ├── step3_mof74_binary_coadsorption.png # Step 3: CO2/N2 & CO2/CH4 selectivity & competitive map
 │   ├── step4_validated_mercado_raspa3.png  # Step 4: 0.10 A vs RASPA3 vs Mercado 2016 validation
-│   └── step5_level2_scf_polarization.png   # Step 5: Level 2 Pol-SCF isotherm, screening & 36x36 check
+│   ├── step5_level2_scf_polarization.png   # Step 5: Level 2 Pol-SCF isotherm, screening & 36x36 check
+│   └── phase1_mlip_nested_mc_probe.png     # Step 6 Phase 1: MACE-MP-0+D3 radial, parity & latency probe
 ├── build.bat                     # VS2019 + nvcc (sm_120) build script (all / single / mix / v2 / cli)
 ├── LICENSE                       # MIT License
 ├── README.md                     # English documentation
