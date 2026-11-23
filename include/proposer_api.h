@@ -29,6 +29,11 @@ PROPOSER_API double proposer_get_fugacity_Pa(void* handle);
 PROPOSER_API double proposer_get_rcut_gg(void* handle);
 PROPOSER_API void proposer_get_cell_H(void* handle, double out_H9[9]);
 
+// Set chemical-potential shift for inner proposer sampling:
+// f_ref = f_tgt * exp(-delta_eps_K / T_K), where delta_eps_K = <(U_tgt - U_ref) / N> in Kelvin
+// (negative when target binds stronger than reference, raising f_ref to match target loading).
+PROPOSER_API int proposer_set_chem_pot_shift(void* handle, double delta_eps_K);
+
 // Run classical GCMC steps directly on accepted state (for warm-start equilibration).
 PROPOSER_API int proposer_equilibrate(void* handle, int n_steps);
 

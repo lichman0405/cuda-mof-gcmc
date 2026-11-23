@@ -550,6 +550,8 @@ struct ProposerContext {
     double pressure_bar = 0.15;
     double f_Pa = 0.0;
     double beta_f_V = 0.0;
+    double delta_eps_K = 0.0;
+    double beta_f_V_ref = 0.0;
     double r_cut_gg = 6.5;
     double dsf_alpha = 0.20;
     int ff_mode = 0;
@@ -593,6 +595,8 @@ void* proposer_create(
     ctx->f_Pa = fug.f_Pa;
     constexpr double KB_SI = 1.380649e-23;
     ctx->beta_f_V = (ctx->f_Pa * ctx->cell.volume_super * 1.0e-30) / (KB_SI * T_K);
+    ctx->delta_eps_K = 0.0;
+    ctx->beta_f_V_ref = ctx->beta_f_V;
     ctx->r_cut_gg = std::min(11.0, 0.48 * ctx->cell.min_perp_width_super);
 
     UnifiedGridStats stats{};
@@ -669,12 +673,21 @@ void proposer_get_cell_H(void* handle, double out_H9[9]) {
             out_H9[r * 3 + c] = ctx->cell.H[r][c];
 }
 
+int proposer_set_chem_pot_shift(void* handle, double delta_eps_K) {
+    if (!handle) return -1;
+    auto* ctx = static_cast<ProposerContext*>(handle);
+    ctx->delta_eps_K = delta_eps_K;
+    double exponent = std::max(-40.0, std::min(40.0, -delta_eps_K / ctx->T_K));
+    ctx->beta_f_V_ref = ctx->beta_f_V * std::exp(exponent);
+    return 0;
+}
+
 int proposer_equilibrate(void* handle, int n_steps) {
     if (!handle || n_steps <= 0) return 0;
     auto* ctx = static_cast<ProposerContext*>(handle);
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
         ctx->cell, ctx->d_grid, ctx->sp,
-        ctx->T_K, ctx->beta_f_V, ctx->r_cut_gg, ctx->dsf_alpha,
+        ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
         ctx->ff_mode, ctx->pol_mode, ctx->max_mol, n_steps, 1, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
@@ -691,7 +704,7 @@ int proposer_propose_k(
     auto* ctx = static_cast<ProposerContext*>(handle);
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
         ctx->cell, ctx->d_grid, ctx->sp,
-        ctx->T_K, ctx->beta_f_V, ctx->r_cut_gg, ctx->dsf_alpha,
+        ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
         ctx->ff_mode, ctx->pol_mode, ctx->max_mol, k_steps, 0, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);

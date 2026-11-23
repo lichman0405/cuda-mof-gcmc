@@ -57,6 +57,7 @@ class CudaGcmcProposer:
         self.n_boxes = int(n_boxes)
         self.max_mol = int(min(256, max(16, max_mol)))
         self.T_K = float(T_K)
+        self.delta_eps_K = 0.0
         self.handle = self.lib.proposer_create(
             str(cif_path).encode("utf-8"),
             int(supercell[0]), int(supercell[1]), int(supercell[2]),
@@ -107,6 +108,8 @@ class CudaGcmcProposer:
         L.proposer_get_rcut_gg.restype = ctypes.c_double
         L.proposer_get_cell_H.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
         L.proposer_get_cell_H.restype = None
+        L.proposer_set_chem_pot_shift.argtypes = [ctypes.c_void_p, ctypes.c_double]
+        L.proposer_set_chem_pot_shift.restype = ctypes.c_int
         L.proposer_equilibrate.argtypes = [ctypes.c_void_p, ctypes.c_int]
         L.proposer_equilibrate.restype = ctypes.c_int
         L.proposer_propose_k.argtypes = [
@@ -148,6 +151,13 @@ class CudaGcmcProposer:
 
     def __del__(self):
         self.close()
+
+    def set_chem_pot_shift(self, delta_eps_kJ_mol: float):
+        """Set inner-proposer chemical-potential bias delta_eps = <(U_tgt - U_ref)/N> (kJ/mol)."""
+        self.delta_eps_K = float(delta_eps_kJ_mol) / K_TO_KJMOL
+        rc = self.lib.proposer_set_chem_pot_shift(self.handle, self.delta_eps_K)
+        if rc != 0:
+            raise RuntimeError(f"proposer_set_chem_pot_shift failed with code {rc}")
 
     def equilibrate(self, n_steps: int):
         rc = self.lib.proposer_equilibrate(self.handle, int(n_steps))
@@ -295,7 +305,211 @@ class MaceD3Target:
         e_tot = float(sys.get_potential_energy())
         self.n_evals += 1
         u_int_K = (e_tot - self.e_fw_eV - n * self.e_co2_eV) * EV_TO_K
-        return u_int_K, False
+        return float(u_int_K), False
+
+
+class FastMaceD3Target:
+    """Fast batched energy-only MACE-MP-0 + exact GPU-edge PBE-D3(BJ) evaluator."""
+
+    def __init__(self, cif_path: str, supercell=(1, 1, 2), model="medium", device="cuda"):
+        import torch
+        from ase import Atoms
+        from ase.io import read as ase_read
+        from mace.calculators import mace_mp
+        from mace import data as mace_data
+        from mace.tools import torch_geometric, torch_tools
+
+        self.torch = torch
+        self.Atoms = Atoms
+        self.mace_data = mace_data
+        self.torch_geometric = torch_geometric
+        self.torch_tools = torch_tools
+        self.device = torch.device(device)
+
+        uc = ase_read(str(cif_path))
+        self.fw = uc.repeat(tuple(supercell))
+        self.n_fw = len(self.fw)
+        calc = mace_mp(model=model, dispersion=True, default_dtype="float32", device=device)
+        self.mace_calc = calc.mixer.calcs[0]
+        self.d3_calc = calc.mixer.calcs[1]
+        self.mace_model = self.mace_calc.models[0]
+        self.mace_model.eval()
+        self.keyspec = mace_data.KeySpecification(
+            info_keys=self.mace_calc.info_keys,
+            arrays_keys=self.mace_calc.arrays_keys,
+        )
+
+        # Precompute exact D3 periodic shifts and static rigid framework-framework edges once on GPU
+        self.rc_d3 = float(self.d3_calc.cutoff)
+        self.cell_np = np.array(self.fw.get_cell(), dtype=np.float32)
+        self.cell_t = torch.tensor(self.cell_np, device=self.device, dtype=torch.float32)
+        inv_cell = torch.linalg.inv(self.cell_t)
+        perp_w = 1.0 / torch.linalg.norm(inv_cell, dim=0)
+        n_rep = [int(math.ceil(self.rc_d3 / float(w))) + 1 for w in perp_w]
+        s0 = torch.arange(-n_rep[0], n_rep[0] + 1, device=self.device)
+        s1 = torch.arange(-n_rep[1], n_rep[1] + 1, device=self.device)
+        s2 = torch.arange(-n_rep[2], n_rep[2] + 1, device=self.device)
+        S_all = torch.cartesian_prod(s0, s1, s2).to(torch.float32)
+        self.S_all = S_all
+        self.shift_vecs_d3 = S_all @ self.cell_t
+        self.zero_shift_idx = int(torch.nonzero((S_all.abs().sum(dim=1) == 0), as_tuple=False)[0].item())
+
+        self.fw_pos_t = torch.tensor(self.fw.get_positions(), device=self.device, dtype=torch.float32)
+        self.fw_Z_t = torch.tensor(self.fw.get_atomic_numbers(), device=self.device, dtype=torch.long)
+        self.pbc_t = torch.tensor([True, True, True], device=self.device, dtype=torch.bool)
+        self.co2_Z_unit = torch.tensor([6, 8, 8], device=self.device, dtype=torch.long)
+
+        self.fw_ei, self.fw_sp = self._pair_edges_chunked(
+            self.fw_pos_t, self.fw_pos_t, same_set=True, row_offset=0, col_offset=0
+        )
+
+        # Reference isolated framework and isolated CO2 energies using identical fast evaluator
+        self.e_fw_eV = self._eval_raw_eV_batch([self.fw.copy()], [None])[0]
+        co2 = Atoms("CO2", positions=[[0.0, 0.0, 0.0], [1.16, 0.0, 0.0], [-1.16, 0.0, 0.0]])
+        co2.set_cell([30.0, 30.0, 30.0])
+        co2.set_pbc(True)
+        co2.calc = calc
+        self.e_co2_eV = float(co2.get_potential_energy())
+        self.n_evals = 0
+
+    def _pair_edges_chunked(self, pos_row, pos_col, same_set: bool, row_offset: int, col_offset: int, shift_chunk: int = 16):
+        torch = self.torch
+        nr, nc = pos_row.shape[0], pos_col.shape[0]
+        if nr == 0 or nc == 0:
+            return (
+                torch.empty((2, 0), device=self.device, dtype=torch.long),
+                torch.empty((0, 3), device=self.device, dtype=torch.float32),
+            )
+        rc2 = self.rc_d3 * self.rc_d3
+        diff_base = pos_col.unsqueeze(0) - pos_row.unsqueeze(1)  # (nr, nc, 3)
+        M = self.shift_vecs_d3.shape[0]
+        srcs, dsts, shs = [], [], []
+        self_diag = None
+        if same_set:
+            ii = torch.arange(nr, device=self.device).unsqueeze(1).expand(nr, nc)
+            jj = torch.arange(nc, device=self.device).unsqueeze(0).expand(nr, nc)
+            self_diag = (ii == jj)
+        for s0 in range(0, M, shift_chunk):
+            s1 = min(M, s0 + shift_chunk)
+            sv = self.shift_vecs_d3[s0:s1]  # (C, 3)
+            d = diff_base.unsqueeze(0) + sv.view(-1, 1, 1, 3)
+            r2 = (d * d).sum(dim=-1)
+            mask = r2 < rc2
+            if same_set and s0 <= self.zero_shift_idx < s1:
+                mask[self.zero_shift_idx - s0] &= (~self_diag)
+            mm, rr, cc = torch.nonzero(mask, as_tuple=True)
+            if mm.numel() > 0:
+                srcs.append(rr + row_offset)
+                dsts.append(cc + col_offset)
+                shs.append(sv[mm])
+        if not srcs:
+            return (
+                torch.empty((2, 0), device=self.device, dtype=torch.long),
+                torch.empty((0, 3), device=self.device, dtype=torch.float32),
+            )
+        return torch.stack([torch.cat(srcs), torch.cat(dsts)], dim=0), torch.cat(shs, dim=0)
+
+    def _guest_positions_from_state(self, state):
+        n = int(state["N"])
+        if n == 0:
+            return np.zeros((0, 3), dtype=np.float64)
+        bond = 1.160
+        cx, cy, cz = state["cx"], state["cy"], state["cz"]
+        ux, uy, uz = state["ux"], state["uy"], state["uz"]
+        c = np.stack([cx, cy, cz], axis=1)
+        u = np.stack([ux, uy, uz], axis=1)
+        gp = np.empty((3 * n, 3), dtype=np.float64)
+        gp[0::3] = c
+        gp[1::3] = c + bond * u
+        gp[2::3] = c - bond * u
+        return gp
+
+    def _eval_raw_eV_batch(self, atoms_list, guest_pos_list, mace_chunk: int = 2):
+        torch = self.torch
+        # 1. Micro-batched MACE forward (no_grad, compute_force=False) to keep peak VRAM < 3.5 GB
+        graphs = []
+        with self.torch_tools.default_dtype(self.mace_calc.default_dtype):
+            for at in atoms_list:
+                cfg = self.mace_data.config_from_atoms(
+                    at, key_specification=self.keyspec, head_name=self.mace_calc.head
+                )
+                graphs.append(
+                    self.mace_data.AtomicData.from_config(
+                        cfg,
+                        z_table=self.mace_calc.z_table,
+                        cutoff=self.mace_calc.r_max,
+                        heads=self.mace_calc.available_heads,
+                    )
+                )
+        e_mace_parts = []
+        with torch.no_grad():
+            for i0 in range(0, len(graphs), mace_chunk):
+                mb = self.torch_geometric.Batch.from_data_list(graphs[i0:i0 + mace_chunk]).to(self.device)
+                em = self.mace_model(mb.to_dict(), compute_force=False, compute_stress=False)["energy"]
+                e_mace_parts.append(em.detach().cpu().numpy().astype(np.float64))
+        e_mace_np = np.concatenate(e_mace_parts, axis=0)
+
+        # 2. Exact GPU PBE-D3(BJ) via cached fw-fw edges + vectorized dynamic edges
+        e_d3_np = np.zeros(len(atoms_list), dtype=np.float64)
+        for g_idx, gp_np in enumerate(guest_pos_list):
+            if gp_np is None or len(gp_np) == 0:
+                Z_tot = self.fw_Z_t
+                pos_tot = self.fw_pos_t
+                ei_tot = self.fw_ei
+                sp_tot = self.fw_sp
+            else:
+                n_g = gp_np.shape[0]
+                n_mol = n_g // 3
+                g_pos_t = torch.tensor(gp_np, device=self.device, dtype=torch.float32)
+                g_Z_t = self.co2_Z_unit.repeat(n_mol)
+                Z_tot = torch.cat([self.fw_Z_t, g_Z_t], dim=0)
+                pos_tot = torch.cat([self.fw_pos_t, g_pos_t], dim=0)
+                # fw -> guest (and bidirectional transpose guest -> fw with negated shift!)
+                ei_fg, sp_fg = self._pair_edges_chunked(
+                    self.fw_pos_t, g_pos_t, same_set=False, row_offset=0, col_offset=self.n_fw
+                )
+                ei_gf = torch.stack([ei_fg[1], ei_fg[0]], dim=0)
+                sp_gf = -sp_fg
+                ei_gg, sp_gg = self._pair_edges_chunked(
+                    g_pos_t, g_pos_t, same_set=True, row_offset=self.n_fw, col_offset=self.n_fw
+                )
+                ei_tot = torch.cat([self.fw_ei, ei_fg, ei_gf, ei_gg], dim=1)
+                sp_tot = torch.cat([self.fw_sp, sp_fg, sp_gf, sp_gg], dim=0)
+            with torch.no_grad():
+                ed = self.d3_calc.dftd_module.calc_energy_batch(
+                    Z_tot, pos_tot, ei_tot, self.cell_t, self.pbc_t, sp_tot, damping="bj"
+                )
+            e_d3_np[g_idx] = float(ed[0].item())
+
+        return e_mace_np + e_d3_np
+
+    def eval_batch(self, states):
+        non_empty_idx = []
+        atoms_list = []
+        guest_pos_list = []
+        for idx, st in enumerate(states):
+            n = int(st["N"])
+            if n == 0:
+                continue
+            gp = self._guest_positions_from_state(st)
+            sys_at = self.fw.copy() + self.Atoms("CO2" * n, positions=gp)
+            non_empty_idx.append(idx)
+            atoms_list.append(sys_at)
+            guest_pos_list.append(gp)
+
+        results = [(0.0, False)] * len(states)
+        if not non_empty_idx:
+            return results
+        e_tot = self._eval_raw_eV_batch(atoms_list, guest_pos_list)
+        self.n_evals += len(non_empty_idx)
+        for k, idx in enumerate(non_empty_idx):
+            n = int(states[idx]["N"])
+            u_int_K = (float(e_tot[k]) - self.e_fw_eV - n * self.e_co2_eV) * EV_TO_K
+            results[idx] = (u_int_K, False)
+        return results
+
+    def __call__(self, state):
+        return self.eval_batch([state])[0]
 
 
 def run_nested_mc(
@@ -306,19 +520,25 @@ def run_nested_mc(
     prod_cycles: int = 500,
     seed: int = 20261124,
     log_every: int = 0,
+    batch_target_fn=None,
 ):
-    """Exact Grand-Canonical Nested Monte Carlo loop."""
+    """Exact Grand-Canonical Nested Monte Carlo loop (with optional chemical-potential shift & batching)."""
     rng = np.random.default_rng(seed)
     n_b = proposer.n_boxes
     T_K = proposer.T_K
+    delta_eps_K = float(getattr(proposer, "delta_eps_K", 0.0))
     conv_mmol_g = 1000.0 / proposer.fw_mass_gmol
 
     curr = proposer.get_accepted()
     U_tgt_curr = np.zeros(n_b, dtype=np.float64)
     U_ref_curr = np.zeros(n_b, dtype=np.float64)
     N_curr = np.zeros(n_b, dtype=np.int32)
+    if batch_target_fn is not None:
+        init_evals = batch_target_fn(curr)
+    else:
+        init_evals = [target_fn(curr[b]) for b in range(n_b)]
     for b in range(n_b):
-        ut, ov = target_fn(curr[b])
+        ut, ov = init_evals[b]
         if ov:
             raise RuntimeError(f"Initial warm-started state of box {b} has target overlap")
         U_tgt_curr[b] = ut
@@ -329,6 +549,10 @@ def run_nested_mc(
     acc_outer = np.zeros(n_b, dtype=np.int64)
     prod_acc_outer = np.zeros(n_b, dtype=np.int64)
     inner_acc_tot = np.zeros(n_b, dtype=np.int64)
+    prod_ins_att = 0
+    prod_ins_acc = 0
+    prod_del_att = 0
+    prod_del_acc = 0
 
     sum_N = np.zeros(n_b, dtype=np.float64)
     sum_N2 = np.zeros(n_b, dtype=np.float64)
@@ -336,25 +560,41 @@ def run_nested_mc(
     sum_UN = np.zeros(n_b, dtype=np.float64)
 
     trajectory = []
+    box_N_history = []
     t0 = time.perf_counter()
 
     for cyc in range(total_cycles):
         trials = proposer.propose_k(k_steps)
+        if batch_target_fn is not None:
+            tri_evals = batch_target_fn(trials)
+        else:
+            tri_evals = [target_fn(trials[b]) for b in range(n_b)]
+
         mask = np.zeros(n_b, dtype=np.int32)
         for b in range(n_b):
             inner_acc_tot[b] += trials[b]["inner_acc"]
             dU_ref = trials[b]["U_ref_K"] - U_ref_curr[b]
-            u_tgt_tri, ov = target_fn(trials[b])
+            dN = int(trials[b]["N"]) - int(N_curr[b])
+            u_tgt_tri, ov = tri_evals[b]
             accepted = False
             if not ov:
                 dU_tgt = u_tgt_tri - U_tgt_curr[b]
-                ddU = dU_tgt - dU_ref
+                ddU = dU_tgt - dU_ref - delta_eps_K * float(dN)
                 if ddU <= 0.0:
                     accepted = True
                 else:
                     arg = -ddU / T_K
                     if arg > -50.0 and rng.random() < math.exp(arg):
                         accepted = True
+            if cyc >= eq_cycles:
+                if dN > 0:
+                    prod_ins_att += 1
+                    if accepted:
+                        prod_ins_acc += 1
+                elif dN < 0:
+                    prod_del_att += 1
+                    if accepted:
+                        prod_del_acc += 1
             if accepted:
                 mask[b] = 1
                 U_tgt_curr[b] = u_tgt_tri
@@ -375,6 +615,7 @@ def run_nested_mc(
                 sum_U[b] += du
                 sum_UN[b] += du * dn
 
+        box_N_history.append([int(x) for x in N_curr])
         if n_b == 1:
             trajectory.append({
                 "cycle": cyc,
@@ -387,9 +628,10 @@ def run_nested_mc(
             })
         if log_every > 0 and ((cyc + 1) % log_every == 0):
             elapsed = time.perf_counter() - t0
+            mean_up_now = float(np.mean(N_curr) * conv_mmol_g)
             print(
-                f"  [NestedMC cyc {cyc+1:4d}/{total_cycles}] N={N_curr.tolist()} "
-                f"Acc={np.mean(acc_outer)/(cyc+1)*100:5.1f}% U_tgt={U_tgt_curr[0]*K_TO_KJMOL:7.2f} kJ/mol ({elapsed:.1f}s)"
+                f"  [NestedMC cyc {cyc+1:4d}/{total_cycles}] N={N_curr.tolist()} ({mean_up_now:.2f} mmol/g) "
+                f"Acc={np.mean(acc_outer)/(cyc+1)*100:5.1f}% ({elapsed:.1f}s)"
             )
 
     dt = time.perf_counter() - t0
@@ -419,6 +661,7 @@ def run_nested_mc(
         "k_steps": k_steps,
         "eq_cycles": eq_cycles,
         "prod_cycles": prod_cycles,
+        "delta_eps_kJ_mol": float(delta_eps_K * K_TO_KJMOL),
         "elapsed_s": dt,
         "uptake_mmol_g": mean_up,
         "uptake_sem_mmol_g": sem_up,
@@ -428,7 +671,12 @@ def run_nested_mc(
         "box_qst_kJ_mol": box_qst,
         "outer_acc_rate": float(np.mean(acc_outer) / total_cycles),
         "prod_outer_acc_rate": float(np.mean(prod_acc_outer) / prod_cycles),
+        "prod_ins_att": int(prod_ins_att),
+        "prod_ins_acc": int(prod_ins_acc),
+        "prod_del_att": int(prod_del_att),
+        "prod_del_acc": int(prod_del_acc),
         "mean_inner_acc_per_burst": float(np.mean(inner_acc_tot) / total_cycles),
         "effective_mc_steps_per_target_eval": float(k_steps * np.mean(acc_outer) / total_cycles),
+        "box_N_history": box_N_history,
         "trajectory": trajectory,
     }
