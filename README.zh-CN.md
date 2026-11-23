@@ -135,6 +135,8 @@
 
 > **Level 2 全自洽多体极化 `Pol-SCF`（`polarization: "scf"`）**：Block 级共享内存 Applequist-Thole 自洽求解器（`SCF_TOL = 1e-10 e·Å`、`O(N)` 增量永久电场 $\mathbf{E}_0$ 更新、热启动偶极子复用、试探前强排斥预筛与 `s_scf_conv` 收敛/有限性守卫），在每步试探中全自洽求解 $\boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i(\mathbf{E}_i^{\text{fw}} + \sum_{j\neq i}\mathbf{E}_{j\to i}^{\text{DSF,perm}} + \sum_{j\neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j)$；`--test-scf` 与 Python `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**。
 
+![Level 2 Pol-SCF Visualization](assets/step5_level2_scf_polarization.png)
+
 ---
 
 ## 编译与运行命令
@@ -159,10 +161,11 @@ uv run python scripts\run_raspa3_bench.py
 uv run python scripts\run_raspa3_grid_bench.py
 uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
 
-# 第五步 统一 JSON/CLI 高精度引擎、4 预设检验与 Level-2 Pol-SCF 全自动校验
+# 第五步 统一 JSON/CLI 高精度引擎、4 预设检验与 Level-2 Pol-SCF 全自动校验及出图
 cmd /c build.bat cli
 uv run --with numpy python scripts\verify_cli.py
 uv run --with numpy python scripts\verify_scf_pol.py --check-only
+uv run --with matplotlib --with numpy python scripts\plot_scf_pol.py
 ```
 
 ---
@@ -207,12 +210,14 @@ cuda-mof-gcmc/
 │   ├── run_raspa3_grid_bench.py  # Windows 原生 RASPA3 3.0.29 并发 Tricubic 网格基准运行脚本
 │   ├── verify_upgrades.py        # 第四步自动化断言校验与 300 DPI 验证三联图脚本
 │   ├── verify_cli.py             # 第五步 4 组 JSON 预设端到端自动断言套件
-│   └── verify_scf_pol.py         # Level 2 精确 36x36 矩阵求逆 & Pol-SCF GCMC 校验套件
+│   ├── verify_scf_pol.py         # Level 2 精确 36x36 矩阵求逆 & Pol-SCF GCMC 校验套件
+│   └── plot_scf_pol.py           # Level 2 Pol-SCF 300 DPI 三联对比与对齐图绘制脚本
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
 │   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
 │   ├── step3_mof74_binary_coadsorption.png # 第三步：CO2/N2 & CO2/CH4 选择性与孔道竞争占位图
-│   └── step4_validated_mercado_raspa3.png  # 第四步：0.10 A vs RASPA3 vs Mercado 2016 验证图
+│   ├── step4_validated_mercado_raspa3.png  # 第四步：0.10 A vs RASPA3 vs Mercado 2016 验证图
+│   └── step5_level2_scf_polarization.png   # 第五步：Level 2 Pol-SCF 等温线、屏蔽效应与 36x36 核验图
 ├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2 / cli）
 ├── LICENSE                       # MIT 开源协议
 ├── README.md                     # 英文项目文档

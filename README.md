@@ -135,6 +135,8 @@ Converges the `O(h⁴)` 3D tricubic interpolation, Mercado 2016 DFT-FF / UFF sup
 
 > **Level 2 Many-Body `Pol-SCF` (`polarization: "scf"`)**: Block-collective shared-memory Applequist-Thole SCF solver (`SCF_TOL = 1e-10 e·Å`, $O(N)$ incremental permanent field $\mathbf{E}_0$ update, warm-started induced dipoles, pre-SCF repulsion filter, and `s_scf_conv` convergence guard) solving $\boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i(\mathbf{E}_i^{\text{fw}} + \sum_{j\neq i}\mathbf{E}_{j\to i}^{\text{DSF,perm}} + \sum_{j\neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j)$ across every trial move (`1.83e-08 K` & `1.13e-11 e·Å` match against exact `36×36` Python matrix inversion in `--test-scf`).
 
+![Level 2 Pol-SCF Visualization](assets/step5_level2_scf_polarization.png)
+
 ---
 
 ## Build & Run
@@ -159,10 +161,11 @@ uv run python scripts\run_raspa3_bench.py
 uv run python scripts\run_raspa3_grid_bench.py
 uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
 
-# Step 5 Unified JSON/CLI high-precision engine & 4-preset + Level-2 Pol-SCF automated verification
+# Step 5 Unified JSON/CLI high-precision engine & 4-preset + Level-2 Pol-SCF automated verification & plot
 cmd /c build.bat cli
 uv run --with numpy python scripts\verify_cli.py
 uv run --with numpy python scripts\verify_scf_pol.py --check-only
+uv run --with matplotlib --with numpy python scripts\plot_scf_pol.py
 ```
 
 ---
@@ -207,12 +210,14 @@ cuda-mof-gcmc/
 │   ├── run_raspa3_grid_bench.py  # Native Windows RASPA3 3.0.29 parallel tricubic-grid runner
 │   ├── verify_upgrades.py        # Step 4 automated assertions & 300 DPI validation figure
 │   ├── verify_cli.py             # Step 5 end-to-end 4-preset CLI verification suite
-│   └── verify_scf_pol.py         # Level 2 exact 36x36 matrix inversion & Pol-SCF GCMC test
+│   ├── verify_scf_pol.py         # Level 2 exact 36x36 matrix inversion & Pol-SCF GCMC test
+│   └── plot_scf_pol.py           # Level 2 Pol-SCF 300 DPI 3-panel visualization script
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # Step 1: 298 K isotherm, Qst & pore density
 │   ├── step2_mof74_pol_comparison.png    # Step 2: NonPol vs Pol-COM vs Pol-3Site comparison
 │   ├── step3_mof74_binary_coadsorption.png # Step 3: CO2/N2 & CO2/CH4 selectivity & competitive map
-│   └── step4_validated_mercado_raspa3.png  # Step 4: 0.10 A vs RASPA3 vs Mercado 2016 validation
+│   ├── step4_validated_mercado_raspa3.png  # Step 4: 0.10 A vs RASPA3 vs Mercado 2016 validation
+│   └── step5_level2_scf_polarization.png   # Step 5: Level 2 Pol-SCF isotherm, screening & 36x36 check
 ├── build.bat                     # VS2019 + nvcc (sm_120) build script (all / single / mix / v2 / cli)
 ├── LICENSE                       # MIT License
 ├── README.md                     # English documentation
