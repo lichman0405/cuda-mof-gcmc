@@ -78,13 +78,15 @@ int main() {
     free_framework_grids_gpu(d_g128);
 
     build_v2_grids_gpu(cell, unit_atoms, 256, 256, 72, r_cut, ewald_alpha, FF_UFF_REPEAT_TRAPPE, d_g256_uff, st256_uff);
-    std::printf("[1] Grid Resolution Upgrade (UFF+REPEAT, 256x256x72 = 0.10 A vs 128x128x36 = 0.20 A):\n");
+    std::printf("[1] Grid Resolution & Interpolation Upgrade (UFF+REPEAT, 256x256x72 = 0.10 A):\n");
     std::printf("    Build time 256x256x72 : %.2f ms (6 grids = 113 MB VRAM)\n", st256_uff.build_ms);
-    std::printf("    Radial Mg-O MAE (2.3-3.8 A): 128x128x36 = %.2f K -> 256x256x72 = %.2f K (%.1fx finer)\n",
-                st128.radial_256_mae_K, st256_uff.radial_256_mae_K,
-                st128.radial_256_mae_K / std::max(st256_uff.radial_256_mae_K, 1.0e-6));
-    std::printf("    Pore MAE (%d pts vs alpha_ref=0.25): U_lj_C=%.3f K, U_lj_O=%.3f K, Phi=%.4f K/e\n\n",
+    std::printf("    Radial Mg-O MAE (2.3-3.8 A): 128-Trilinear = %.2f K -> 256-Trilinear = %.2f K -> 256-Tricubic = %.3f K (%.1fx finer vs 128)\n",
+                st128.radial_256_mae_K, st256_uff.radial_256_mae_K, st256_uff.radial_256_tricubic_mae_K,
+                st128.radial_256_mae_K / std::max(st256_uff.radial_256_tricubic_mae_K, 1.0e-6));
+    std::printf("    Pore MAE Trilinear (%d pts): U_lj_C=%.3f K, U_lj_O=%.3f K, Phi=%.4f K/e\n",
                 st256_uff.verify_samples, st256_uff.pore_mae_c_K, st256_uff.pore_mae_o_K, st256_uff.pore_mae_phi_Ke);
+    std::printf("    Pore MAE Tricubic  (%d pts): U_lj_C=%.3f K, U_lj_O=%.3f K, Phi=%.4f K/e\n\n",
+                st256_uff.verify_samples, st256_uff.pore_tricubic_mae_c_K, st256_uff.pore_tricubic_mae_o_K, st256_uff.pore_tricubic_mae_phi_Ke);
 
     const std::vector<double> pressures = {
         0.005, 0.01, 0.02, 0.05, 0.10, 0.15, 0.25, 0.50,
@@ -106,9 +108,10 @@ int main() {
     const int rdf_bins = 80;
     const double rdf_min = 1.5, rdf_max = 5.5;
 
-    // 2. Run high-precision UFF + REPEAT + TraPPE (64 boxes x 1.0M steps = 64M steps)
+    // 2. Run high-precision UFF + REPEAT + TraPPE Tricubic (64 boxes x 1.0M steps = 64M steps)
     V2GcmcConfig cfg_uff;
     cfg_uff.T_K = T_K; cfg_uff.r_cut_A = r_cut; cfg_uff.ff_mode = FF_UFF_REPEAT_TRAPPE;
+    cfg_uff.use_tricubic = 1;
     cfg_uff.eq_steps = 200000; cfg_uff.prod_steps = 800000; cfg_uff.sample_stride = 20;
     cfg_uff.recompute_stride = 50000; cfg_uff.framework_mass_super_gmol = m_super_gmol;
     cfg_uff.base_seed = 20261123ULL;
@@ -118,7 +121,7 @@ int main() {
     double ms_uff = run_v2_gcmc_gpu(cell, d_g256_uff, unit_atoms, cfg_uff, boxes, res_uff,
                                     rdf_uff, rdf_bins, rdf_min, rdf_max);
     double steps_tot = (double)boxes.size() * (double)(cfg_uff.eq_steps + cfg_uff.prod_steps);
-    std::printf("[2] UFF + REPEAT + TraPPE (256x256x72, 64 boxes x 1M steps = 64M steps):\n");
+    std::printf("[2] UFF + REPEAT + TraPPE (256x256x72 Tricubic, 64 boxes x 1M steps = 64M steps):\n");
     std::printf("    GPU Time = %.2f ms (%.2f s) -> %.2f M MC-steps/sec\n",
                 ms_uff, ms_uff * 1e-3, steps_tot / (ms_uff * 1e3));
     export_v2_csv("build/v2_uff_010A.csv", pressures, fugs, res_uff, n_rep);
@@ -126,9 +129,11 @@ int main() {
 
     // 3. Build 256x256x72 Mercado 2016 DFT-Derived FF & run 64 boxes x 1.0M steps
     build_v2_grids_gpu(cell, unit_atoms, 256, 256, 72, r_cut, ewald_alpha, FF_MERCADO2016_EPM2, d_g256_merc, st256_merc);
-    std::printf("\n[3] Mercado 2016 DFT-Derived Buckingham/LJ + Mercado2016-Charges + EPM2 (256x256x72 = 0.10 A):\n");
-    std::printf("    Grid build = %.2f ms | Pore MAE: C=%.3f K, O=%.3f K, Phi=%.4f K/e\n",
-                st256_merc.build_ms, st256_merc.pore_mae_c_K, st256_merc.pore_mae_o_K, st256_merc.pore_mae_phi_Ke);
+    std::printf("\n[3] Mercado 2016 DFT-Derived Buckingham/LJ + Mercado2016-Charges + EPM2 (256x256x72 Tricubic):\n");
+    std::printf("    Grid build = %.2f ms | Radial Mg-O MAE: Trilin=%.2f K -> Tricubic=%.3f K\n",
+                st256_merc.build_ms, st256_merc.radial_256_mae_K, st256_merc.radial_256_tricubic_mae_K);
+    std::printf("    Pore MAE Tricubic (%d pts): C=%.3f K, O=%.3f K, Phi=%.4f K/e\n",
+                st256_merc.verify_samples, st256_merc.pore_tricubic_mae_c_K, st256_merc.pore_tricubic_mae_o_K, st256_merc.pore_tricubic_mae_phi_Ke);
 
     V2GcmcConfig cfg_merc = cfg_uff;
     cfg_merc.ff_mode = FF_MERCADO2016_EPM2;

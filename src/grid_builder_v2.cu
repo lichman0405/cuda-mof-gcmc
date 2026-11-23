@@ -406,6 +406,7 @@ void build_v2_grids_gpu(
     std::mt19937_64 rng(999);
     std::uniform_real_distribution<double> uni(0.0, 1.0);
     double sum_c = 0.0, sum_o = 0.0, sum_phi = 0.0;
+    double sum_tc_c = 0.0, sum_tc_o = 0.0, sum_tc_phi = 0.0;
     int valid = 0, tries = 0;
     while (valid < 1000 && tries < 100000) {
         ++tries;
@@ -419,9 +420,16 @@ void build_v2_grids_gpu(
         if (dc > 100.0 || do_ > 100.0) continue;
 
         float gp = trilinear_periodic(h_phi.data(), nx, ny, nz, sa, sb, sc);
+        double tc_c = tricubic_periodic(h_uc.data(), nx, ny, nz, sa, sb, sc, true, 5.0e4f);
+        double tc_o = tricubic_periodic(h_uo.data(), nx, ny, nz, sa, sb, sc, true, 5.0e4f);
+        double tc_p = tricubic_periodic(h_phi.data(), nx, ny, nz, sa, sb, sc, false, 5.0e5f);
+
         sum_c += std::fabs((double)gc - dc);
         sum_o += std::fabs((double)go - do_);
         sum_phi += std::fabs((double)gp - dphi);
+        sum_tc_c += std::fabs(tc_c - dc);
+        sum_tc_o += std::fabs(tc_o - do_);
+        sum_tc_phi += std::fabs(tc_p - dphi);
         ++valid;
     }
 
@@ -438,16 +446,18 @@ void build_v2_grids_gpu(
     }
 
     const double r_probes[7] = {2.3, 2.5, 2.7, 2.9, 3.1, 3.4, 3.8};
-    double rad_sum = 0.0;
+    double rad_sum = 0.0, rad_tc_sum = 0.0;
     for (int k = 0; k < 7; ++k) {
         double px = rmg[0] + r_probes[k]*dir[0], py = rmg[1] + r_probes[k]*dir[1], pz = rmg[2] + r_probes[k]*dir[2];
         double sa, sb, sc;
         cell.cart_to_unit_frac(px, py, pz, sa, sb, sc);
         sa -= std::floor(sa); sb -= std::floor(sb); sc -= std::floor(sc);
         float go_tri = trilinear_periodic(h_uo.data(), nx, ny, nz, sa, sb, sc);
+        double go_tc = tricubic_periodic(h_uo.data(), nx, ny, nz, sa, sb, sc, true, 5.0e4f);
         double dc, do_ex, dphi;
         eval_v2_direct_point(cell, atoms, kvecs, tbl, sa, sb, sc, r_cut_A, ewald_alpha, dc, do_ex, dphi);
         rad_sum += std::fabs((double)go_tri - do_ex);
+        rad_tc_sum += std::fabs(go_tc - do_ex);
     }
 
     stats_out.build_ms = (double)ms;
@@ -455,7 +465,11 @@ void build_v2_grids_gpu(
     stats_out.pore_mae_c_K = (valid > 0) ? (sum_c / valid) : 0.0;
     stats_out.pore_mae_o_K = (valid > 0) ? (sum_o / valid) : 0.0;
     stats_out.pore_mae_phi_Ke = (valid > 0) ? (sum_phi / valid) : 0.0;
+    stats_out.pore_tricubic_mae_c_K = (valid > 0) ? (sum_tc_c / valid) : 0.0;
+    stats_out.pore_tricubic_mae_o_K = (valid > 0) ? (sum_tc_o / valid) : 0.0;
+    stats_out.pore_tricubic_mae_phi_Ke = (valid > 0) ? (sum_tc_phi / valid) : 0.0;
     stats_out.radial_256_mae_K = rad_sum / 7.0;
+    stats_out.radial_256_tricubic_mae_K = rad_tc_sum / 7.0;
     stats_out.radial_128_mae_K = 0.0;
 }
 

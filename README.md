@@ -4,7 +4,7 @@
 
 A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs) on **NVIDIA GeForce RTX 5070** (`sm_120`), built specifically around open-metal-site (OMS) adsorption physics such as **$\text{CO}_2$ capture in Mg-MOF-74 ($\text{Mg}_2(\text{dobdc})$)**.
 
-![Step 1 Mg-MOF-74 CO2 298K Results](assets/step1_mof74_co2_298K.png)
+![Step 4 Mg-MOF-74 Tricubic Validation](assets/step4_validated_mercado_raspa3.png)
 
 ---
 
@@ -86,27 +86,30 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 
 ---
 
-## Step 4: Publication-Grade Credibility Upgrades (`0.10 Å`, Mercado 2016 & RASPA3)
+## Step 4: Publication-Grade Credibility Upgrades (`0.10 Å` Tricubic, Mercado 2016 & RASPA3)
 
-![Step 4 Validation: 0.10 A Grid, RASPA3 & Mercado 2016 DFT-FF](assets/step4_validated_mercado_raspa3.png)
+![Step 4 Validation: 0.10 A Tricubic Grid, RASPA3 & Mercado 2016 DFT-FF](assets/step4_validated_mercado_raspa3.png)
 
-### 1. Upgrade 1 — Numerical Precision & Sampling (`build\mof_gcmc_v2.exe`)
-- **Grid Refinement (`128x128x36` `0.20 Å` → `256x256x72` `0.10 Å`)**: Build time = `3.13 s` (6 grids, `113 MB` VRAM); radial `Mg–O` MAE (`2.3–3.8 Å`) drops **15.2×** (`190.46 K → 12.53 K`); pore MAE vs. direct Ewald ($\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$, `1,000` pts) drops to `U_lj_C = 0.793 K`, `U_lj_O = 2.387 K`, `Phi = 3.3867 K/e`.
-- **Zero-Drift Arithmetic**: Guest coordinates and accumulating energies are held in full `double` shared memory with exact periodic full-box energy recomputation every `50,000` steps — maximum energy drift across all `128` GPU boxes (`64M` steps/FF) is **`6.345e-09 K`** (UFF) and **`8.498e-09 K`** (Mercado 2016), with detailed balance `max|acc_ins - acc_del| <= 0.000171`.
+### 1. Upgrade 1 — `O(h⁴)` 3D Tricubic Interpolation & Zero-Drift Sampling (`build\mof_gcmc_v2.exe`)
+- **Grid & Interpolation Refinement (`128×128×36` Trilinear → `256×256×72` Trilinear → `256×256×72` 4-pt Lagrange Tricubic)**:
+  - Grid build time = **`3.03 s`** (UFF, 6 grids = `113 MB` VRAM) — **`38.9×`** faster than single-core CPU RASPA3's `117.98 s` (`151×151×46`).
+  - Near-field `Mg–O` radial MAE (`2.3–3.8 Å`) drops **`290.3×`**: **`190.46 K`** (`128`-Trilin) → **`12.53 K`** (`256`-Trilin) → **`0.656 K`** (`256`-Tricubic); Mercado 2016 drops `4.99 K → 0.092 K`.
+  - Pore MAE (`1,000` pts vs. direct Ewald $\alpha_{\text{ref}} = 0.25\ \text{\AA}^{-1}$): `U_lj_C` drops `0.793 K → 0.061 K`, `U_lj_O` drops `2.387 K → 0.148 K` (Mercado: `C = 0.055 K, O = 0.035 K`).
+- **Zero-Drift Double Precision**: Guest coordinates and energies stay in `double` shared memory with full fresh `u_fw + u_gg` periodic recomputation every `50,000` steps — maximum drift across all `128` boxes (`64M` steps/FF) is **`5.879e-09 K`** (UFF) and **`1.024e-08 K`** (Mercado 2016), with detailed balance `max|acc_ins - acc_del| <= 0.000253`.
 
 ### 2. Upgrade 2 — Official Mercado 2016 DFT-Derived Buckingham/LJ + EPM2 Force Field
 - Integrated directly from [`data/mercado2016/`](data/mercado2016/) (`rociomer/DFT-derived-force-field`, *J. Phys. Chem. C* 2016, 120, 12590; `Mg_O_CO2` Buckingham potential with exact turnover clamp + shifted `r_cut = 11.0 Å` + Mercado partial charges + EPM2 $\text{CO}_2$).
-- **Low-Pressure Open-Metal Physics (`0.15 bar`, 298 K)**: Zero/low-loading $Q_{\text{st}}$ jumps from `26.86 kJ/mol` (UFF) to **`36.04 kJ/mol`**, ideal-crystal uptake rises from `1.34` to **`6.77 mmol/g`**, and the radial $\text{Mg}^{2+}\text{–O}_{\text{CO}_2}$ coordination peak shifts **`-0.25 Å`** inward (`2.775 Å → 2.525 Å`), clearly illustrating both improved open-metal attraction and why idealized rigid 100%-accessible crystal models typically exceed defect-limited experimental uptake (`3.6–4.6 mmol/g @ 0.15 bar`, `7.5–8.6 mmol/g @ 1.0 bar`; cf. ~80% accessible sites dotted curve).
+- **Low-Pressure Open-Metal Physics (`0.15 bar`, 298 K)**: Low-loading $Q_{\text{st}}$ rises from `26.94 kJ/mol` (UFF) to **`35.65 kJ/mol`**, ideal-crystal uptake rises from `1.43` to **`7.15 mmol/g`** (`11.11 mmol/g` at `1.0 bar`), and the radial $\text{Mg}^{2+}\text{–O}_{\text{CO}_2}$ peak contracts **`-0.25 Å`** inward (`2.775 Å → 2.525 Å`), illustrating both sharper metal coordination and why idealized rigid 100%-accessible crystals overshoot defect-limited experiments (`3.6–4.6 mmol/g @ 0.15 bar`, `7.5–8.6 mmol/g @ 1.0 bar`; see `×0.80` effective-site curve).
 
-### 3. Upgrade 3 — Back-to-Back Verification vs. Native `RASPA3 3.0.29` (Exact Ewald, Same CIF & `r_cut = 11.0 Å`)
+### 3. Upgrade 3 — Dual Head-to-Head Verification vs. Native `RASPA3 3.0.29` (Exact Ewald & Tricubic Grid)
 
-| Pressure | Step 1 GPU `0.20 Å` | **GPU `v2` `0.10 Å` (`4 × 1M`)** | **Native `RASPA3 3.0.29` (Exact Ewald)** | GPU vs. RASPA3 Diff | $Q_{\text{st}}$ Diff |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| **`0.15 bar`** | `1.1724 mmol/g` | **`1.3404 ± 0.0152 mmol/g`** | `1.4087 ± 0.0328 mmol/g` | **`-4.85%`** | `-0.12 kJ/mol` |
-| **`1.00 bar`** | `6.7019 mmol/g` | **`7.3513 ± 0.0262 mmol/g`** | `7.3384 ± 0.1329 mmol/g` | **`+0.18%`** | `-0.48 kJ/mol` |
-| **`5.00 bar`** | `12.6165 mmol/g` | **`13.0857 ± 0.0583 mmol/g`** | `13.3048 ± 0.2118 mmol/g` | **`-1.65%`** | `+0.48 kJ/mol` |
+| Pressure | Step 1 `0.20 Å` Trilin | `v2` `0.10 Å` Trilin | **`v2` `0.10 Å` Tricubic** | **`RASPA3` Exact Ewald** | **`RASPA3` Tricubic Grid** | `v2` vs. Grid ($z$) | $\Delta Q_{\text{st}}$ |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`0.15 bar`** | `1.1724` | `1.3404` | **`1.4276 ± 0.0123`** | `1.4087 ± 0.0328` (`+1.34%`) | `1.3952 ± 0.0719` | **`+2.32%`** (`0.44σ`) | `+0.14 kJ/mol` |
+| **`1.00 bar`** | `6.7019` | `7.3513` | **`7.6349 ± 0.1576`** | `7.3384 ± 0.1329` (`1.44σ`) | `7.5303 ± 0.1156` | **`+1.39%`** (`0.54σ`) | `-0.38 kJ/mol` |
+| **`5.00 bar`** | `12.6165` | `13.0857` | **`13.1862 ± 0.0221`** | `13.3048 ± 0.2118` (`-0.89%`) | `13.2402 ± 0.1871` | **`-0.41%`** (`0.29σ`) | `+0.54 kJ/mol` |
 
-- **Speedup**: GPU `v2` achieves **`757,119 MC-steps/s`** (`0.76 M steps/s`, `64M` steps in `84.53 s`) vs. single-trajectory CPU `RASPA3` exact Ewald at **`1,215 MC-steps/s`** (`1,106–1,360 steps/s`) — a **`623.0×`** wall-clock throughput speedup while staying within `<= 4.85%` (`0.18%` at `1.0 bar`) and `< 0.5 kJ/mol` $Q_{\text{st}}$ agreement.
+- **Transparent Dual Speedup**: GPU `v2` Tricubic achieves **`598,669 MC-steps/s`** (`64M` steps in `106.90 s`), delivering **`153.2×`** throughput over single-core `RASPA3 3.0.29` running the **same tricubic grid algorithm** (`3,908 MC-steps/s`; `~10–20×` normalized against 8–16 CPU threads), and **`492.6×`** over single-core `RASPA3` exact Ewald without grids (`1,215 MC-steps/s`).
 
 ---
 
@@ -125,10 +128,11 @@ uv run --with matplotlib --with numpy python scripts\verify_step2.py
 .\build\mof_gcmc_mix.exe
 uv run --with matplotlib --with numpy python scripts\verify_step3.py
 
-# Step 4 high-precision 0.10 A UFF + Mercado 2016 + native RASPA3 benchmark & validation plot
+# Step 4 Tricubic 0.10 A UFF + Mercado 2016 + native RASPA3 (Exact & Tricubic Grid) & plot
 cmd /c build.bat v2
 .\build\mof_gcmc_v2.exe
 uv run python scripts\run_raspa3_bench.py
+uv run python scripts\run_raspa3_grid_bench.py
 uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
 ```
 
@@ -144,11 +148,11 @@ cuda-mof-gcmc/
 ├── include/
 │   ├── cell.hpp                  # Hexagonal/triclinic cell transform & exact 5-candidate MIC
 │   ├── forcefield.hpp            # UFF, REPEAT, Mercado 2016, TraPPE/EPM2 & single/binary PR EOS
-│   ├── grid3d.hpp                # Periodic 3D grid view (U_lj, Phi, Ex, Ey, Ez) & trilinear lookup
+│   ├── grid3d.hpp                # Periodic 3D grids, trilinear & O(h^4) tricubic lookup
 │   ├── cif_loader.hpp            # CIF symmetry expander & geometry checker interface
 │   ├── gcmc_gpu.hpp              # Step 1/2 grid builder & single-component batched GCMC API
 │   ├── mix_gcmc.hpp              # Step 3 multi-species 8-grid builder & binary GCMC API
-│   └── v2_gcmc.hpp               # Step 4 high-precision 0.10 A UFF & Mercado 2016 solver API
+│   └── v2_gcmc.hpp               # Step 4 high-precision 0.10 A Tricubic UFF & Mercado 2016 API
 ├── src/
 │   ├── cif_loader.cpp            # Symmetry expansion -> 162 atoms & bond/charge validation
 │   ├── grid_builder.cu           # Step 1/2 GPU 3D LJ + Ewald potential & E-field precomputation
@@ -157,14 +161,15 @@ cuda-mof-gcmc/
 │   ├── mix_grid_builder.cu       # Step 3 GPU 8-grid precomputation (C_CO2, O_CO2, N_N2, CH4 + E-field)
 │   ├── mix_gcmc_kernel.cu        # Step 3 binary GCMC (5 moves incl. Identity Swap + Thole coupling)
 │   ├── main_mix.cu               # Step 3 driver (Ideal-gas & swap checks + CO2/N2 & CO2/CH4 sweeps)
-│   ├── grid_builder_v2.cu        # Step 4 256x256x72 Buckingham/LJ + Ewald grid builder
-│   ├── gcmc_kernel_v2.cu         # Step 4 double-SMEM + 50k periodic recompute GCMC + Mg-O RDF
-│   └── main_v2.cu                # Step 4 driver (UFF 0.10 A vs Mercado 2016 0.10 A, 64M steps each)
+│   ├── grid_builder_v2.cu        # Step 4 256x256x72 Buckingham/LJ + Ewald grid builder & stats
+│   ├── gcmc_kernel_v2.cu         # Step 4 double-SMEM Tricubic + 50k periodic recompute + Mg-O RDF
+│   └── main_v2.cu                # Step 4 driver (UFF vs Mercado 2016 0.10 A Tricubic, 64M steps each)
 ├── scripts/
 │   ├── verify_physics.py         # Independent MIC/PR checks & Step 1 300 DPI plot
 │   ├── verify_step2.py           # Step 2 polarization verification & 300 DPI comparison plot
 │   ├── verify_step3.py           # Binary PR EOS verification & Step 3 300 DPI comparison plot
 │   ├── run_raspa3_bench.py       # Native Windows RASPA3 3.0.29 parallel exact-Ewald runner
+│   ├── run_raspa3_grid_bench.py  # Native Windows RASPA3 3.0.29 parallel tricubic-grid runner
 │   └── verify_upgrades.py        # Step 4 automated assertions & 300 DPI validation figure
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # Step 1: 298 K isotherm, Qst & pore density

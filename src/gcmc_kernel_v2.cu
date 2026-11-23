@@ -243,9 +243,13 @@ __global__ void gcmc_v2_kernel(
                     }
 
                     double ulj = 0.0, uel = 0.0;
-                    bool ovl = eval_co2_framework_grid(
-                        grid, cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
-                        gp.bond, gp.q_c, gp.q_o, ulj, uel);
+                    bool ovl = cfg.use_tricubic
+                        ? eval_co2_framework_grid_tricubic(
+                            grid, cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
+                            gp.bond, gp.q_c, gp.q_o, ulj, uel)
+                        : eval_co2_framework_grid(
+                            grid, cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
+                            gp.bond, gp.q_c, gp.q_o, ulj, uel);
                     if (ovl) { prop.fw_overlap = 1; prop.skip_gg = 1; }
                     else     { prop.u_fw_new = ulj + uel; }
                 }
@@ -259,9 +263,13 @@ __global__ void gcmc_v2_kernel(
                     random_unit_sphere(rng, prop.ux, prop.uy, prop.uz);
 
                     double ulj = 0.0, uel = 0.0;
-                    bool ovl = eval_co2_framework_grid(
-                        grid, cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
-                        gp.bond, gp.q_c, gp.q_o, ulj, uel);
+                    bool ovl = cfg.use_tricubic
+                        ? eval_co2_framework_grid_tricubic(
+                            grid, cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
+                            gp.bond, gp.q_c, gp.q_o, ulj, uel)
+                        : eval_co2_framework_grid(
+                            grid, cell, prop.cx, prop.cy, prop.cz, prop.ux, prop.uy, prop.uz,
+                            gp.bond, gp.q_c, gp.q_o, ulj, uel);
                     if (ovl) { prop.fw_overlap = 1; prop.skip_gg = 1; }
                     else     { prop.u_fw_new = ulj + uel; }
                 }
@@ -416,7 +424,17 @@ __global__ void gcmc_v2_kernel(
             double local_u = 0.0;
             int N = prop.cur_N;
             for (int i = tid; i < N; i += BLOCK_THREADS) {
-                local_u += s_ufw[i];
+                double ulj_chk = 0.0, uel_chk = 0.0;
+                bool ov_chk = cfg.use_tricubic
+                    ? eval_co2_framework_grid_tricubic(
+                        grid, cell, s_cx[i], s_cy[i], s_cz[i], s_ux[i], s_uy[i], s_uz[i],
+                        gp.bond, gp.q_c, gp.q_o, ulj_chk, uel_chk)
+                    : eval_co2_framework_grid(
+                        grid, cell, s_cx[i], s_cy[i], s_cz[i], s_ux[i], s_uy[i], s_uz[i],
+                        gp.bond, gp.q_c, gp.q_o, ulj_chk, uel_chk);
+                double ufw_fresh = ov_chk ? s_ufw[i] : (ulj_chk + uel_chk);
+                s_ufw[i] = ufw_fresh;
+                local_u += ufw_fresh;
                 for (int j = i + 1; j < N; ++j) {
                     int ov = 0;
                     local_u += pair_energy_v2(

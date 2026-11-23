@@ -25,9 +25,13 @@ struct V2GridStats {
     double build_ms;
     double radial_128_mae_K; // Trilinear vs exact along Mg1->pore (2.3-3.8 A) on 128x128x36
     double radial_256_mae_K; // Trilinear vs exact along Mg1->pore (2.3-3.8 A) on 256x256x72
+    double radial_256_tricubic_mae_K;
     double pore_mae_c_K;
     double pore_mae_o_K;
     double pore_mae_phi_Ke;
+    double pore_tricubic_mae_c_K;
+    double pore_tricubic_mae_o_K;
+    double pore_tricubic_mae_phi_Ke;
     int verify_samples;
 };
 
@@ -37,6 +41,7 @@ struct V2GcmcConfig {
     double ewald_alpha = 0.30;
     double dsf_alpha = 0.20;
     int ff_mode = FF_UFF_REPEAT_TRAPPE;
+    int use_tricubic = 1;
     int eq_steps = 200000;
     int prod_steps = 800000;
     int sample_stride = 20;
