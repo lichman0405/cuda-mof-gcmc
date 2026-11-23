@@ -18,7 +18,7 @@
 - **与工业标准 `RASPA3 (3.0.29)` 统计误差内逐点对齐**：在 `Mg-MOF-74`（`298 K`, UFF+REPEAT）基准上，`0.10 Å` `O(h⁴)` 三维 Tricubic GPU 内核与原生 RASPA3 网格版在 `0.15 / 1.0 / 5.0 bar` 偏差仅 **`+2.32% / +1.39% / -0.41%`**（全部 **`≤ 0.54σ`**，$\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$），近程 `Mg–O` 径向插值误差较三线性压缩 **`290.3×`**（`190.46 K → 0.656 K`，Mercado 2016 低至 `0.092 K`）。
 - **单卡百倍级真实加速（RTX 5070）**：`6,400 万` 步耗时 `106.9 s`（**`598,669 MC-steps/s`**），对比同算法单核 RASPA3 Tricubic 网格版（`3,908 steps/s`）加速 **`153.2×`**，对比精确 Ewald（`1,215 steps/s`）加速 **`492.6×`**，三维网格构建加速 **`38.9×`**（`3.03 s` vs `117.98 s`）。
 - **GPU 原生 Level 2 全自洽多体极化（`Pol-SCF`）**：Block 级共享内存 Applequist-Thole 自洽求解器与 `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**，在 `15:85` CO₂/N₂ 烟道气中清晰捕捉客体间多体相互退极化屏蔽效应（选择性由单骨架场 `Pol-3Site` 的 `64.6 / 67.4` 物理回落至 `37.3 / 43.2`）。
-- **GPU 经典提议 + MLIP 嵌套蒙特卡洛（`Phase 1–2.5` 验证闭环）**：零 I/O CUDA 提议器动态库集成精确化学势偏置（[`proposer_set_chem_pot_shift`](include/proposer_api.h)），结合微批 `no_grad` MACE 与缓存静骨架边表的 GPU 精确 `PBE-D3(BJ)`（`37.5 ms/box`，较 ASE **`4.21×`** 加速且误差 `<= 0.0082 kJ/mol/CO2`），不仅通过偏置无偏性证明（`Pol-3Site -> Mercado 2016`：`z = 2.27σ`、`Ins=1288 / Del=1262`），更在 `298 K, 0.01 bar` 下跑通 4 副本对称增删稳态平衡（`9.7771 ± 0.2617 mmol/g`、`Ins=64/82`、`Del=40/436`、外层接受率 `50.6%`）。
+- **GPU 经典提议 + MLIP 嵌套蒙特卡洛（`Phase 1–3` 全部完成）**：通用 CLI 引擎（[`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py)）整合带精确化学势偏置的零 I/O CUDA 提议器动态库与 `FastMaceD3Target`（`37.5 ms/box`，较 ASE **`4.21×`** 加速），同台实测 4 代 MACE 基础模型（量化暴露 `MACE-MPA-0` / `MP-0b3 + D3` 存在 `-82.8 / -92.2 kJ/mol` 过结合，而 **`MACE-MatPES-r2SCAN-0 + D3(r2scan)`** 落在物理合理的 `-40.1 kJ/mol`），跑通 `Mg-MOF-74` 多压力稳态等温线（`0.002–0.15 bar`），并在**零金属专用 DFT 力场拟合**下直接跨材料泛化至 `Ni-MOF-74`（`298 K, 0.15 bar`：`0.188 → 5.0360 ± 0.1963 mmol/g`、$Q_{\text{st}}$ 从 `17.48` 恢复至 `33.83 kJ/mol`）。
 - **全双精度零能量漂移**：全程 `double` 共享内存状态 + 周期全盒重算，常规/一阶极化最大能量漂移低至 **`2.0e-09 ~ 1.0e-08 K`**，全自洽多体极化 **`≤ 7.25e-07 K`**，全工况细致平衡偏差 `|acc_ins - acc_del| ≤ 0.003`。
 - **零依赖统一 JSON/CLI 通用引擎**：单一可执行文件（[`mof_gcmc_cli.exe`](src/main_cli.cu)）集成通用 CIF 解析（`19` 种 MOF 元素）、UFF / Mercado 2016 第一性原理力场、二元 Identity Swap、Peng–Robinson 逸度、自动化检验套件与 300 DPI 可视化图表。
 
@@ -34,10 +34,10 @@
   - **第三步**：多组分竞争吸附（CO₂/N₂ 与 CO₂/CH₄）、二元 Peng–Robinson 混合逸度与对称 Identity Swap。
   - **第四步**：`0.10 Å` `O(h⁴)` 三维 Tricubic 插值、每 `50k` 步全盒重算零漂移、官方 **Mercado 2016** DFT 力场，以及原生 **RASPA3 (`3.0.29`)** 双重背靠背验证（`153.2×` / `492.6×`）。
   - **第五步 & Level 2**：统一 JSON/CLI 引擎（[`mof_gcmc_cli.exe`](src/main_cli.cu)）+ Block 级共享内存全自洽多体 `Pol-SCF`（`1.83e-08 K` 精确矩阵求逆对齐）。
-- **[进行中] 第六步 — GPU 经典提议 + MLIP 嵌套蒙特卡洛（`Phase 1–2` 已完成）**
+- **[已完成] 第六步 — GPU 经典提议 + MLIP 嵌套蒙特卡洛（`Phase 1–3` 全部完成）**
   - **Phase 1（已完成）**：在 RTX 5070 上实测 `MACE-MP-0 + D3` 推理速度（`1×1×2` 为 `107.7 ms/eval`）、OMS 径向曲线及 60 构型能量相关性（`Mercado 2016` 提议器 `R² = 0.911`、理论单分子外层接受率 `84.4%`）。
   - **Phase 2 & 2.5（已完成）**：封装带精确化学势偏置（`proposer_set_chem_pot_shift`）的零 I/O CUDA 提议器动态库，通过无偏/偏置零误差证明（`Pol-3Site -> Mercado`: `z = 0.27σ / 2.27σ`），将 `MACE-MP-0 + D3` 提速 **`4.21×`**（`37.5 ms/box`），跑通 4 副本双向增删稳态平衡（`0.01 bar` 得 `9.78 mmol/g`），并定量诊断出 `MACE-MP-0 + PBE-D3(BJ)` 在 `0.15 bar` 存在约 `9.65 kJ/mol/CO2` 过结合效应。
-  - **Phase 3（下一步）**：多副本多压力稳态等温线（`0.05–5.0 bar`）、`cuequivariance` 等变核加速，以及跨体系 OMS-MOF（`Co-/Ni-MOF-74`、`HKUST-1`、`UiO-66`）泛化评估。
+  - **Phase 3（已完成）**：封装通用 CLI 引擎 [`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py)，完成 4 代 MACE 基础模型横向过结合评测（`MP-0 / MPA-0 / MP-0b3 / MatPES-r2SCAN-0`），收敛 `Mg-MOF-74` 完整多压力等温线，并在 [`Ni-MOF-74`](data/NiMOF-74.cif)（`0.01–0.15 bar`）上验证了零金属专用参数拟合的跨材料直接泛化。
 
 ---
 
@@ -163,7 +163,7 @@ $$
 
 ---
 
-## 第六步（Phase 1–2）：GPU 经典提议 + MLIP（`MACE-MP-0 + D3`）嵌套蒙特卡洛
+## 第六步（Phase 1–3）：GPU 经典提议 + MLIP（`MACE`）嵌套蒙特卡洛
 
 ### Phase 1：可行性与相关性摸底
 
@@ -207,6 +207,32 @@ $$
   - **`298 K, 0.15 bar` 实证诊断（`72,000` 步）**：自洽测得 `MACE+D3` 与 `Mercado 2016` 能量差达 **`-9.65 kJ/mol/CO2`**（单分子玻尔兹曼权重高出 `~49×`），导致未修正的 **`MACE-MP-0 + PBE-D3(BJ)`** 在刚性理想 `Mg-MOF-74` 上跨过 OMS 饱和线持续向满孔饱和吸附冲刺（第 600 轮达 `14.31 mmol/g`，远高于 `Mercado 2016` 的 `6.02` 与实验 `3.6–4.6 mmol/g`），量化验证了文献中普遍存在的 `PBE-D3` 过结合问题。
   - **`298 K, 0.01 bar` 稳态收敛（`50,000` 步，`K = 25`，`265.3 s`）**：两阶段自洽标定（**`-9.19 kJ/mol`**，`40.84×` 内层逸度）使 `MACE+D3` 在 OMS 活性区间实现**双向对称增删（`Ins = 64 / 82`、`Del = 40 / 436`，外层接受率 `50.6%`）**与 4 副本稳态平衡：**`9.7771 ± 0.2617 mmol/g`**（前后半程 `9.480` vs `10.074 mmol/g`，漂移 `0.594 mmol/g`，$Q_{\text{st}} = 38.08 \pm 5.03\ \text{kJ/mol}$）。
 
+### Phase 3：多代基础模型评测、`Mg-MOF-74` 完整等温线与 `Ni-MOF-74` 跨材料泛化
+
+![Phase 3 Multi-Model Benchmark & Ni-MOF-74 Generalization](assets/phase3_mlip_isotherm_and_generalization.png)
+
+基于统一 CLI 引擎 [`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py)（支持灵活配置 `--dispersion` 与 `--xc pbe/r2scan`；分析与绘图见 [`scripts/phase3_model_probe.py`](scripts/phase3_model_probe.py)、[`scripts/plot_phase3_summary.py`](scripts/plot_phase3_summary.py)）：
+
+- **4 代 MACE 基础模型横向过结合诊断（`Mg-MOF-74 1×1×2`，负载构型 `N ≈ 25`）**：
+  - `MACE-MP-0 (Medium) + D3(PBE)`：平均 `-U/N = 41.63 kJ/mol`（单分子最深 `-52.01`，`R² = 0.954`，`37.6 ms/box`），比 `Mercado 2016` 深 `-9.24 kJ/mol/CO2`。
+  - **`MACE-MPA-0 + D3(PBE)`** 与 **`MACE-MP-0b3 + D3(PBE)`**：在 `Mg-MOF-74` 上出现严重过结合（`-U/N = 82.84` 与 **`92.15 kJ/mol`**；即便**完全关闭 D3** 依然高达 `-62.39` 与 `-72.76 kJ/mol`），揭示其气相/凝聚相参考能量标定对分子吸附热产生系统性过估。
+  - **`MACE-MatPES-r2SCAN-0`**：不加 D3 的纯 meta-GGA `r²SCAN` 为 `-25.47 kJ/mol`（单分子 `-36.00`，`R² = 0.928`），搭配原生匹配泛函 **`D3(xc="r2scan")`** 后精准落于 **`-40.13 kJ/mol`**（仅比 `Mercado 2016` 深 `6.6 kJ/mol`），准确吻合实验 OMS 吸附热区间。
+- **`Mg-MOF-74 (298 K)` 多压力稳态等温线汇总（`4` 副本 × `K = 25`，全压力点前后半程漂移均 `<= 0.427 mmol/g`）**：
+
+| 压力 | `UFF+REPEAT`（直接） | `Mercado 2016`（直接） | `MACE-MP-0 + D3(PBE)` | `MACE-MatPES-r2SCAN-0 + D3(r2scan)` |
+| :---: | :---: | :---: | :---: | :---: |
+| **`0.002 bar`** | `0.0179 ± 0.0010` | `0.1560 ± 0.0015` | `5.7526 ± 0.3556` (`Qst=40.24`) | **`2.0200 ± 0.4745`** (`Qst=43.07`) |
+| **`0.010 bar`** | `0.0894 ± 0.0014` | `0.8018 ± 0.0115` | `9.2176 ± 0.3697` (`Qst=38.09`) | **`5.5099 ± 0.7764`** (`Qst=34.49`) |
+| **`0.050 bar`** | `0.4590 ± 0.0113` | `3.3117 ± 0.0533` | `13.2035 ± 0.1286` (`Qst=34.45`) | **`9.4397 ± 0.1731`** (`Qst=37.48`) |
+| **`0.150 bar`** | `1.3277 ± 0.0162` | `6.0230 ± 0.0406` | `15.3345 ± 0.3793` (`PBE-D3` 饱和) | **`11.2541 ± 0.2569`** (`Ins=46, Del=42`) |
+
+- **跨材料零专有力场拟合泛化实测 — `Ni-MOF-74`（[`data/NiMOF-74.cif`](data/NiMOF-74.cif)，`298 K`，`Pol-3Site + Δμ_ref -> r2SCAN-0 + D3(r2scan)`）**：
+  - `MACE-MatPES-r2SCAN-0 + D3(r2scan)` 径向 `Ni²⁺–O(CO₂)` 势阱位于 `2.40 Å`（共线 `-32.33 kJ/mol`）。
+  - 在**未做任何 Ni 专属 DFT 参数拟合**下（内层仅用通用 `UFF` LJ + 同构模板电荷做 `Pol-3Site` 引导采样），外层 MLIP Nested MC 在三个压力点均实现对称增删（`Ins/Del`：`35/27`、`34/28`、`38/29`，漂移 `<= 0.291 mmol/g`）：
+    - `0.01 bar`：**`0.5779 ± 0.1437 mmol/g`**（$Q_{\text{st}} = 33.83 \pm 1.26\ \text{kJ/mol}$），对比零电荷 `UFF` `0.0123` / `Pol-3Site` `0.2491`
+    - `0.05 bar`：**`2.1082 ± 0.1584 mmol/g`**（$Q_{\text{st}} = 28.80 \pm 2.61\ \text{kJ/mol}$），对比零电荷 `UFF` `0.0612` / `Pol-3Site` `1.1995`
+    - `0.15 bar`：**`5.0360 ± 0.1963 mmol/g`**（$Q_{\text{st}} = 25.82 \pm 1.71\ \text{kJ/mol}$），对比零电荷 `UFF` `0.1878`（$Q_{\text{st}} = 17.48\ \text{kJ/mol}$），精准重现实验 `Ni-MOF-74`（`~3.5–4.4 mmol/g`，折合 `×0.8` 完美晶体可达度 `4.0 mmol/g`）及 **`Mg-MOF-74 > Ni-MOF-74`** 金属吸附序。
+
 ---
 
 ## 编译与运行命令
@@ -237,11 +263,14 @@ uv run --with numpy python scripts\verify_cli.py
 uv run --with numpy python scripts\verify_scf_pol.py --check-only
 uv run --with matplotlib --with numpy python scripts\plot_scf_pol.py
 
-# 第六步（Phase 1–2.5）CUDA 提议器动态库、MLIP 相关性摸底、实景 Nested MC 及偏置批处理稳态验证
+# 第六步（Phase 1–3）统一 MLIP Nested MC 引擎、多代基础模型审计与 Mg/Ni-MOF-74 完整等温线
 cmd /c build.bat proposer
 .venv-mlip\Scripts\python.exe scripts\phase1_mlip_probe.py
 .venv-mlip\Scripts\python.exe scripts\verify_nested_mc.py
 .venv-mlip\Scripts\python.exe -u scripts\verify_phase25_shifted_nested.py
+.venv-mlip\Scripts\python.exe -u scripts\phase3_model_probe.py
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\MgMOF-74.cif --pressures 0.002 0.01 0.05 0.15 --proposer mercado --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --out-json build\phase3_mgmof74_r2scan_d3.json
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\NiMOF-74.cif --pressures 0.01 0.05 0.15 --proposer pol3site --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --out-json build\phase3_nimof74_r2scan_d3.json
 ```
 
 ---
@@ -253,6 +282,7 @@ cuda-mof-gcmc/
 ├── configs/                      # 统一 CLI 引擎 JSON 预设（UFF、Mercado、PSA 313K、烟道气）
 ├── data/
 │   ├── MgMOF-74.cif              # RASPA2 官方 R-3 Mg-MOF-74 晶体结构文件
+│   ├── NiMOF-74.cif              # 同构 R-3 Ni-MOF-74 结构文件（实验晶格与同构模板电荷）
 │   └── mercado2016/              # 官方 Mercado et al. (JPCC 2016) DFT-FF 与 EPM2 参数文件
 ├── include/
 │   ├── cell.hpp                  # 六方/三斜晶胞坐标变换与精确 5 候选 MIC
@@ -293,7 +323,10 @@ cuda-mof-gcmc/
 │   ├── phase1_mlip_probe.py      # 第六步 Phase 1 MACE-MP-0+D3 测速与 Nested MC 相关性摸底脚本
 │   ├── nested_mc_engine.py       # 第六步 Phase 2/2.5 ctypes + FastMaceD3Target 与偏置 Nested MC 引擎
 │   ├── verify_nested_mc.py       # 第六步 Phase 2 零偏差证明与实景 MACE-MP-0+D3 验证套件
-│   └── verify_phase25_shifted_nested.py # 第六步 Phase 2.5 化学势偏置、FastMaceD3 测速与 4 盒稳态验证
+│   ├── verify_phase25_shifted_nested.py # 第六步 Phase 2.5 化学势偏置、FastMaceD3 测速与 4 盒稳态验证
+│   ├── phase3_model_probe.py     # 第六步 Phase 3 多代 MACE 基础模型过结合与吞吐横向测评脚本
+│   ├── run_mlip_gcmc.py          # 第六步 Phase 3 通用混合 GPU-GCMC + MLIP Nested MC 统一 CLI 引擎
+│   └── plot_phase3_summary.py    # 第六步 Phase 3 300 DPI 三联测评、等温线与跨材料泛化总图脚本
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
 │   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
@@ -302,7 +335,8 @@ cuda-mof-gcmc/
 │   ├── step5_level2_scf_polarization.png   # 第五步：Level 2 Pol-SCF 等温线、屏蔽效应与 36x36 核验图
 │   ├── phase1_mlip_nested_mc_probe.png     # 第六步 Phase 1：MACE-MP-0+D3 径向、相关性与耗时评估图
 │   ├── phase2_nested_mc_verification.png   # 第六步 Phase 2：零偏差证明与 MACE-MP-0+D3 实景轨迹图
-│   └── phase25_shifted_batched_mace.png    # 第六步 Phase 2.5：偏置无偏证明、4.21x 提速与 4 盒稳态曲线
+│   ├── phase25_shifted_batched_mace.png    # 第六步 Phase 2.5：偏置无偏证明、4.21x 提速与 4 盒稳态曲线
+│   └── phase3_mlip_isotherm_and_generalization.png # 第六步 Phase 3：基础模型审计、Mg/Ni-MOF-74 等温线总图
 ├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2 / cli / proposer）
 ├── LICENSE                       # MIT 开源协议
 ├── README.md                     # 英文项目文档

@@ -309,9 +309,9 @@ class MaceD3Target:
 
 
 class FastMaceD3Target:
-    """Fast batched energy-only MACE-MP-0 + exact GPU-edge PBE-D3(BJ) evaluator."""
+    """Fast batched energy-only MACE-MP-0 + exact GPU-edge DFT-D3(BJ) evaluator."""
 
-    def __init__(self, cif_path: str, supercell=(1, 1, 2), model="medium", device="cuda"):
+    def __init__(self, cif_path: str, supercell=(1, 1, 2), model="medium", device="cuda", dispersion: bool = True, dispersion_xc: str = "pbe"):
         import torch
         from ase import Atoms
         from ase.io import read as ase_read
@@ -325,13 +325,22 @@ class FastMaceD3Target:
         self.torch_geometric = torch_geometric
         self.torch_tools = torch_tools
         self.device = torch.device(device)
+        self.use_dispersion = bool(dispersion)
+        self.dispersion_xc = str(dispersion_xc)
 
         uc = ase_read(str(cif_path))
         self.fw = uc.repeat(tuple(supercell))
         self.n_fw = len(self.fw)
-        calc = mace_mp(model=model, dispersion=True, default_dtype="float32", device=device)
-        self.mace_calc = calc.mixer.calcs[0]
-        self.d3_calc = calc.mixer.calcs[1]
+        calc = mace_mp(
+            model=model, dispersion=self.use_dispersion, dispersion_xc=self.dispersion_xc,
+            default_dtype="float32", device=device
+        )
+        if self.use_dispersion:
+            self.mace_calc = calc.mixer.calcs[0]
+            self.d3_calc = calc.mixer.calcs[1]
+        else:
+            self.mace_calc = calc
+            self.d3_calc = None
         self.mace_model = self.mace_calc.models[0]
         self.mace_model.eval()
         self.keyspec = mace_data.KeySpecification(
@@ -340,28 +349,29 @@ class FastMaceD3Target:
         )
 
         # Precompute exact D3 periodic shifts and static rigid framework-framework edges once on GPU
-        self.rc_d3 = float(self.d3_calc.cutoff)
-        self.cell_np = np.array(self.fw.get_cell(), dtype=np.float32)
-        self.cell_t = torch.tensor(self.cell_np, device=self.device, dtype=torch.float32)
-        inv_cell = torch.linalg.inv(self.cell_t)
-        perp_w = 1.0 / torch.linalg.norm(inv_cell, dim=0)
-        n_rep = [int(math.ceil(self.rc_d3 / float(w))) + 1 for w in perp_w]
-        s0 = torch.arange(-n_rep[0], n_rep[0] + 1, device=self.device)
-        s1 = torch.arange(-n_rep[1], n_rep[1] + 1, device=self.device)
-        s2 = torch.arange(-n_rep[2], n_rep[2] + 1, device=self.device)
-        S_all = torch.cartesian_prod(s0, s1, s2).to(torch.float32)
-        self.S_all = S_all
-        self.shift_vecs_d3 = S_all @ self.cell_t
-        self.zero_shift_idx = int(torch.nonzero((S_all.abs().sum(dim=1) == 0), as_tuple=False)[0].item())
+        if self.use_dispersion:
+            self.rc_d3 = float(self.d3_calc.cutoff)
+            self.cell_np = np.array(self.fw.get_cell(), dtype=np.float32)
+            self.cell_t = torch.tensor(self.cell_np, device=self.device, dtype=torch.float32)
+            inv_cell = torch.linalg.inv(self.cell_t)
+            perp_w = 1.0 / torch.linalg.norm(inv_cell, dim=0)
+            n_rep = [int(math.ceil(self.rc_d3 / float(w))) + 1 for w in perp_w]
+            s0 = torch.arange(-n_rep[0], n_rep[0] + 1, device=self.device)
+            s1 = torch.arange(-n_rep[1], n_rep[1] + 1, device=self.device)
+            s2 = torch.arange(-n_rep[2], n_rep[2] + 1, device=self.device)
+            S_all = torch.cartesian_prod(s0, s1, s2).to(torch.float32)
+            self.S_all = S_all
+            self.shift_vecs_d3 = S_all @ self.cell_t
+            self.zero_shift_idx = int(torch.nonzero((S_all.abs().sum(dim=1) == 0), as_tuple=False)[0].item())
 
-        self.fw_pos_t = torch.tensor(self.fw.get_positions(), device=self.device, dtype=torch.float32)
-        self.fw_Z_t = torch.tensor(self.fw.get_atomic_numbers(), device=self.device, dtype=torch.long)
-        self.pbc_t = torch.tensor([True, True, True], device=self.device, dtype=torch.bool)
-        self.co2_Z_unit = torch.tensor([6, 8, 8], device=self.device, dtype=torch.long)
+            self.fw_pos_t = torch.tensor(self.fw.get_positions(), device=self.device, dtype=torch.float32)
+            self.fw_Z_t = torch.tensor(self.fw.get_atomic_numbers(), device=self.device, dtype=torch.long)
+            self.pbc_t = torch.tensor([True, True, True], device=self.device, dtype=torch.bool)
+            self.co2_Z_unit = torch.tensor([6, 8, 8], device=self.device, dtype=torch.long)
 
-        self.fw_ei, self.fw_sp = self._pair_edges_chunked(
-            self.fw_pos_t, self.fw_pos_t, same_set=True, row_offset=0, col_offset=0
-        )
+            self.fw_ei, self.fw_sp = self._pair_edges_chunked(
+                self.fw_pos_t, self.fw_pos_t, same_set=True, row_offset=0, col_offset=0
+            )
 
         # Reference isolated framework and isolated CO2 energies using identical fast evaluator
         self.e_fw_eV = self._eval_raw_eV_batch([self.fw.copy()], [None])[0]
@@ -448,6 +458,8 @@ class FastMaceD3Target:
                 em = self.mace_model(mb.to_dict(), compute_force=False, compute_stress=False)["energy"]
                 e_mace_parts.append(em.detach().cpu().numpy().astype(np.float64))
         e_mace_np = np.concatenate(e_mace_parts, axis=0)
+        if not self.use_dispersion:
+            return e_mace_np
 
         # 2. Exact GPU PBE-D3(BJ) via cached fw-fw edges + vectorized dynamic edges
         e_d3_np = np.zeros(len(atoms_list), dtype=np.float64)

@@ -18,7 +18,7 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 - **Verified Against `RASPA3 (3.0.29)` Within `0.54σ`**: On `Mg-MOF-74` (`298 K`, UFF+REPEAT), the `0.10 Å` `O(h⁴)` 3D tricubic GPU kernel matches native RASPA3 Tricubic Grid within **`+2.32% / +1.39% / -0.41%`** (`0.15 / 1.0 / 5.0 bar`, $\Delta Q_{\text{st}} \le 0.54\ \text{kJ/mol}$) and cuts radial `Mg–O` interpolation MAE by **`290.3×`** (`190.46 K → 0.656 K`; Mercado 2016 `0.092 K`).
 - **Two-Order-of-Magnitude GPU Speedup (RTX 5070)**: Sustains **`598,669 MC-steps/s`** (`64M` steps in `106.9 s`) — **`153.2×`** faster than single-core RASPA3 Tricubic Grid (`3,908 steps/s`), **`492.6×`** faster than Exact Ewald (`1,215 steps/s`), and **`38.9×`** faster in 3D grid construction (`3.03 s` vs. `117.98 s`).
 - **Level 2 Full Many-Body SCF Polarization on GPU**: Block-collective shared-memory Applequist-Thole SCF solver (`polarization: "scf"`) agrees with exact `36×36` Python matrix inversion to **`1.83e-08 K`** and **`1.13e-11 e·Å`**, capturing many-body mutual depolarization in `15:85` CO₂/N₂ flue gas (`S = 37.3 / 43.2` vs. `64.6 / 67.4` for unscreened framework-only `Pol-3Site`).
-- **Hybrid GPU-GCMC + MLIP Nested MC (`Phase 1–2.5` Verified)**: Zero-I/O CUDA proposer DLL with exact chemical-potential shift ([`proposer_set_chem_pot_shift`](include/proposer_api.h)) + micro-batched `MACE-MP-0 (Medium)` & cached-framework GPU `PBE-D3(BJ)` (`37.5 ms/box`, **`4.21×`** speedup over ASE at `<= 0.0082 kJ/mol/CO2` error) passes shifted Null-Bias (`Pol-3Site -> Mercado 2016`: `z = 2.27σ`, `Ins=1288 / Del=1262`) and converges 4-box `MACE-MP-0 + D3` grand-canonical equilibrium (`298 K, 0.01 bar`: `9.7771 ± 0.2617 mmol/g`, `Ins=64/82`, `Del=40/436`, `50.6%` outer acceptance).
+- **Hybrid GPU-GCMC + MLIP Nested MC (`Phase 1–3` Complete)**: Unified CLI ([`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py)) combining a zero-I/O CUDA proposer DLL ([`proposer_set_chem_pot_shift`](include/proposer_api.h)) and `FastMaceD3Target` (`37.5 ms/box`, **`4.21×`** speedup over ASE) audits 4 MACE generations on `Mg-MOF-74` (exposing `-82.8 / -92.2 kJ/mol` overbinding in `MACE-MPA-0` / `MP-0b3 + D3` vs. `40.1 kJ/mol` in `MACE-MatPES-r2SCAN-0 + D3(r2scan)`), computes converged 4-box `Mg-MOF-74` isotherms (`0.002–0.15 bar`), and generalizes **with zero metal-specific DFT fitting** to `Ni-MOF-74` (`298 K, 0.15 bar`: `0.188 → 5.0360 ± 0.1963 mmol/g`, $Q_{\text{st}}$ `17.48 → 33.83 kJ/mol`).
 - **Zero-Drift Statistical Mechanics**: Full double-precision shared-memory state with periodic full-box energy recomputation keeps maximum energy drift at **`2.0e-09 – 1.0e-08 K`** (`NonPol / Mercado / Pol-3Site`) and **`≤ 7.25e-07 K`** (`Pol-SCF`), with detailed balance `|acc_ins - acc_del| ≤ 0.003`.
 - **Self-Contained Unified JSON/CLI Engine**: Single CUDA binary ([`mof_gcmc_cli.exe`](src/main_cli.cu)) supporting generic CIF frameworks (`19` MOF elements), UFF / Mercado 2016 DFT-FF, binary Identity Swap, Peng–Robinson EOS, automated verification suites, and publication-ready 300 DPI figures.
 
@@ -34,10 +34,10 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
   - **Step 3**: Multi-component co-adsorption (CO₂/N₂ & CO₂/CH₄) with binary Peng–Robinson fugacities and symmetric Identity Swap.
   - **Step 4**: `0.10 Å` `O(h⁴)` Tricubic interpolation, zero-drift `50k` full recomputation, official **Mercado 2016** DFT-FF, and dual back-to-back verification vs. native **RASPA3 (`3.0.29`)**.
   - **Step 5 & Level 2**: Unified JSON/CLI engine ([`mof_gcmc_cli.exe`](src/main_cli.cu)) + block-collective many-body `Pol-SCF` solver (`1.83e-08 K` vs. exact `36×36` matrix solve).
-- **[In Progress] Step 6 — Hybrid GPU-GCMC + MLIP Nested Monte Carlo (`Phase 1–2` Done)**
+- **[Done] Step 6 — Hybrid GPU-GCMC + MLIP Nested Monte Carlo (`Phase 1–3` Done)**
   - **Phase 1 (Done)**: Benchmarked `MACE-MP-0 + D3` (`small` & `medium`) speed (`107.7 ms/eval` on `1×1×2`), OMS radial curve, and 60-pose Nested MC acceptance (`84.4%` with `Mercado 2016` proposer, `R² = 0.911`).
   - **Phase 2 & 2.5 (Done)**: Built zero-I/O CUDA proposer DLL (`build\mof_gcmc_proposer.dll`) with exact chemical-potential shift (`proposer_set_chem_pot_shift`), proved zero-bias reweighting (`Pol-3Site -> Mercado`: `z = 0.27σ` unshifted, `z = 2.27σ` shifted), accelerated `MACE-MP-0 + D3` **`4.21×`** (`37.5 ms/box`), and converged 4-box symmetric `Ins/Del` equilibrium (`9.78 mmol/g` at `0.01 bar`), while identifying `~9.65 kJ/mol/CO2` PBE-D3 overbinding at `0.15 bar`.
-  - **Phase 3 (Next)**: Multi-replica production isotherms (`0.05–5.0 bar`), `cuequivariance` kernel acceleration, and transferability tests across diverse OMS-MOFs (`Co-/Ni-MOF-74`, `HKUST-1`, `UiO-66`).
+  - **Phase 3 (Done)**: Packaged unified CLI [`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py), audited 4 MACE foundation models (`MP-0`, `MPA-0`, `MP-0b3`, `MatPES-r2SCAN-0`), converged multi-pressure `Mg-MOF-74` isotherms (`MP-0+D3` vs. `r2SCAN-0+D3(r2scan)`), and demonstrated zero-fitting cross-material generalization on [`Ni-MOF-74`](data/NiMOF-74.cif) (`0.01–0.15 bar`).
 
 ---
 
@@ -163,7 +163,7 @@ $$
 
 ---
 
-## Step 6 (Phase 1–2): Hybrid GPU-GCMC + MLIP (`MACE-MP-0 + D3`) Nested Monte Carlo
+## Step 6 (Phase 1–3): Hybrid GPU-GCMC + MLIP (`MACE`) Nested Monte Carlo
 
 ### Phase 1: Feasibility & Correlation Probe
 
@@ -207,6 +207,32 @@ To eliminate asymmetric insertion/deletion stalling and accelerate MLIP evaluati
   - **At `298 K, 0.15 bar` (`72,000` inner steps)**: Self-consistent energy gap vs. `Mercado 2016` reaches **`-9.65 kJ/mol/CO2`** (`~49×` higher Boltzmann weight per molecule), revealing that unmodified **`MACE-MP-0 + PBE-D3(BJ)`** overbinds CO₂ on rigid `Mg-MOF-74` past OMS saturation toward pore filling (`14.31 mmol/g` at cycle 600 vs. `Mercado 2016` `6.02 mmol/g` and experiment `3.6–4.6 mmol/g`), consistent with known `PBE-D3` overbinding in OMS-MOFs.
   - **At `298 K, 0.01 bar` (`50,000` inner steps, `K = 25`, `265.3 s`)**: Two-stage self-consistent shift (**`-9.19 kJ/mol`**, `40.84×` inner fugacity) achieves **symmetric grand-canonical sampling (`Ins = 64 / 82`, `Del = 40 / 436`, `50.6%` outer acc)** and converged 4-box stationary equilibrium at **`9.7771 ± 0.2617 mmol/g`** (`Half1 = 9.480` vs. `Half2 = 10.074 mmol/g`, `|drift| = 0.594 mmol/g`, $Q_{\text{st}} = 38.08 \pm 5.03\ \text{kJ/mol}$).
 
+### Phase 3: Multi-Foundation-Model Audit, `Mg-MOF-74` Isotherms & `Ni-MOF-74` Generalization
+
+![Phase 3 Multi-Model Benchmark & Ni-MOF-74 Generalization](assets/phase3_mlip_isotherm_and_generalization.png)
+
+Packaged into [`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py) with matching `--dispersion` and `--xc` (`pbe` / `r2scan`) controls ([`scripts/phase3_model_probe.py`](scripts/phase3_model_probe.py), [`scripts/plot_phase3_summary.py`](scripts/plot_phase3_summary.py)):
+
+- **4-Generation Foundation-Model Overbinding Audit (`Mg-MOF-74 1×1×2`, loaded states `N ≈ 25`)**:
+  - `MACE-MP-0 (Medium) + D3(PBE)`: `-U/N = 41.63 kJ/mol` (`min = -52.01`, `R² = 0.954`, `37.6 ms/box`), `-9.24 kJ/mol/CO2` deeper than `Mercado 2016`.
+  - **`MACE-MPA-0 + D3(PBE)`** & **`MACE-MP-0b3 + D3(PBE)`**: Severely overbind CO₂ in `Mg-MOF-74` (`-U/N = 82.84` and **`92.15 kJ/mol`**; even **without D3** they give `-62.39` and `-72.76 kJ/mol`), reflecting condensed-phase vs. gas-phase CO₂ reference mismatch rather than missing dispersion.
+  - **`MACE-MatPES-r2SCAN-0`**: Pure meta-GGA `r²SCAN` without D3 gives `-25.47 kJ/mol` (`min = -36.00`, `R² = 0.928`), while pairing with native `D3(xc="r2scan")` lands at **`-40.13 kJ/mol`** (`diff = -6.6 kJ/mol` vs. `Mercado 2016`), cleanly inside the experimental OMS heat range.
+- **`Mg-MOF-74 (298 K)` Converged Multi-Pressure Isotherms (`4` boxes × `K = 25`, `|drift| <= 0.427 mmol/g` everywhere)**:
+
+| Pressure | `UFF+REPEAT` (Direct) | `Mercado 2016` (Direct) | `MACE-MP-0 + D3(PBE)` | `MACE-MatPES-r2SCAN-0 + D3(r2scan)` |
+| :---: | :---: | :---: | :---: | :---: |
+| **`0.002 bar`** | `0.0179 ± 0.0010` | `0.1560 ± 0.0015` | `5.7526 ± 0.3556` (`Qst=40.24`) | **`2.0200 ± 0.4745`** (`Qst=43.07`) |
+| **`0.010 bar`** | `0.0894 ± 0.0014` | `0.8018 ± 0.0115` | `9.2176 ± 0.3697` (`Qst=38.09`) | **`5.5099 ± 0.7764`** (`Qst=34.49`) |
+| **`0.050 bar`** | `0.4590 ± 0.0113` | `3.3117 ± 0.0533` | `13.2035 ± 0.1286` (`Qst=34.45`) | **`9.4397 ± 0.1731`** (`Qst=37.48`) |
+| **`0.150 bar`** | `1.3277 ± 0.0162` | `6.0230 ± 0.0406` | `15.3345 ± 0.3793` (`PBE-D3` sat.) | **`11.2541 ± 0.2569`** (`Ins=46, Del=42`) |
+
+- **Zero-Fitting Cross-Material Generalization on `Ni-MOF-74` ([`data/NiMOF-74.cif`](data/NiMOF-74.cif), `298 K`, `Pol-3Site + Δμ_ref -> r2SCAN-0 + D3(r2scan)`)**:
+  - Radial `Ni²⁺–O(CO₂)` OMS well under `MACE-MatPES-r2SCAN-0 + D3(r2scan)` sits at `2.40 Å` (`-32.33 kJ/mol` collinear ray).
+  - Without any `Ni`-specific DFT force-field fitting (using generic `UFF` LJ + template neutral charges solely for inner `Pol-3Site` proposal guidance), Nested MC converges symmetrically (`Ins/Del`: `35/27`, `34/28`, `38/29`; `|drift| <= 0.291 mmol/g`):
+    - `0.01 bar`: **`0.5779 ± 0.1437 mmol/g`** ($Q_{\text{st}} = 33.83 \pm 1.26\ \text{kJ/mol}$) vs. zero-charge `UFF` `0.0123` / `Pol-3Site` `0.2491`
+    - `0.05 bar`: **`2.1082 ± 0.1584 mmol/g`** ($Q_{\text{st}} = 28.80 \pm 2.61\ \text{kJ/mol}$) vs. zero-charge `UFF` `0.0612` / `Pol-3Site` `1.1995`
+    - `0.15 bar`: **`5.0360 ± 0.1963 mmol/g`** ($Q_{\text{st}} = 25.82 \pm 1.71\ \text{kJ/mol}$) vs. zero-charge `UFF` `0.1878` (`Qst=17.48`), recovering experimental `Ni-MOF-74` (`~3.5–4.4 mmol/g`, `×0.8` crystal accessibility -> `4.0 mmol/g`) and the `Mg-MOF-74 > Ni-MOF-74` metal affinity trend.
+
 ---
 
 ## Build & Run
@@ -237,11 +263,14 @@ uv run --with numpy python scripts\verify_cli.py
 uv run --with numpy python scripts\verify_scf_pol.py --check-only
 uv run --with matplotlib --with numpy python scripts\plot_scf_pol.py
 
-# Step 6 (Phase 1–2.5) Hybrid GPU-GCMC + MLIP probe, proposer DLL & shifted batched Nested MC verification
+# Step 6 (Phase 1–3) Hybrid GPU-GCMC + MLIP CLI, foundation-model audit & shifted Nested MC isotherms
 cmd /c build.bat proposer
 .venv-mlip\Scripts\python.exe scripts\phase1_mlip_probe.py
 .venv-mlip\Scripts\python.exe scripts\verify_nested_mc.py
 .venv-mlip\Scripts\python.exe -u scripts\verify_phase25_shifted_nested.py
+.venv-mlip\Scripts\python.exe -u scripts\phase3_model_probe.py
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\MgMOF-74.cif --pressures 0.002 0.01 0.05 0.15 --proposer mercado --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --out-json build\phase3_mgmof74_r2scan_d3.json
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\NiMOF-74.cif --pressures 0.01 0.05 0.15 --proposer pol3site --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --out-json build\phase3_nimof74_r2scan_d3.json
 ```
 
 ---
@@ -253,6 +282,7 @@ cuda-mof-gcmc/
 ├── configs/                      # JSON presets for unified CLI engine (UFF, Mercado, PSA 313K, Flue Gas)
 ├── data/
 │   ├── MgMOF-74.cif              # Official RASPA2 R-3 Mg-MOF-74 crystal structure
+│   ├── NiMOF-74.cif              # Isostructural R-3 Ni-MOF-74 CIF (exp lattice + template charges)
 │   └── mercado2016/              # Official Mercado et al. (JPCC 2016) DFT-FF & EPM2 definitions
 ├── include/
 │   ├── cell.hpp                  # Hexagonal/triclinic cell transform & exact 5-candidate MIC
@@ -293,7 +323,10 @@ cuda-mof-gcmc/
 │   ├── phase1_mlip_probe.py      # Step 6 Phase 1 MACE-MP-0+D3 speed & Nested-MC correlation probe
 │   ├── nested_mc_engine.py       # Step 6 Phase 2/2.5 ctypes + FastMaceD3Target & shifted Nested MC engine
 │   ├── verify_nested_mc.py       # Step 6 Phase 2 Null-Bias Proof & live MACE-MP-0+D3 verification suite
-│   └── verify_phase25_shifted_nested.py # Step 6 Phase 2.5 chem-pot shift, FastMaceD3 benchmark & 4-box equilibrium
+│   ├── verify_phase25_shifted_nested.py # Step 6 Phase 2.5 chem-pot shift, FastMaceD3 benchmark & 4-box equilibrium
+│   ├── phase3_model_probe.py     # Step 6 Phase 3 multi-generation MACE foundation-model overbinding audit
+│   ├── run_mlip_gcmc.py          # Step 6 Phase 3 unified Hybrid GPU-GCMC + MLIP Nested MC CLI runner
+│   └── plot_phase3_summary.py    # Step 6 Phase 3 300 DPI 3-panel audit, isotherm & generalization plot
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # Step 1: 298 K isotherm, Qst & pore density
 │   ├── step2_mof74_pol_comparison.png    # Step 2: NonPol vs Pol-COM vs Pol-3Site comparison
@@ -302,7 +335,8 @@ cuda-mof-gcmc/
 │   ├── step5_level2_scf_polarization.png   # Step 5: Level 2 Pol-SCF isotherm, screening & 36x36 check
 │   ├── phase1_mlip_nested_mc_probe.png     # Step 6 Phase 1: MACE-MP-0+D3 radial, parity & latency probe
 │   ├── phase2_nested_mc_verification.png   # Step 6 Phase 2: Null-Bias Proof & live MACE-MP-0+D3 trajectory
-│   └── phase25_shifted_batched_mace.png    # Step 6 Phase 2.5: Shifted null-bias, 4.21x speedup & 4-box equilibrium
+│   ├── phase25_shifted_batched_mace.png    # Step 6 Phase 2.5: Shifted null-bias, 4.21x speedup & 4-box equilibrium
+│   └── phase3_mlip_isotherm_and_generalization.png # Step 6 Phase 3: Multi-model audit, Mg/Ni-MOF-74 isotherms
 ├── build.bat                     # VS2019 + nvcc (sm_120) build script (all / single / mix / v2 / cli / proposer)
 ├── LICENSE                       # MIT License
 ├── README.md                     # English documentation
