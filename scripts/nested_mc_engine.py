@@ -434,7 +434,9 @@ class FastMaceD3Target:
         gp[2::3] = c - bond * u
         return gp
 
-    def _eval_raw_eV_batch(self, atoms_list, guest_pos_list, mace_chunk: int = 2):
+    def _eval_raw_eV_batch(self, atoms_list, guest_pos_list, mace_chunk: int = None):
+        if mace_chunk is None:
+            mace_chunk = 1 if self.n_fw >= 550 else 2
         torch = self.torch
         # 1. Micro-batched MACE forward (no_grad, compute_force=False) to keep peak VRAM < 3.5 GB
         graphs = []
@@ -649,12 +651,18 @@ def run_nested_mc(
     dt = time.perf_counter() - t0
     box_uptakes = (sum_N / prod_cycles) * conv_mmol_g
     box_qst = []
+    box_molar_bind = []
+    box_molar_qst = []
     for b in range(n_b):
         mN = sum_N[b] / prod_cycles
         mN2 = sum_N2[b] / prod_cycles
         mU = sum_U[b] / prod_cycles
         mUN = sum_UN[b] / prod_cycles
         varN = mN2 - mN * mN
+        mb = (-mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
+        mq = (T_K - mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
+        box_molar_bind.append(mb)
+        box_molar_qst.append(mq)
         if varN > 1e-12:
             q_K = T_K - (mUN - mU * mN) / varN
             box_qst.append(q_K * K_TO_KJMOL)
@@ -667,6 +675,9 @@ def run_nested_mc(
     sem_up = float(np.std(box_uptakes, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
     mean_qst = float(np.mean(box_qst))
     sem_qst = float(np.std(box_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
+    mean_mb = float(np.mean(box_molar_bind))
+    mean_mq = float(np.mean(box_molar_qst))
+    sem_mq = float(np.std(box_molar_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
 
     return {
         "n_boxes": n_b,
@@ -681,6 +692,9 @@ def run_nested_mc(
         "Qst_kJ_mol": mean_qst,
         "Qst_sem_kJ_mol": sem_qst,
         "box_qst_kJ_mol": box_qst,
+        "mean_molar_binding_kJ_mol": mean_mb,
+        "mean_molar_qst_kJ_mol": mean_mq,
+        "mean_molar_qst_sem_kJ_mol": sem_mq,
         "outer_acc_rate": float(np.mean(acc_outer) / total_cycles),
         "prod_outer_acc_rate": float(np.mean(prod_acc_outer) / prod_cycles),
         "prod_ins_att": int(prod_ins_att),

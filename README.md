@@ -233,6 +233,34 @@ Packaged into [`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py) with matchi
     - `0.05 bar`: **`2.1082 ± 0.1584 mmol/g`** ($Q_{\text{st}} = 28.80 \pm 2.61\ \text{kJ/mol}$) vs. zero-charge `UFF` `0.0612` / `Pol-3Site` `1.1995`
     - `0.15 bar`: **`5.0360 ± 0.1963 mmol/g`** ($Q_{\text{st}} = 25.82 \pm 1.71\ \text{kJ/mol}$) vs. zero-charge `UFF` `0.1878` (`Qst=17.48`), recovering experimental `Ni-MOF-74` (`~3.5–4.4 mmol/g`, `×0.8` crystal accessibility -> `4.0 mmol/g`) and the `Mg-MOF-74 > Ni-MOF-74` metal affinity trend.
 
+### Publication-Grade Validations (Detail 1–5) & Main Figures (Fig. 1–5)
+
+Five targeted validation experiments harden the manuscript story, establish statistical rigor, and quantify physical generalization boundaries:
+
+1. **Far-Field Zero-Offset & Unobstructed OMS Mechanism (`scripts/paper_exp1_model_mechanism.py`)**:
+   - At the unobstructed `Mg-MOF-74` pore center ($r_{\min} = 7.31$ Å, exceeding the $6.0$ Å MACE graph cutoff), raw MLIP far-field interactions vanish (`MP-0`: `+0.01`, `MPA-0`: `+0.00`, `MP-0b3`: `-0.21`, `r2SCAN-0`: `-0.03 kJ/mol`), while D3 adds `-2.38` to `-2.56 kJ/mol`, proving that `MPA-0` (`-93.98 kJ/mol`) and `MP-0b3` (`-105.17 kJ/mol`) collapse is strictly a short-range `2.20–2.35 Å` binding artifact whereas `r2SCAN-0+D3(r2scan)` (`-46.45 kJ/mol` at `2.20 Å`) and `MP-0+D3(PBE)` (`-48.74 kJ/mol` at `2.20 Å`) stay physically grounded.
+2. **Cross-Topology Open-Shell OMS Stress Test on `HKUST-1` (`data/Cu-BTC.cif`)**:
+   - Under `298 K` (`0.15 / 0.50 / 1.00 bar`), classical `UFF+Charges` (`0.835 / 2.126 / 3.676 mmol/g`, $Q_{\text{st}} = 24.9 - 22.8\ \text{kJ/mol}$) and `Pol-3Site` (`1.021 / 2.819 / 5.351 mmol/g`) bracket experimental `HKUST-1` (`~0.7 / 2.2 / 4.2 mmol/g`, Yazaydin *JACS* 2009 / Mason *EES* 2011).
+   - With `--proposer uff`, `MACE-MatPES-r2SCAN-0+D3(r2scan)` achieves clean reversible exchange (`Ins/Del = 30/25, 31/12, 40/19`, `|drift| <= 0.319 mmol/g`) and plateaus honestly at **`1.218 ± 0.208 / 1.337 ± 0.191 / 1.272 ± 0.067 mmol/g`** (`Molar Qst = 23.6 / 23.2 / 23.6 kJ/mol`). Axial radial probing explains the root cause directly: spin-unaware universal MLIPs yield a weak `-10.07 kJ/mol` (`r2SCAN+D3`) / `-7.72 kJ/mol` (`MP-0+D3`) minimum at `2.40 Å` on the antiferromagnetic `Cu²⁺–Cu²⁺` paddlewheel vs. experimental `~26–30 kJ/mol`.
+3. **Long-Chain `Qst` Convergence & Dual Estimators (`eq=120, prod=480 cycles`)**:
+   - Alongside fluctuation $Q_{\text{st}} = RT - \text{Cov}(U, N)/\text{Var}(N)$, `nested_mc_engine.py` evaluates molar $Q_{\text{st}} = -\langle U/N \rangle + RT$:
+     - `Mg-MOF-74` (`r2SCAN-0+D3`, `0.01 / 0.05 / 0.15 bar`): Uptake = **`5.359 ± 0.244 / 9.666 ± 0.375 / 11.472 ± 0.152 mmol/g`** (`Ins/Del = 77/58, 78/76, 71/72`); Molar $Q_{\text{st}}$ converges tightly to **`46.69 ± 0.35 / 45.59 ± 0.21 / 43.17 ± 0.32 kJ/mol`** (`SEM <= 0.35 kJ/mol`).
+     - `Ni-MOF-74` (`r2SCAN-0+D3`, `0.05 / 0.15 bar`): Uptake = **`1.467 ± 0.171 / 4.292 ± 0.346 mmol/g`** (`Ins/Del = 75/55, 79/59`), matching experimental `Ni-MOF-74` (`~2.0 / 3.9 mmol/g`) with consistent Fluc/Molar $Q_{\text{st}}$ (`35.57 / 36.48` and `35.23 / 36.98 ± 0.50 kJ/mol`).
+4. **Supercell Finite-Size Convergence (`scripts/paper_exp4_finite_size.py`, `1×1×2` vs. `1×1×4`)**:
+   - At `298 K, 0.01 bar` on `Mg-MOF-74`: Direct `Mercado` converges from `0.8018 ± 0.0115` (`r_cut = 6.66 Å`) to `0.8030 ± 0.0337 mmol/g` (`r_cut = 10.86 Å`, **`z = 0.04 sigma`**); `MACE-MP-0+D3` Nested MC converges from `9.3398 ± 0.3610` (`Molar Qst = 44.99 ± 0.54 kJ/mol`) to `9.0615 ± 0.2539 mmol/g` (`Molar Qst = 45.01 ± 0.21 kJ/mol`, **`z = 0.63 sigma`**).
+5. **5 Publication-Grade Main Figures (`scripts/plot_paper_figures.py`)**:
+   - `Fig. 1`: [paper_fig1_architecture_benchmark.png](assets/paper_fig1_architecture_benchmark.png) — Classical GPU Tricubic v2 vs. RASPA3 parity (`<= 0.54 sigma`) and `492.6x` / `153.2x` + `4.21x` MACE batching speedup.
+   - `Fig. 2`: [paper_fig2_nested_mc_verification.png](assets/paper_fig2_nested_mc_verification.png) — Zero-bias null test (`z = 0.27 sigma`), chem-pot shift unblocking grand-canonical trajectories, and `1×1×2` vs. `1×1×4` supercell invariance.
+   - `Fig. 3`: [paper_fig3_mlip_mechanism_audit.png](assets/paper_fig3_mlip_mechanism_audit.png) — Unobstructed `Mg²⁺` OMS radial scan, far-field cutoff check (`7.31 Å`), and loaded `-U/N` foundation-model audit.
+   - `Fig. 4`: [paper_fig4_mgmof74_isotherm_qst.png](assets/paper_fig4_mgmof74_isotherm_qst.png) — `Mg-MOF-74` `298 K` multi-pressure isotherms vs. Mason *EES* 2011, long-chain dual `Qst` (`SEM <= 0.35`), and insertion/deletion stationarity.
+   - `Fig. 5`: [paper_fig5_cross_material_generalization.png](assets/paper_fig5_cross_material_generalization.png) — Zero-fitting generalization on `Ni-MOF-74` vs. Queen *Chem. Sci.* 2014 and honest spin-coupled `Cu²⁺` underbinding diagnosis on `HKUST-1`.
+
+![Publication Main Fig 1](assets/paper_fig1_architecture_benchmark.png)
+![Publication Main Fig 2](assets/paper_fig2_nested_mc_verification.png)
+![Publication Main Fig 3](assets/paper_fig3_mlip_mechanism_audit.png)
+![Publication Main Fig 4](assets/paper_fig4_mgmof74_isotherm_qst.png)
+![Publication Main Fig 5](assets/paper_fig5_cross_material_generalization.png)
+
 ---
 
 ## Build & Run
@@ -271,6 +299,14 @@ cmd /c build.bat proposer
 .venv-mlip\Scripts\python.exe -u scripts\phase3_model_probe.py
 .venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\MgMOF-74.cif --pressures 0.002 0.01 0.05 0.15 --proposer mercado --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --out-json build\phase3_mgmof74_r2scan_d3.json
 .venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\NiMOF-74.cif --pressures 0.01 0.05 0.15 --proposer pol3site --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --out-json build\phase3_nimof74_r2scan_d3.json
+
+# Paper Validation Suite (Details 1-5) & All 5 300-DPI Main Figures
+.venv-mlip\Scripts\python.exe -u scripts\paper_exp1_model_mechanism.py
+.venv-mlip\Scripts\python.exe -u scripts\paper_exp4_finite_size.py
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\Cu-BTC.cif --supercell 1 1 1 --temp 298 --pressures 0.15 0.5 1.0 --proposer uff --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --grid-dims 192 192 192 --boxes 4 --max-mol 160 --k-steps 20 --eq-cycles 80 --prod-cycles 200 --out-json build\paper_exp2_hkust1_r2scan.json
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\MgMOF-74.cif --supercell 1 1 2 --temp 298 --pressures 0.01 0.05 0.15 --proposer mercado --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 480 --out-json build\paper_exp3_mgmof74_r2scan_long.json
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\NiMOF-74.cif --supercell 1 1 2 --temp 298 --pressures 0.05 0.15 --proposer pol3site --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 480 --out-json build\paper_exp3_nimof74_r2scan_long.json
+.venv-mlip\Scripts\python.exe -u scripts\plot_paper_figures.py
 ```
 
 ---
@@ -283,6 +319,7 @@ cuda-mof-gcmc/
 ├── data/
 │   ├── MgMOF-74.cif              # Official RASPA2 R-3 Mg-MOF-74 crystal structure
 │   ├── NiMOF-74.cif              # Isostructural R-3 Ni-MOF-74 CIF (exp lattice + template charges)
+│   ├── Cu-BTC.cif                # Official RASPA2 Fm-3m HKUST-1 (Cu-BTC) CIF with neutral charges
 │   └── mercado2016/              # Official Mercado et al. (JPCC 2016) DFT-FF & EPM2 definitions
 ├── include/
 │   ├── cell.hpp                  # Hexagonal/triclinic cell transform & exact 5-candidate MIC
@@ -326,7 +363,10 @@ cuda-mof-gcmc/
 │   ├── verify_phase25_shifted_nested.py # Step 6 Phase 2.5 chem-pot shift, FastMaceD3 benchmark & 4-box equilibrium
 │   ├── phase3_model_probe.py     # Step 6 Phase 3 multi-generation MACE foundation-model overbinding audit
 │   ├── run_mlip_gcmc.py          # Step 6 Phase 3 unified Hybrid GPU-GCMC + MLIP Nested MC CLI runner
-│   └── plot_phase3_summary.py    # Step 6 Phase 3 300 DPI 3-panel audit, isotherm & generalization plot
+│   ├── plot_phase3_summary.py    # Step 6 Phase 3 300 DPI 3-panel audit, isotherm & generalization plot
+│   ├── paper_exp1_model_mechanism.py # Detail 1: far-field cutoff (7.31 A) & unobstructed OMS radial probe
+│   ├── paper_exp4_finite_size.py     # Detail 4: 1x1x2 vs 1x1x4 supercell finite-size invariance check
+│   └── plot_paper_figures.py         # Publication 300 DPI generator for all 5 main figures (Fig. 1-5)
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # Step 1: 298 K isotherm, Qst & pore density
 │   ├── step2_mof74_pol_comparison.png    # Step 2: NonPol vs Pol-COM vs Pol-3Site comparison
@@ -336,7 +376,12 @@ cuda-mof-gcmc/
 │   ├── phase1_mlip_nested_mc_probe.png     # Step 6 Phase 1: MACE-MP-0+D3 radial, parity & latency probe
 │   ├── phase2_nested_mc_verification.png   # Step 6 Phase 2: Null-Bias Proof & live MACE-MP-0+D3 trajectory
 │   ├── phase25_shifted_batched_mace.png    # Step 6 Phase 2.5: Shifted null-bias, 4.21x speedup & 4-box equilibrium
-│   └── phase3_mlip_isotherm_and_generalization.png # Step 6 Phase 3: Multi-model audit, Mg/Ni-MOF-74 isotherms
+│   ├── phase3_mlip_isotherm_and_generalization.png # Step 6 Phase 3: Multi-model audit, Mg/Ni-MOF-74 isotherms
+│   ├── paper_fig1_architecture_benchmark.png       # Main Fig. 1: RASPA3 parity & GPU/batched-MACE speedups
+│   ├── paper_fig2_nested_mc_verification.png       # Main Fig. 2: Null-bias, deadlock fix & supercell check
+│   ├── paper_fig3_mlip_mechanism_audit.png         # Main Fig. 3: Radial OMS scan, far-field & -U/N audit
+│   ├── paper_fig4_mgmof74_isotherm_qst.png         # Main Fig. 4: Mg-MOF-74 isotherms, long-chain Qst & balance
+│   └── paper_fig5_cross_material_generalization.png # Main Fig. 5: Ni-MOF-74 transfer & HKUST-1 spin boundary
 ├── build.bat                     # VS2019 + nvcc (sm_120) build script (all / single / mix / v2 / cli / proposer)
 ├── LICENSE                       # MIT License
 ├── README.md                     # English documentation

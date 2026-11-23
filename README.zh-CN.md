@@ -233,6 +233,34 @@ $$
     - `0.05 bar`：**`2.1082 ± 0.1584 mmol/g`**（$Q_{\text{st}} = 28.80 \pm 2.61\ \text{kJ/mol}$），对比零电荷 `UFF` `0.0612` / `Pol-3Site` `1.1995`
     - `0.15 bar`：**`5.0360 ± 0.1963 mmol/g`**（$Q_{\text{st}} = 25.82 \pm 1.71\ \text{kJ/mol}$），对比零电荷 `UFF` `0.1878`（$Q_{\text{st}} = 17.48\ \text{kJ/mol}$），精准重现实验 `Ni-MOF-74`（`~3.5–4.4 mmol/g`，折合 `×0.8` 完美晶体可达度 `4.0 mmol/g`）及 **`Mg-MOF-74 > Ni-MOF-74`** 金属吸附序。
 
+### 论文级实验细节验证（Detail 1–5）与 5 张主图（Fig. 1–5）
+
+围绕审稿级论文叙事，补全了 5 项定量验证实验并生成 300 DPI 主图（严格包含实测失败边界，不做任何美化修正）：
+
+1. **远场零截断误差与无遮挡 OMS 径向机理扫描（`scripts/paper_exp1_model_mechanism.py`）**：
+   - 在 `Mg-MOF-74` 孔道中心（最近框架距离 $r_{\min} = 7.31$ Å $> 6.0$ Å MACE 截断半径），无 D3 的纯 MLIP 远场交互几乎为零（`MP-0`: `+0.01`、`MPA-0`: `+0.00`、`MP-0b3`: `-0.21`、`r2SCAN-0`: `-0.03 kJ/mol`），而 D3 贡献 `-2.38` 至 `-2.56 kJ/mol`，严格证明 `MPA-0`（`-93.98 kJ/mol`）与 `MP-0b3`（`-105.17 kJ/mol`）的过结合完全源于 `2.20–2.35 Å` 短程近邻塌陷，而 `r2SCAN-0+D3(r2scan)`（`-46.45 kJ/mol @ 2.20 Å`）与 `MP-0+D3(PBE)`（`-48.74 kJ/mol @ 2.20 Å`）物理合理。
+2. **跨拓扑开壳层强关联体系测试：`HKUST-1`（`data/Cu-BTC.cif`）**：
+   - 在 `298 K`（`0.15 / 0.50 / 1.00 bar`）下，经典 `UFF+电荷`（`0.835 / 2.126 / 3.676 mmol/g`，`Qst = 24.9–22.8 kJ/mol`）与 `Pol-3Site`（`1.021 / 2.819 / 5.351 mmol/g`）紧密包络 `HKUST-1` 实验等温线（`~0.7 / 2.2 / 4.2 mmol/g`，Yazaydin *JACS* 2009 / Mason *EES* 2011）。
+   - 采用 `--proposer uff` 后，`MACE-MatPES-r2SCAN-0+D3(r2scan)` 实现可逆平衡采样（`Ins/Del = 30/25, 31/12, 40/19`，漂移 `<= 0.319 mmol/g`），但平台在 **`1.218 ± 0.208 / 1.337 ± 0.191 / 1.272 ± 0.067 mmol/g`**（`Molar Qst = 23.6 / 23.2 / 23.6 kJ/mol`）。径向轴向扫描直接揭示根因：自旋无关通用 MLIP 对反铁磁耦合 `Cu²⁺–Cu²⁺` 桨轮位点的峰值吸引仅为 `-10.07 kJ/mol`（`r2SCAN+D3`）/ `-7.72 kJ/mol`（`MP-0+D3`），明显低于实验 `~26–30 kJ/mol`。
+3. **长链 `Qst` 收敛与双估计量对比（`eq=120, prod=480 cycles`）**：
+   - 在涨落法 $Q_{\text{st}} = RT - \text{Cov}(U, N)/\text{Var}(N)$ 之外，新增摩尔平均估计量 $Q_{\text{st}}^{\text{molar}} = -\langle U/N \rangle + RT$：
+     - `Mg-MOF-74`（`r2SCAN-0+D3`, `0.01 / 0.05 / 0.15 bar`）：吸附量 **`5.359 ± 0.244 / 9.666 ± 0.375 / 11.472 ± 0.152 mmol/g`**（`Ins/Del = 77/58, 78/76, 71/72`）；摩尔 $Q_{\text{st}}$ 稳定收敛于 **`46.69 ± 0.35 / 45.59 ± 0.21 / 43.17 ± 0.32 kJ/mol`**（`SEM <= 0.35 kJ/mol`）。
+     - `Ni-MOF-74`（`r2SCAN-0+D3`, `0.05 / 0.15 bar`）：吸附量 **`1.467 ± 0.171 / 4.292 ± 0.346 mmol/g`**（`Ins/Del = 75/55, 79/59`），高度吻合实验（`~2.0 / 3.9 mmol/g`），且涨落法与摩尔法高度自洽（`35.57 / 36.48` 与 `35.23 / 36.98 ± 0.50 kJ/mol`）。
+4. **超胞有限尺寸收敛检验（`scripts/paper_exp4_finite_size.py`, `1×1×2` vs. `1×1×4`）**：
+   - 在 `Mg-MOF-74, 298 K, 0.01 bar` 下：Direct `Mercado` 从 `0.8018 ± 0.0115`（`r_cut = 6.66 Å`）收敛至 `0.8030 ± 0.0337 mmol/g`（`r_cut = 10.86 Å`，**`z = 0.04 sigma`**）；`MACE-MP-0+D3` Nested MC 从 `9.3398 ± 0.3610`（`Molar Qst = 44.99 ± 0.54`）收敛至 `9.0615 ± 0.2539 mmol/g`（`Molar Qst = 45.01 ± 0.21 kJ/mol`，**`z = 0.63 sigma`**）。
+5. **5 张发表级主图（`scripts/plot_paper_figures.py`）**：
+   - `Fig. 1`: [paper_fig1_architecture_benchmark.png](assets/paper_fig1_architecture_benchmark.png) — 经典 GPU Tricubic v2 与 RASPA3 对齐（`<= 0.54 sigma`）及 `492.6x` / `153.2x` + `4.21x` MACE 批处理加速。
+   - `Fig. 2`: [paper_fig2_nested_mc_verification.png](assets/paper_fig2_nested_mc_verification.png) — 零偏差检验（`z = 0.27 sigma`）、化学势偏置解除删除锁死及 `1×1×2` vs. `1×1×4` 有限尺寸无关性。
+   - `Fig. 3`: [paper_fig3_mlip_mechanism_audit.png](assets/paper_fig3_mlip_mechanism_audit.png) — 无遮挡 `Mg²⁺` OMS 径向势能面、`7.31 Å` 远场归零证明与多模型负载 `-U/N` 审计。
+   - `Fig. 4`: [paper_fig4_mgmof74_isotherm_qst.png](assets/paper_fig4_mgmof74_isotherm_qst.png) — `Mg-MOF-74` 全压力等温线（vs. Mason *EES* 2011）、480 步长链双 `Qst` 估计量及增删对称平稳性。
+   - `Fig. 5`: [paper_fig5_cross_material_generalization.png](assets/paper_fig5_cross_material_generalization.png) — `Ni-MOF-74` 零拟合外推（vs. Queen *Chem. Sci.* 2014）与 `HKUST-1` 弱结合物理诊断边界。
+
+![论文主图 Fig. 1](assets/paper_fig1_architecture_benchmark.png)
+![论文主图 Fig. 2](assets/paper_fig2_nested_mc_verification.png)
+![论文主图 Fig. 3](assets/paper_fig3_mlip_mechanism_audit.png)
+![论文主图 Fig. 4](assets/paper_fig4_mgmof74_isotherm_qst.png)
+![论文主图 Fig. 5](assets/paper_fig5_cross_material_generalization.png)
+
 ---
 
 ## 编译与运行命令
@@ -271,6 +299,14 @@ cmd /c build.bat proposer
 .venv-mlip\Scripts\python.exe -u scripts\phase3_model_probe.py
 .venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\MgMOF-74.cif --pressures 0.002 0.01 0.05 0.15 --proposer mercado --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --out-json build\phase3_mgmof74_r2scan_d3.json
 .venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\NiMOF-74.cif --pressures 0.01 0.05 0.15 --proposer pol3site --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --out-json build\phase3_nimof74_r2scan_d3.json
+
+# 论文级验证套件（Detail 1–5）与 5 张 300 DPI 主图生成
+.venv-mlip\Scripts\python.exe -u scripts\paper_exp1_model_mechanism.py
+.venv-mlip\Scripts\python.exe -u scripts\paper_exp4_finite_size.py
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\Cu-BTC.cif --supercell 1 1 1 --temp 298 --pressures 0.15 0.5 1.0 --proposer uff --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --grid-dims 192 192 192 --boxes 4 --max-mol 160 --k-steps 20 --eq-cycles 80 --prod-cycles 200 --out-json build\paper_exp2_hkust1_r2scan.json
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\MgMOF-74.cif --supercell 1 1 2 --temp 298 --pressures 0.01 0.05 0.15 --proposer mercado --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 480 --out-json build\paper_exp3_mgmof74_r2scan_long.json
+.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py --cif data\NiMOF-74.cif --supercell 1 1 2 --temp 298 --pressures 0.05 0.15 --proposer pol3site --model mace-matpes-r2scan-0 --dispersion on --xc r2scan --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 480 --out-json build\paper_exp3_nimof74_r2scan_long.json
+.venv-mlip\Scripts\python.exe -u scripts\plot_paper_figures.py
 ```
 
 ---
@@ -283,6 +319,7 @@ cuda-mof-gcmc/
 ├── data/
 │   ├── MgMOF-74.cif              # RASPA2 官方 R-3 Mg-MOF-74 晶体结构文件
 │   ├── NiMOF-74.cif              # 同构 R-3 Ni-MOF-74 结构文件（实验晶格与同构模板电荷）
+│   ├── Cu-BTC.cif                # RASPA2 官方 Fm-3m HKUST-1 (Cu-BTC) CIF 文件（含中性电荷）
 │   └── mercado2016/              # 官方 Mercado et al. (JPCC 2016) DFT-FF 与 EPM2 参数文件
 ├── include/
 │   ├── cell.hpp                  # 六方/三斜晶胞坐标变换与精确 5 候选 MIC
@@ -326,7 +363,10 @@ cuda-mof-gcmc/
 │   ├── verify_phase25_shifted_nested.py # 第六步 Phase 2.5 化学势偏置、FastMaceD3 测速与 4 盒稳态验证
 │   ├── phase3_model_probe.py     # 第六步 Phase 3 多代 MACE 基础模型过结合与吞吐横向测评脚本
 │   ├── run_mlip_gcmc.py          # 第六步 Phase 3 通用混合 GPU-GCMC + MLIP Nested MC 统一 CLI 引擎
-│   └── plot_phase3_summary.py    # 第六步 Phase 3 300 DPI 三联测评、等温线与跨材料泛化总图脚本
+│   ├── plot_phase3_summary.py    # 第六步 Phase 3 300 DPI 三联测评、等温线与跨材料泛化总图脚本
+│   ├── paper_exp1_model_mechanism.py # Detail 1：7.31 A 远场零偏移校验与无遮挡 OMS 径向势能面探测
+│   ├── paper_exp4_finite_size.py     # Detail 4：1x1x2 vs 1x1x4 超胞有限尺寸收敛检验脚本
+│   └── plot_paper_figures.py         # 论文 5 张 300 DPI 发表级主图（Fig. 1–5）统一生成脚本
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
 │   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
@@ -336,7 +376,12 @@ cuda-mof-gcmc/
 │   ├── phase1_mlip_nested_mc_probe.png     # 第六步 Phase 1：MACE-MP-0+D3 径向、相关性与耗时评估图
 │   ├── phase2_nested_mc_verification.png   # 第六步 Phase 2：零偏差证明与 MACE-MP-0+D3 实景轨迹图
 │   ├── phase25_shifted_batched_mace.png    # 第六步 Phase 2.5：偏置无偏证明、4.21x 提速与 4 盒稳态曲线
-│   └── phase3_mlip_isotherm_and_generalization.png # 第六步 Phase 3：基础模型审计、Mg/Ni-MOF-74 等温线总图
+│   ├── phase3_mlip_isotherm_and_generalization.png # 第六步 Phase 3：基础模型审计、Mg/Ni-MOF-74 等温线总图
+│   ├── paper_fig1_architecture_benchmark.png       # 论文主图 Fig. 1：RASPA3 对齐与 GPU/MACE 批处理加速
+│   ├── paper_fig2_nested_mc_verification.png       # 论文主图 Fig. 2：零偏差、化学势偏置解死锁与超胞检验
+│   ├── paper_fig3_mlip_mechanism_audit.png         # 论文主图 Fig. 3：OMS 径向势能面、远场检验与 -U/N 审计
+│   ├── paper_fig4_mgmof74_isotherm_qst.png         # 论文主图 Fig. 4：Mg-MOF-74 等温线、长链双 Qst 与平稳性
+│   └── paper_fig5_cross_material_generalization.png # 论文主图 Fig. 5：Ni-MOF-74 泛化与 HKUST-1 自旋边界诊断
 ├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2 / cli / proposer）
 ├── LICENSE                       # MIT 开源协议
 ├── README.md                     # 英文项目文档
