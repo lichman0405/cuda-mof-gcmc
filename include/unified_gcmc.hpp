@@ -23,7 +23,7 @@ struct UnifiedGcmcConfig {
     double dsf_alpha = 0.20;
     int ff_mode = 0;            // 0 = FF_UFF_REPEAT (unshifted), 1 = FF_MERCADO2016 (shifted Buckingham/LJ)
     int use_tricubic = 1;       // 1 = O(h^4) Lagrange tricubic, 0 = trilinear
-    int pol_mode = 0;           // 0 = POL_NONE, 1 = POL_COM, 2 = POL_3SITE
+    int pol_mode = 0;           // 0 = none, 1 = com, 2 = 3site (1st-order), 3 = scf (full many-body SCF)
     int n_comp = 1;             // 1 = single-component, 2 = binary mixture
     int enable_swap = 1;        // Binary identity swap flag
     int eq_steps = 200000;
@@ -59,6 +59,7 @@ struct UnifiedBoxResult {
     double Qst_kJ_mol;
     double avg_Upol0_kJ;
     double avg_Upol1_kJ;
+    double avg_scf_iters;
     double max_energy_drift_K;
     double acc_t;
     double acc_r;
@@ -157,6 +158,75 @@ __host__ __device__ inline bool eval_species_framework_grid_unified(
     return false;
 }
 
+// Evaluates VDW, permanent electrostatics, and site-weighted framework electric field (without U_pol)
+// for self-consistent many-body SCF polarization (pol_mode == 3).
+__host__ __device__ inline bool eval_species_framework_efield_unified(
+    const MixGrid3DView& g, const Cell& cell,
+    const SpeciesDef& sp, int use_tricubic,
+    double cx, double cy, double cz,
+    double ux, double uy, double uz,
+    double& u_lj_out, double& u_elec_out,
+    double& efwx_out, double& efwy_out, double& efwz_out) {
+
+    const double off_scale[3] = {0.0, sp.bond_A, -sp.bond_A};
+    double sa[3], sb[3], sc[3];
+    double u_lj = 0.0;
+
+    for (int i = 0; i < sp.n_sites; ++i) {
+        double sx = cx + off_scale[i] * ux;
+        double sy = cy + off_scale[i] * uy;
+        double sz = cz + off_scale[i] * uz;
+        cell.cart_to_unit_frac(sx, sy, sz, sa[i], sb[i], sc[i]);
+
+        int lg = sp.lj_grid_idx[i];
+        if (lg >= 0) {
+            double ulj = use_tricubic
+                ? tricubic_periodic(g.U_lj[lg], g.nx, g.ny, g.nz, sa[i], sb[i], sc[i], true, 5.0e4f)
+                : (double)trilinear_periodic(g.U_lj[lg], g.nx, g.ny, g.nz, sa[i], sb[i], sc[i]);
+            if (ulj > 1.0e5) {
+                u_lj_out = 1.0e6;
+                u_elec_out = 0.0;
+                efwx_out = efwy_out = efwz_out = 0.0;
+                return true;
+            }
+            u_lj += ulj;
+        }
+    }
+
+    double u_el = 0.0;
+    double efwx = 0.0, efwy = 0.0, efwz = 0.0;
+    for (int i = 0; i < sp.n_sites; ++i) {
+        if (sp.q[i] != 0.0) {
+            double phi = use_tricubic
+                ? tricubic_periodic(g.Phi_elec, g.nx, g.ny, g.nz, sa[i], sb[i], sc[i], false, 5.0e5f)
+                : (double)trilinear_periodic(g.Phi_elec, g.nx, g.ny, g.nz, sa[i], sb[i], sc[i]);
+            u_el += sp.q[i] * phi;
+        }
+        double wa = sp.w_pol[i];
+        if (wa > 0.0) {
+            double ex = use_tricubic
+                ? tricubic_periodic(g.Ex, g.nx, g.ny, g.nz, sa[i], sb[i], sc[i], false, 5.0e5f)
+                : (double)trilinear_periodic(g.Ex, g.nx, g.ny, g.nz, sa[i], sb[i], sc[i]);
+            double ey = use_tricubic
+                ? tricubic_periodic(g.Ey, g.nx, g.ny, g.nz, sa[i], sb[i], sc[i], false, 5.0e5f)
+                : (double)trilinear_periodic(g.Ey, g.nx, g.ny, g.nz, sa[i], sb[i], sc[i]);
+            double ez = use_tricubic
+                ? tricubic_periodic(g.Ez, g.nx, g.ny, g.nz, sa[i], sb[i], sc[i], false, 5.0e5f)
+                : (double)trilinear_periodic(g.Ez, g.nx, g.ny, g.nz, sa[i], sb[i], sc[i]);
+            efwx += wa * ex;
+            efwy += wa * ey;
+            efwz += wa * ez;
+        }
+    }
+
+    u_lj_out = u_lj;
+    u_elec_out = u_el;
+    efwx_out = efwx;
+    efwy_out = efwy;
+    efwz_out = efwz;
+    return false;
+}
+
 void build_unified_grids_gpu(
     const Cell& cell,
     const std::vector<FrameworkAtom>& unit_atoms_in,
@@ -175,5 +245,13 @@ double run_unified_gcmc_gpu(
     const UnifiedGcmcConfig& cfg,
     const std::vector<UnifiedBoxSpec>& boxes,
     std::vector<UnifiedBoxResult>& results_out);
+
+bool run_scf_matrix_unit_test_gpu(
+    const Cell& cell,
+    const MixGrid3DView& d_grid,
+    const SpeciesDef& sp0,
+    double r_cut_A,
+    double dsf_alpha,
+    const std::string& dump_json_path);
 
 } // namespace mofgcmc

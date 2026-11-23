@@ -50,11 +50,12 @@ bool make_species_by_name(const std::string& name_raw, int ff_mode, SpeciesDef& 
 
 void print_usage() {
     std::printf(
-        "Usage: mof_gcmc_cli --config <path.json> [--temp <K>] [--out <path.csv>]\n"
+        "Usage: mof_gcmc_cli --config <path.json> [--temp <K>] [--out <path.csv>] [--test-scf]\n"
         "Options:\n"
         "  --config <path>   Path to JSON simulation config\n"
         "  --temp   <K>      Override temperature_K from JSON\n"
         "  --out    <csv>    Override output_csv from JSON\n"
+        "  --test-scf        Run GPU vs matrix-inversion SCF polarization unit test\n"
         "  --help            Show this message\n");
 }
 
@@ -64,12 +65,15 @@ int main(int argc, char** argv) {
     std::string cfg_path;
     double temp_override = -1.0;
     std::string out_override;
+    bool test_scf = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
             print_usage();
             return 0;
+        } else if (arg == "--test-scf") {
+            test_scf = true;
         } else if (arg == "--config" && i + 1 < argc) {
             cfg_path = argv[++i];
         } else if (arg == "--temp" && i + 1 < argc) {
@@ -81,6 +85,20 @@ int main(int argc, char** argv) {
             print_usage();
             return 1;
         }
+    }
+
+    if (test_scf) {
+        Cell cell;
+        std::vector<FrameworkAtom> unit_atoms;
+        CifStructureInfo info;
+        if (!load_cif_framework("data/MgMOF-74.cif", 1, 1, 4, cell, unit_atoms, info)) return 1;
+        MixGrid3DView d_grid{};
+        UnifiedGridStats gst{};
+        build_unified_grids_gpu(cell, unit_atoms, 256, 256, 72, 11.0, 0.30, 0, d_grid, gst);
+        SpeciesDef co2 = make_species_co2();
+        bool ok = run_scf_matrix_unit_test_gpu(cell, d_grid, co2, 11.0, 0.20, "build/scf_test_dump.json");
+        free_unified_grids_gpu(d_grid);
+        return ok ? 0 : 1;
     }
 
     if (cfg_path.empty()) {
@@ -118,6 +136,7 @@ int main(int argc, char** argv) {
     int pol_mode = 0;
     if (pol_str == "com" || pol_str == "pol-com") pol_mode = 1;
     else if (pol_str == "3site" || pol_str == "pol-3site") pol_mode = 2;
+    else if (pol_str == "scf" || pol_str == "pol-scf") pol_mode = 3;
 
     double r_cut_A = root.get_double("r_cut_A", 11.0);
     double ewald_alpha = root.get_double("ewald_alpha", 0.30);
@@ -129,7 +148,7 @@ int main(int argc, char** argv) {
     int prod_steps = std::max(1000, root.get_int("prod_steps", 800000));
     int sample_stride = std::max(1, root.get_int("sample_stride", 20));
     int recompute_stride = std::max(1000, root.get_int("recompute_stride", 50000));
-    int max_mol = std::clamp(root.get_int("max_mol", 512), 16, 512);
+    int max_mol = std::clamp(root.get_int("max_mol", 256), 16, 256);
     int enable_swap = root.get_bool("enable_swap", true) ? 1 : 0;
     uint64_t seed = (uint64_t)std::llround(root.get_double("seed", 20261123.0));
     std::string output_csv = !out_override.empty() ? out_override : root.get_string("output_csv", "build/cli_out.csv");
@@ -204,7 +223,8 @@ int main(int argc, char** argv) {
     std::printf("Physics    : T=%.2f K | FF=%s | Interp=%s (%dx%dx%d) | Pol=%s | r_cut=%.2f A\n",
                 T_K, ff_mode == 1 ? "Mercado2016" : "UFF+REPEAT",
                 use_tricubic ? "Tricubic" : "Trilinear", nx, ny, nz,
-                pol_mode == 2 ? "Pol-3Site" : (pol_mode == 1 ? "Pol-COM" : "None"), r_cut_A);
+                pol_mode == 3 ? "Pol-SCF" : (pol_mode == 2 ? "Pol-3Site" : (pol_mode == 1 ? "Pol-COM" : "None")),
+                r_cut_A);
     if (n_comp == 1) {
         std::printf("Component  : %s (y=1.00)\n", sp_names[0].c_str());
     } else {
@@ -251,9 +271,16 @@ int main(int argc, char** argv) {
     free_unified_grids_gpu(d_grid);
 
     double total_steps = (double)boxes.size() * (double)(eq_steps + prod_steps);
-    std::printf("GCMC Run   : %d boxes x %.2fM (%d eq + %d prod) in %.2f ms (%.2f M steps/sec)\n\n",
+    double avg_scf = 0.0;
+    for (const auto& r : results) avg_scf += r.avg_scf_iters;
+    if (!results.empty()) avg_scf /= (double)results.size();
+    std::printf("GCMC Run   : %d boxes x %.2fM (%d eq + %d prod) in %.2f ms (%.2f M steps/sec)%s\n",
                 (int)boxes.size(), (double)(eq_steps + prod_steps) * 1.0e-6, eq_steps, prod_steps,
-                gpu_ms, total_steps / (gpu_ms * 1e3));
+                gpu_ms, total_steps / (gpu_ms * 1e3),
+                pol_mode == 3 ? "" : "\n");
+    if (pol_mode == 3) {
+        std::printf("SCF Conv   : mean %.2f iterations / trial move (tol = 1e-10 e*A)\n\n", avg_scf);
+    }
 
     std::filesystem::path out_p(output_csv);
     if (out_p.has_parent_path()) {

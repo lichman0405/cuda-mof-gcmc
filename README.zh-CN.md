@@ -115,10 +115,12 @@
 
 ## 第五步：统一 JSON/CLI 高精度通用引擎（[`build\mof_gcmc_cli.exe`](src/main_cli.cu)）
 
-将前面四步的全部核心能力——**`O(h⁴)` 三维 Tricubic 插值**、**UFF / Mercado 2016 力场切换**、**`Pol-COM` / `Pol-3Site` 极化 + Thole 耦合**、**二元 Identity Swap** 与 **通用 CIF 解析器**（支持 `19` 种常见 MOF 元素、可选 `_atom_site_charge` 列与 `P1` 对称缺省）——收敛进单一 JSON 配置驱动的高精度引擎（预设位于 [`configs/`](configs/)）：
+将前面四步的全部核心能力——**`O(h⁴)` 三维 Tricubic 插值**、**UFF / Mercado 2016 力场切换**、**`Pol-COM` / `Pol-3Site` / Level 2 全自洽多体极化 `Pol-SCF`**、**二元 Identity Swap** 与 **通用 CIF 解析器**（支持 `19` 种常见 MOF 元素、可选 `_atom_site_charge` 列与 `P1` 对称缺省）——收敛进单一 JSON 配置驱动的高精度引擎（预设位于 [`configs/`](configs/)）：
 
 ```powershell
+.\build\mof_gcmc_cli.exe --test-scf
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_fluegas_298K_pol3site.json
+.\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_scf.json
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_mercado.json --temp 313 --out build\psa_313K.csv
 ```
 
@@ -128,6 +130,10 @@
 | [`mg_mof74_co2_298K_mercado.json`](configs/mg_mof74_co2_298K_mercado.json) | `298 K`，Mercado 2016，$\text{CO}_2$ | `7.0587 / 11.1077 / 14.9680 mmol/g`（`0.15 bar` 下 $Q_{\text{st}} = 35.63\ \text{kJ/mol}$） | `4.37e-09 K` |
 | [`mg_mof74_co2_313K_psa.json`](configs/mg_mof74_co2_313K_psa.json) | `313 K`，Mercado 2016，$\text{CO}_2$ | `5.0424 / 9.7915 / 13.3012 mmol/g`（相对 298 K 清晰脱附 `-2.02 / -1.32 / -1.67`） | `4.13e-09 K` |
 | [`mg_mof74_fluegas_298K_pol3site.json`](configs/mg_mof74_fluegas_298K_pol3site.json) | `298 K`，`Pol-3Site`，$\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 60.39` (`0.5 bar`)、**`64.58`** (`1.0 bar`)、**`67.38`** (`2.0 bar`)；全 `double` 偶极存储 | `2.04e-09 K` |
+| [`mg_mof74_co2_298K_scf.json`](configs/mg_mof74_co2_298K_scf.json) | `298 K`，`Pol-SCF`，$\text{CO}_2$ | `2.1322 / 8.3536 / 12.8982 mmol/g`（`0.15 bar` 较 NonPol 提升 `+52.4%`）；平均 `16.63` 次迭代 | `7.25e-07 K` |
+| [`mg_mof74_fluegas_298K_scf.json`](configs/mg_mof74_fluegas_298K_scf.json) | `298 K`，`Pol-SCF`，$\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 37.28` (`1.0 bar`)、**`43.24`** (`2.0 bar`)（含客体间相互退极化屏蔽）；`14.78` 次迭代 | `2.69e-07 K` |
+
+> **Level 2 全自洽多体极化 `Pol-SCF`（`polarization: "scf"`）**：Block 级共享内存 Applequist-Thole 自洽求解器（`SCF_TOL = 1e-10 e·Å`、`O(N)` 增量永久电场 $\mathbf{E}_0$ 更新、热启动偶极子复用、试探前强排斥预筛与 `s_scf_conv` 收敛/有限性守卫），在每步试探中全自洽求解 $\boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i(\mathbf{E}_i^{\text{fw}} + \sum_{j\neq i}\mathbf{E}_{j\to i}^{\text{DSF,perm}} + \sum_{j\neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j)$；`--test-scf` 与 Python `36×36` 精确矩阵求逆对齐至 **`1.83e-08 K`** 与 **`1.13e-11 e·Å`**。
 
 ---
 
@@ -153,9 +159,10 @@ uv run python scripts\run_raspa3_bench.py
 uv run python scripts\run_raspa3_grid_bench.py
 uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
 
-# 第五步 统一 JSON/CLI 高精度引擎与 4 预设全自动校验
+# 第五步 统一 JSON/CLI 高精度引擎、4 预设检验与 Level-2 Pol-SCF 全自动校验
 cmd /c build.bat cli
 uv run --with numpy python scripts\verify_cli.py
+uv run --with numpy python scripts\verify_scf_pol.py --check-only
 ```
 
 ---
@@ -199,7 +206,8 @@ cuda-mof-gcmc/
 │   ├── run_raspa3_bench.py       # Windows 原生 RASPA3 3.0.29 并发精确 Ewald 基准运行脚本
 │   ├── run_raspa3_grid_bench.py  # Windows 原生 RASPA3 3.0.29 并发 Tricubic 网格基准运行脚本
 │   ├── verify_upgrades.py        # 第四步自动化断言校验与 300 DPI 验证三联图脚本
-│   └── verify_cli.py             # 第五步 4 组 JSON 预设端到端自动断言套件
+│   ├── verify_cli.py             # 第五步 4 组 JSON 预设端到端自动断言套件
+│   └── verify_scf_pol.py         # Level 2 精确 36x36 矩阵求逆 & Pol-SCF GCMC 校验套件
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
 │   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图

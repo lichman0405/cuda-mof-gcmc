@@ -115,10 +115,12 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 
 ## Step 5: Unified JSON/CLI High-Precision Engine (`build\mof_gcmc_cli.exe`)
 
-Converges the `O(h⁴)` 3D tricubic interpolation, Mercado 2016 DFT-FF / UFF support, anisotropic polarization (`Pol-COM` / `Pol-3Site` + Thole coupling), binary Identity Swap, and generic CIF parsing (`19` common MOF elements, optional `_atom_site_charge`, P1 fallback) into a single runtime-configurable CLI binary driven by JSON presets ([`configs/`](configs/)):
+Converges the `O(h⁴)` 3D tricubic interpolation, Mercado 2016 DFT-FF / UFF support, anisotropic polarization (`Pol-COM` / `Pol-3Site` + Thole coupling + **Level 2 full self-consistent many-body `Pol-SCF`**), binary Identity Swap, and generic CIF parsing (`19` common MOF elements, optional `_atom_site_charge`, P1 fallback) into a single runtime-configurable CLI binary driven by JSON presets ([`configs/`](configs/)):
 
 ```powershell
+.\build\mof_gcmc_cli.exe --test-scf
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_fluegas_298K_pol3site.json
+.\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_scf.json
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_mercado.json --temp 313 --out build\psa_313K.csv
 ```
 
@@ -128,6 +130,10 @@ Converges the `O(h⁴)` 3D tricubic interpolation, Mercado 2016 DFT-FF / UFF sup
 | [`mg_mof74_co2_298K_mercado.json`](configs/mg_mof74_co2_298K_mercado.json) | `298 K`, Mercado 2016, $\text{CO}_2$ | `7.0587 / 11.1077 / 14.9680 mmol/g` ($Q_{\text{st}} = 35.63\ \text{kJ/mol}$ @ `0.15 bar`) | `4.37e-09 K` |
 | [`mg_mof74_co2_313K_psa.json`](configs/mg_mof74_co2_313K_psa.json) | `313 K`, Mercado 2016, $\text{CO}_2$ | `5.0424 / 9.7915 / 13.3012 mmol/g` (clean `-2.02 / -1.32 / -1.67` thermal swing) | `4.13e-09 K` |
 | [`mg_mof74_fluegas_298K_pol3site.json`](configs/mg_mof74_fluegas_298K_pol3site.json) | `298 K`, `Pol-3Site`, $\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 60.39` (`0.5 bar`), **`64.58`** (`1.0 bar`), **`67.38`** (`2.0 bar`); `double` SMEM dipoles | `2.04e-09 K` |
+| [`mg_mof74_co2_298K_scf.json`](configs/mg_mof74_co2_298K_scf.json) | `298 K`, `Pol-SCF`, $\text{CO}_2$ | `2.1322 / 8.3536 / 12.8982 mmol/g` (`+52.4%` @ `0.15 bar` vs. NonPol); mean `16.63` SCF iters | `7.25e-07 K` |
+| [`mg_mof74_fluegas_298K_scf.json`](configs/mg_mof74_fluegas_298K_scf.json) | `298 K`, `Pol-SCF`, $\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 37.28` (`1.0 bar`), **`43.24`** (`2.0 bar`) with mutual depolarization; `14.78` iters | `2.69e-07 K` |
+
+> **Level 2 Many-Body `Pol-SCF` (`polarization: "scf"`)**: Block-collective shared-memory Applequist-Thole SCF solver (`SCF_TOL = 1e-10 e·Å`, $O(N)$ incremental permanent field $\mathbf{E}_0$ update, warm-started induced dipoles, pre-SCF repulsion filter, and `s_scf_conv` convergence guard) solving $\boldsymbol{\mu}_i = K_E^{-1}\boldsymbol{\alpha}_i(\mathbf{E}_i^{\text{fw}} + \sum_{j\neq i}\mathbf{E}_{j\to i}^{\text{DSF,perm}} + \sum_{j\neq i}\mathbf{T}_{ij}^{\text{Thole}}\boldsymbol{\mu}_j)$ across every trial move (`1.83e-08 K` & `1.13e-11 e·Å` match against exact `36×36` Python matrix inversion in `--test-scf`).
 
 ---
 
@@ -153,9 +159,10 @@ uv run python scripts\run_raspa3_bench.py
 uv run python scripts\run_raspa3_grid_bench.py
 uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
 
-# Step 5 Unified JSON/CLI high-precision engine & 4-preset automated verification
+# Step 5 Unified JSON/CLI high-precision engine & 4-preset + Level-2 Pol-SCF automated verification
 cmd /c build.bat cli
 uv run --with numpy python scripts\verify_cli.py
+uv run --with numpy python scripts\verify_scf_pol.py --check-only
 ```
 
 ---
@@ -199,7 +206,8 @@ cuda-mof-gcmc/
 │   ├── run_raspa3_bench.py       # Native Windows RASPA3 3.0.29 parallel exact-Ewald runner
 │   ├── run_raspa3_grid_bench.py  # Native Windows RASPA3 3.0.29 parallel tricubic-grid runner
 │   ├── verify_upgrades.py        # Step 4 automated assertions & 300 DPI validation figure
-│   └── verify_cli.py             # Step 5 end-to-end 4-preset CLI verification suite
+│   ├── verify_cli.py             # Step 5 end-to-end 4-preset CLI verification suite
+│   └── verify_scf_pol.py         # Level 2 exact 36x36 matrix inversion & Pol-SCF GCMC test
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # Step 1: 298 K isotherm, Qst & pore density
 │   ├── step2_mof74_pol_comparison.png    # Step 2: NonPol vs Pol-COM vs Pol-3Site comparison
