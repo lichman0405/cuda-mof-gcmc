@@ -113,10 +113,28 @@
 
 ---
 
+## 第五步：统一 JSON/CLI 高精度通用引擎（[`build\mof_gcmc_cli.exe`](src/main_cli.cu)）
+
+将前面四步的全部核心能力——**`O(h⁴)` 三维 Tricubic 插值**、**UFF / Mercado 2016 力场切换**、**`Pol-COM` / `Pol-3Site` 极化 + Thole 耦合**、**二元 Identity Swap** 与 **通用 CIF 解析器**（支持 `19` 种常见 MOF 元素、可选 `_atom_site_charge` 列与 `P1` 对称缺省）——收敛进单一 JSON 配置驱动的高精度引擎（预设位于 [`configs/`](configs/)）：
+
+```powershell
+.\build\mof_gcmc_cli.exe --config configs\mg_mof74_fluegas_298K_pol3site.json
+.\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_mercado.json --temp 313 --out build\psa_313K.csv
+```
+
+| JSON 预设（`0.10 Å` Tricubic，4 副本） | 工况条件 | 实测关键物理结果 | 最大漂移（全重算） |
+| :--- | :---: | :--- | :---: |
+| [`mg_mof74_co2_298K_uff.json`](configs/mg_mof74_co2_298K_uff.json) | `298 K`，UFF，$\text{CO}_2$ | `1.3987 / 7.3723 / 13.2996 mmol/g`（相对 RASPA3 网格偏差 `+0.25% / -2.10% / +0.45%`） | `4.66e-09 K` |
+| [`mg_mof74_co2_298K_mercado.json`](configs/mg_mof74_co2_298K_mercado.json) | `298 K`，Mercado 2016，$\text{CO}_2$ | `7.0587 / 11.1077 / 14.9680 mmol/g`（`0.15 bar` 下 $Q_{\text{st}} = 35.63\ \text{kJ/mol}$） | `4.37e-09 K` |
+| [`mg_mof74_co2_313K_psa.json`](configs/mg_mof74_co2_313K_psa.json) | `313 K`，Mercado 2016，$\text{CO}_2$ | `5.0424 / 9.7915 / 13.3012 mmol/g`（相对 298 K 清晰脱附 `-2.02 / -1.32 / -1.67`） | `4.13e-09 K` |
+| [`mg_mof74_fluegas_298K_pol3site.json`](configs/mg_mof74_fluegas_298K_pol3site.json) | `298 K`，`Pol-3Site`，$\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 60.39` (`0.5 bar`)、**`64.58`** (`1.0 bar`)、**`67.38`** (`2.0 bar`)；全 `double` 偶极存储 | `2.04e-09 K` |
+
+---
+
 ## 编译与运行命令
 
 ```powershell
-# 针对 RTX 5070 (sm_120) 编译全部目标（mof_gcmc.exe, mof_gcmc_mix.exe, mof_gcmc_v2.exe）
+# 针对 RTX 5070 (sm_120) 编译全部 4 个目标（mof_gcmc, mof_gcmc_mix, mof_gcmc_v2, mof_gcmc_cli）
 cmd /c build.bat all
 
 # 第一步 + 第二步单组分对比及绘图
@@ -134,6 +152,10 @@ cmd /c build.bat v2
 uv run python scripts\run_raspa3_bench.py
 uv run python scripts\run_raspa3_grid_bench.py
 uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
+
+# 第五步 统一 JSON/CLI 高精度引擎与 4 预设全自动校验
+cmd /c build.bat cli
+uv run --with numpy python scripts\verify_cli.py
 ```
 
 ---
@@ -142,19 +164,22 @@ uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
 
 ```text
 cuda-mof-gcmc/
+├── configs/                      # 统一 CLI 引擎 JSON 预设（UFF、Mercado、PSA 313K、烟道气）
 ├── data/
 │   ├── MgMOF-74.cif              # RASPA2 官方 R-3 Mg-MOF-74 晶体结构文件
 │   └── mercado2016/              # 官方 Mercado et al. (JPCC 2016) DFT-FF 与 EPM2 参数文件
 ├── include/
 │   ├── cell.hpp                  # 六方/三斜晶胞坐标变换与精确 5 候选 MIC
-│   ├── forcefield.hpp            # UFF、REPEAT、Mercado 2016、TraPPE/EPM2 与单/双组分 PR 逸度
+│   ├── forcefield.hpp            # UFF（19 种 MOF 元素）、REPEAT、Mercado 2016、TraPPE/EPM2 与 PR 逸度
 │   ├── grid3d.hpp                # 周期性三维网格视图、三线性及 O(h^4) 三维 Tricubic 插值
-│   ├── cif_loader.hpp            # CIF 对称展开与几何检查接口
+│   ├── cif_loader.hpp            # 通用及 Mg-MOF-74 CIF 对称展开与几何检查接口
+│   ├── simple_json.hpp           # 零外部依赖 C++17 JSON 解析器
 │   ├── gcmc_gpu.hpp              # 第一/二步网格构建与单组分 Batched GCMC 接口
 │   ├── mix_gcmc.hpp              # 第三步多组分 8 网格构建与二元共吸附 GCMC 接口
-│   └── v2_gcmc.hpp               # 第四步 0.10 A Tricubic 高精度 UFF 与 Mercado 2016 接口
+│   ├── v2_gcmc.hpp               # 第四步 0.10 A Tricubic 高精度 UFF 与 Mercado 2016 接口
+│   └── unified_gcmc.hpp          # 第五步统一 Tricubic + 极化 + Swap GPU 求解器接口
 ├── src/
-│   ├── cif_loader.cpp            # 18 对称操作展开 -> 162 原子与键长/电中性校验
+│   ├── cif_loader.cpp            # 通用及 Mg-MOF-74 CIF 展开与电荷/摩尔质量校验
 │   ├── grid_builder.cu           # 第一/二步 GPU 3D LJ + Ewald 势能与电场网格预计算
 │   ├── gcmc_kernel.cu            # 第一/二步单组分 GPU GCMC（128 线程/盒，DSF + Thole 耦合）
 │   ├── main.cu                   # 第一/二步主程序（NonPol vs Pol-COM vs Pol-3Site）
@@ -163,20 +188,25 @@ cuda-mof-gcmc/
 │   ├── main_mix.cu               # 第三步主程序（理想气体与换牌检验 + CO2/N2 与 CO2/CH4 扫描）
 │   ├── grid_builder_v2.cu        # 第四步 256x256x72 Buckingham/LJ + Ewald 网格构建与误差评估
 │   ├── gcmc_kernel_v2.cu         # 第四步双精度 SMEM Tricubic + 50k 步全盒重算 + Mg-O RDF
-│   └── main_v2.cu                # 第四步主程序（UFF vs Mercado 2016 Tricubic，各 6,400 万步）
+│   ├── main_v2.cu                # 第四步主程序（UFF vs Mercado 2016 Tricubic，各 6,400 万步）
+│   ├── unified_grid_builder.cu   # 第五步统一 8 网格 GPU 构建器（UFF & Mercado 2016）
+│   ├── unified_gcmc_kernel.cu    # 第五步统一全 double SMEM Tricubic + Pol-3Site + Identity Swap 内核
+│   └── main_cli.cu               # 第五步 JSON/CLI 命令行主入口
 ├── scripts/
 │   ├── verify_physics.py         # 独立 MIC/PR 校验与第一步 300 DPI 出图脚本
 │   ├── verify_step2.py           # 第二步极化校验与 300 DPI 对比三联图脚本
 │   ├── verify_step3.py           # 混合 PR EOS 校验与第三步 300 DPI 共吸附对比图脚本
 │   ├── run_raspa3_bench.py       # Windows 原生 RASPA3 3.0.29 并发精确 Ewald 基准运行脚本
 │   ├── run_raspa3_grid_bench.py  # Windows 原生 RASPA3 3.0.29 并发 Tricubic 网格基准运行脚本
-│   └── verify_upgrades.py        # 第四步自动化断言校验与 300 DPI 验证三联图脚本
+│   ├── verify_upgrades.py        # 第四步自动化断言校验与 300 DPI 验证三联图脚本
+│   └── verify_cli.py             # 第五步 4 组 JSON 预设端到端自动断言套件
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # 第一步：298 K 等温线、Qst 吸附热与孔道密度图
 │   ├── step2_mof74_pol_comparison.png    # 第二步：NonPol / Pol-COM / Pol-3Site 对比三联图
 │   ├── step3_mof74_binary_coadsorption.png # 第三步：CO2/N2 & CO2/CH4 选择性与孔道竞争占位图
 │   └── step4_validated_mercado_raspa3.png  # 第四步：0.10 A vs RASPA3 vs Mercado 2016 验证图
-├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2）
+├── build.bat                     # VS2019 + nvcc (sm_120) 编译脚本（all / single / mix / v2 / cli）
+├── LICENSE                       # MIT 开源协议
 ├── README.md                     # 英文项目文档
 └── README.zh-CN.md               # 中文项目文档
 ```

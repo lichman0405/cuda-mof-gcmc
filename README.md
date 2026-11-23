@@ -113,10 +113,28 @@ A CUDA simulation engine for gas adsorption in Metal–Organic Frameworks (MOFs)
 
 ---
 
+## Step 5: Unified JSON/CLI High-Precision Engine (`build\mof_gcmc_cli.exe`)
+
+Converges the `O(h⁴)` 3D tricubic interpolation, Mercado 2016 DFT-FF / UFF support, anisotropic polarization (`Pol-COM` / `Pol-3Site` + Thole coupling), binary Identity Swap, and generic CIF parsing (`19` common MOF elements, optional `_atom_site_charge`, P1 fallback) into a single runtime-configurable CLI binary driven by JSON presets ([`configs/`](configs/)):
+
+```powershell
+.\build\mof_gcmc_cli.exe --config configs\mg_mof74_fluegas_298K_pol3site.json
+.\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_mercado.json --temp 313 --out build\psa_313K.csv
+```
+
+| JSON Preset (`0.10 Å` Tricubic, 4 Replicas) | Condition | Verified Output Highlights | Max Drift ($T$-full recompute) |
+| :--- | :---: | :--- | :---: |
+| [`mg_mof74_co2_298K_uff.json`](configs/mg_mof74_co2_298K_uff.json) | `298 K`, UFF, $\text{CO}_2$ | `1.3987 / 7.3723 / 13.2996 mmol/g` (`+0.25% / -2.10% / +0.45%` vs. RASPA3 Grid) | `4.66e-09 K` |
+| [`mg_mof74_co2_298K_mercado.json`](configs/mg_mof74_co2_298K_mercado.json) | `298 K`, Mercado 2016, $\text{CO}_2$ | `7.0587 / 11.1077 / 14.9680 mmol/g` ($Q_{\text{st}} = 35.63\ \text{kJ/mol}$ @ `0.15 bar`) | `4.37e-09 K` |
+| [`mg_mof74_co2_313K_psa.json`](configs/mg_mof74_co2_313K_psa.json) | `313 K`, Mercado 2016, $\text{CO}_2$ | `5.0424 / 9.7915 / 13.3012 mmol/g` (clean `-2.02 / -1.32 / -1.67` thermal swing) | `4.13e-09 K` |
+| [`mg_mof74_fluegas_298K_pol3site.json`](configs/mg_mof74_fluegas_298K_pol3site.json) | `298 K`, `Pol-3Site`, $\text{CO}_2/\text{N}_2$ (`15:85`) | `S(CO2/N2) = 60.39` (`0.5 bar`), **`64.58`** (`1.0 bar`), **`67.38`** (`2.0 bar`); `double` SMEM dipoles | `2.04e-09 K` |
+
+---
+
 ## Build & Run
 
 ```powershell
-# Compile all targets (mof_gcmc.exe, mof_gcmc_mix.exe, mof_gcmc_v2.exe) for RTX 5070 (sm_120)
+# Compile all 4 targets (mof_gcmc, mof_gcmc_mix, mof_gcmc_v2, mof_gcmc_cli) for RTX 5070 (sm_120)
 cmd /c build.bat all
 
 # Step 1 + Step 2 single-component runs & plots
@@ -134,6 +152,10 @@ cmd /c build.bat v2
 uv run python scripts\run_raspa3_bench.py
 uv run python scripts\run_raspa3_grid_bench.py
 uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
+
+# Step 5 Unified JSON/CLI high-precision engine & 4-preset automated verification
+cmd /c build.bat cli
+uv run --with numpy python scripts\verify_cli.py
 ```
 
 ---
@@ -142,19 +164,22 @@ uv run --with matplotlib --with numpy python scripts\verify_upgrades.py
 
 ```text
 cuda-mof-gcmc/
+├── configs/                      # JSON presets for unified CLI engine (UFF, Mercado, PSA 313K, Flue Gas)
 ├── data/
 │   ├── MgMOF-74.cif              # Official RASPA2 R-3 Mg-MOF-74 crystal structure
 │   └── mercado2016/              # Official Mercado et al. (JPCC 2016) DFT-FF & EPM2 definitions
 ├── include/
 │   ├── cell.hpp                  # Hexagonal/triclinic cell transform & exact 5-candidate MIC
-│   ├── forcefield.hpp            # UFF, REPEAT, Mercado 2016, TraPPE/EPM2 & single/binary PR EOS
+│   ├── forcefield.hpp            # UFF (19 MOF elements), REPEAT, Mercado 2016, TraPPE/EPM2 & PR EOS
 │   ├── grid3d.hpp                # Periodic 3D grids, trilinear & O(h^4) tricubic lookup
-│   ├── cif_loader.hpp            # CIF symmetry expander & geometry checker interface
+│   ├── cif_loader.hpp            # Generic + Mg-MOF-74 CIF symmetry expander & geometry checker
+│   ├── simple_json.hpp           # Zero-dependency C++17 JSON parser
 │   ├── gcmc_gpu.hpp              # Step 1/2 grid builder & single-component batched GCMC API
 │   ├── mix_gcmc.hpp              # Step 3 multi-species 8-grid builder & binary GCMC API
-│   └── v2_gcmc.hpp               # Step 4 high-precision 0.10 A Tricubic UFF & Mercado 2016 API
+│   ├── v2_gcmc.hpp               # Step 4 high-precision 0.10 A Tricubic UFF & Mercado 2016 API
+│   └── unified_gcmc.hpp          # Step 5 unified Tricubic + Pol + Swap GPU solver API
 ├── src/
-│   ├── cif_loader.cpp            # Symmetry expansion -> 162 atoms & bond/charge validation
+│   ├── cif_loader.cpp            # Generic & Mg-MOF-74 CIF symmetry expansion & charge/mass check
 │   ├── grid_builder.cu           # Step 1/2 GPU 3D LJ + Ewald potential & E-field precomputation
 │   ├── gcmc_kernel.cu            # Step 1/2 batched GCMC (128 threads/box, DSF + Thole coupling)
 │   ├── main.cu                   # Step 1/2 driver (NonPol vs Pol-COM vs Pol-3Site)
@@ -163,20 +188,25 @@ cuda-mof-gcmc/
 │   ├── main_mix.cu               # Step 3 driver (Ideal-gas & swap checks + CO2/N2 & CO2/CH4 sweeps)
 │   ├── grid_builder_v2.cu        # Step 4 256x256x72 Buckingham/LJ + Ewald grid builder & stats
 │   ├── gcmc_kernel_v2.cu         # Step 4 double-SMEM Tricubic + 50k periodic recompute + Mg-O RDF
-│   └── main_v2.cu                # Step 4 driver (UFF vs Mercado 2016 0.10 A Tricubic, 64M steps each)
+│   ├── main_v2.cu                # Step 4 driver (UFF vs Mercado 2016 0.10 A Tricubic, 64M steps each)
+│   ├── unified_grid_builder.cu   # Step 5 unified 8-grid GPU builder (UFF & Mercado 2016)
+│   ├── unified_gcmc_kernel.cu    # Step 5 unified full-double Tricubic + Pol-3Site + Identity Swap kernel
+│   └── main_cli.cu               # Step 5 JSON/CLI entrypoint
 ├── scripts/
 │   ├── verify_physics.py         # Independent MIC/PR checks & Step 1 300 DPI plot
 │   ├── verify_step2.py           # Step 2 polarization verification & 300 DPI comparison plot
 │   ├── verify_step3.py           # Binary PR EOS verification & Step 3 300 DPI comparison plot
 │   ├── run_raspa3_bench.py       # Native Windows RASPA3 3.0.29 parallel exact-Ewald runner
 │   ├── run_raspa3_grid_bench.py  # Native Windows RASPA3 3.0.29 parallel tricubic-grid runner
-│   └── verify_upgrades.py        # Step 4 automated assertions & 300 DPI validation figure
+│   ├── verify_upgrades.py        # Step 4 automated assertions & 300 DPI validation figure
+│   └── verify_cli.py             # Step 5 end-to-end 4-preset CLI verification suite
 ├── assets/
 │   ├── step1_mof74_co2_298K.png          # Step 1: 298 K isotherm, Qst & pore density
 │   ├── step2_mof74_pol_comparison.png    # Step 2: NonPol vs Pol-COM vs Pol-3Site comparison
 │   ├── step3_mof74_binary_coadsorption.png # Step 3: CO2/N2 & CO2/CH4 selectivity & competitive map
 │   └── step4_validated_mercado_raspa3.png  # Step 4: 0.10 A vs RASPA3 vs Mercado 2016 validation
-├── build.bat                     # VS2019 + nvcc (sm_120) build script (all / single / mix / v2)
+├── build.bat                     # VS2019 + nvcc (sm_120) build script (all / single / mix / v2 / cli)
+├── LICENSE                       # MIT License
 ├── README.md                     # English documentation
 └── README.zh-CN.md               # Chinese documentation
 ```

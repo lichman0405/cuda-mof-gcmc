@@ -15,7 +15,22 @@ enum ElementId {
     ELEM_MG = 0,
     ELEM_O  = 1,
     ELEM_C  = 2,
-    ELEM_H  = 3
+    ELEM_H  = 3,
+    ELEM_N  = 4,
+    ELEM_S  = 5,
+    ELEM_F  = 6,
+    ELEM_CL = 7,
+    ELEM_ZN = 8,
+    ELEM_CU = 9,
+    ELEM_FE = 10,
+    ELEM_CO = 11,
+    ELEM_NI = 12,
+    ELEM_MN = 13,
+    ELEM_AL = 14,
+    ELEM_CR = 15,
+    ELEM_ZR = 16,
+    ELEM_TI = 17,
+    ELEM_V  = 18
 };
 
 struct UffParam {
@@ -30,7 +45,47 @@ inline UffParam get_uff_param(int elem) {
         case ELEM_O:  return {30.1932, 3.1181};
         case ELEM_C:  return {52.8381, 3.4309};
         case ELEM_H:  return {22.1417, 2.5711};
+        case ELEM_N:  return {34.7221, 3.2607};
+        case ELEM_S:  return {137.882, 3.5948};
+        case ELEM_F:  return {25.1610, 2.9970};
+        case ELEM_CL: return {114.231, 3.5164};
+        case ELEM_ZN: return {62.3992, 2.4616};
+        case ELEM_CU: return {2.5161,  3.1137};
+        case ELEM_FE: return {6.5419,  2.5943};
+        case ELEM_CO: return {7.0451,  2.5587};
+        case ELEM_NI: return {7.5483,  2.5248};
+        case ELEM_MN: return {6.5419,  2.6380};
+        case ELEM_AL: return {254.126, 4.0082};
+        case ELEM_CR: return {7.5483,  2.6932};
+        case ELEM_ZR: return {34.7221, 2.7832};
+        case ELEM_TI: return {8.5547,  2.8286};
+        case ELEM_V:  return {8.0515,  2.8009};
         default:      return {0.0, 1.0};
+    }
+}
+
+inline double get_atomic_mass(int elem) {
+    switch (elem) {
+        case ELEM_MG: return 24.305;
+        case ELEM_O:  return 15.999;
+        case ELEM_C:  return 12.011;
+        case ELEM_H:  return 1.008;
+        case ELEM_N:  return 14.007;
+        case ELEM_S:  return 32.060;
+        case ELEM_F:  return 18.998;
+        case ELEM_CL: return 35.450;
+        case ELEM_ZN: return 65.380;
+        case ELEM_CU: return 63.546;
+        case ELEM_FE: return 55.845;
+        case ELEM_CO: return 58.933;
+        case ELEM_NI: return 58.693;
+        case ELEM_MN: return 54.938;
+        case ELEM_AL: return 26.982;
+        case ELEM_CR: return 51.996;
+        case ELEM_ZR: return 91.224;
+        case ELEM_TI: return 47.867;
+        case ELEM_V:  return 50.942;
+        default:      return 0.0;
     }
 }
 
@@ -39,6 +94,21 @@ inline int element_from_symbol(const std::string& sym) {
     if (sym == "O")  return ELEM_O;
     if (sym == "C")  return ELEM_C;
     if (sym == "H")  return ELEM_H;
+    if (sym == "N")  return ELEM_N;
+    if (sym == "S")  return ELEM_S;
+    if (sym == "F")  return ELEM_F;
+    if (sym == "Cl") return ELEM_CL;
+    if (sym == "Zn") return ELEM_ZN;
+    if (sym == "Cu") return ELEM_CU;
+    if (sym == "Fe") return ELEM_FE;
+    if (sym == "Co") return ELEM_CO;
+    if (sym == "Ni") return ELEM_NI;
+    if (sym == "Mn") return ELEM_MN;
+    if (sym == "Al") return ELEM_AL;
+    if (sym == "Cr") return ELEM_CR;
+    if (sym == "Zr") return ELEM_ZR;
+    if (sym == "Ti") return ELEM_TI;
+    if (sym == "V")  return ELEM_V;
     return -1;
 }
 
@@ -178,6 +248,15 @@ inline SpeciesDef make_species_co2() {
     s.alpha_iso = trappe_co2::ALPHA_ISO_A3;
     s.w_pol[0] = trappe_co2::W_POL_C; s.w_pol[1] = trappe_co2::W_POL_O; s.w_pol[2] = trappe_co2::W_POL_O;
     s.Tc_K = 304.1282; s.Pc_bar = 73.773; s.omega = 0.22394;
+    return s;
+}
+
+inline SpeciesDef make_species_co2_epm2() {
+    SpeciesDef s = make_species_co2();
+    s.bond_A = mercado2016::BOND_CO_EPM2;
+    s.q[0] = mercado2016::Q_C_EPM2; s.q[1] = mercado2016::Q_O_EPM2; s.q[2] = mercado2016::Q_O_EPM2;
+    s.eps_K[0] = mercado2016::EPS_C_EPM2; s.eps_K[1] = mercado2016::EPS_O_EPM2; s.eps_K[2] = mercado2016::EPS_O_EPM2;
+    s.sigma_A[0] = mercado2016::SIG_C_EPM2; s.sigma_A[1] = mercado2016::SIG_O_EPM2; s.sigma_A[2] = mercado2016::SIG_O_EPM2;
     return s;
 }
 

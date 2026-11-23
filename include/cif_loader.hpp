@@ -20,6 +20,13 @@ struct CifStructureInfo {
     double min_c_h_A;
 };
 
+bool load_cif_framework(
+    const std::string& cif_path,
+    int rep_a, int rep_b, int rep_c,
+    Cell& cell_out,
+    std::vector<FrameworkAtom>& unit_atoms_out,
+    CifStructureInfo& info_out);
+
 bool load_mg_mof74_cif(
     const std::string& cif_path,
     int rep_a, int rep_b, int rep_c,

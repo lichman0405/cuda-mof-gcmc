@@ -1,0 +1,27 @@
+{
+  "cif_path": "data/MgMOF-74.cif",
+  "supercell": [1, 1, 4],
+  "temperature_K": 298.0,
+  "forcefield": "uff",
+  "interpolation": "tricubic",
+  "polarization": "3site",
+  "grid_dims": [256, 256, 72],
+  "r_cut_A": 11.0,
+  "ewald_alpha": 0.30,
+  "dsf_alpha": 0.20,
+  "species": [
+    {"name": "CO2", "mole_fraction": 0.15},
+    {"name": "N2",  "mole_fraction": 0.85}
+  ],
+  "kij": -0.02,
+  "pressures_bar": [0.5, 1.0, 2.0],
+  "replicas": 4,
+  "eq_steps": 150000,
+  "prod_steps": 350000,
+  "sample_stride": 20,
+  "recompute_stride": 50000,
+  "max_mol": 512,
+  "enable_swap": true,
+  "seed": 20261125,
+  "output_csv": "build/cli_fluegas_298K_pol3site.csv"
+}

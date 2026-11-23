@@ -1,0 +1,24 @@
+{
+  "cif_path": "data/MgMOF-74.cif",
+  "supercell": [1, 1, 4],
+  "temperature_K": 298.0,
+  "forcefield": "uff",
+  "interpolation": "tricubic",
+  "polarization": "none",
+  "grid_dims": [256, 256, 72],
+  "r_cut_A": 11.0,
+  "ewald_alpha": 0.30,
+  "dsf_alpha": 0.20,
+  "species": [
+    {"name": "CO2", "mole_fraction": 1.0}
+  ],
+  "pressures_bar": [0.15, 1.0, 5.0],
+  "replicas": 4,
+  "eq_steps": 200000,
+  "prod_steps": 800000,
+  "sample_stride": 20,
+  "recompute_stride": 50000,
+  "max_mol": 512,
+  "seed": 20261123,
+  "output_csv": "build/cli_uff_298K.csv"
+}

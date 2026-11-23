@@ -99,15 +99,36 @@ SymOp parse_symop(const std::string& line) {
     return op;
 }
 
+double parse_cif_number(const std::string& s) {
+    auto pos = s.find('(');
+    std::string clean = (pos == std::string::npos) ? s : s.substr(0, pos);
+    return std::stod(clean);
+}
+
+std::string clean_element_symbol(const std::string& s) {
+    std::string out;
+    for (char ch : s) {
+        if (std::isalpha((unsigned char)ch)) {
+            if (out.empty()) out.push_back((char)std::toupper((unsigned char)ch));
+            else out.push_back((char)std::tolower((unsigned char)ch));
+        } else {
+            break;
+        }
+    }
+    return out;
+}
+
 struct AsymAtom {
     std::string label;
     std::string symbol;
     double fx, fy, fz;
+    bool has_charge;
+    double charge;
 };
 
 } // namespace
 
-bool load_mg_mof74_cif(
+bool load_cif_framework(
     const std::string& cif_path,
     int rep_a, int rep_b, int rep_c,
     Cell& cell_out,
@@ -143,12 +164,12 @@ bool load_mg_mof74_cif(
             std::istringstream iss(t);
             std::string key;
             iss >> key;
-            if (key == "_cell_length_a") { iss >> info_out.a; continue; }
-            if (key == "_cell_length_b") { iss >> info_out.b; continue; }
-            if (key == "_cell_length_c") { iss >> info_out.c; continue; }
-            if (key == "_cell_angle_alpha") { iss >> info_out.alpha_deg; continue; }
-            if (key == "_cell_angle_beta")  { iss >> info_out.beta_deg; continue; }
-            if (key == "_cell_angle_gamma") { iss >> info_out.gamma_deg; continue; }
+            if (key == "_cell_length_a") { std::string v; iss >> v; info_out.a = parse_cif_number(v); continue; }
+            if (key == "_cell_length_b") { std::string v; iss >> v; info_out.b = parse_cif_number(v); continue; }
+            if (key == "_cell_length_c") { std::string v; iss >> v; info_out.c = parse_cif_number(v); continue; }
+            if (key == "_cell_angle_alpha") { std::string v; iss >> v; info_out.alpha_deg = parse_cif_number(v); continue; }
+            if (key == "_cell_angle_beta")  { std::string v; iss >> v; info_out.beta_deg = parse_cif_number(v); continue; }
+            if (key == "_cell_angle_gamma") { std::string v; iss >> v; info_out.gamma_deg = parse_cif_number(v); continue; }
             if (key == "_symmetry_equiv_pos_as_xyz" || key == "_space_group_symop_operation_xyz") {
                 sec = SEC_SYM;
                 continue;
@@ -174,18 +195,24 @@ bool load_mg_mof74_cif(
             AsymAtom a{};
             for (size_t c = 0; c < atom_cols.size(); ++c) {
                 if (atom_cols[c] == "_atom_site_label") a.label = tokens[c];
-                else if (atom_cols[c] == "_atom_site_type_symbol") a.symbol = tokens[c];
-                else if (atom_cols[c] == "_atom_site_fract_x") a.fx = std::stod(tokens[c]);
-                else if (atom_cols[c] == "_atom_site_fract_y") a.fy = std::stod(tokens[c]);
-                else if (atom_cols[c] == "_atom_site_fract_z") a.fz = std::stod(tokens[c]);
+                else if (atom_cols[c] == "_atom_site_type_symbol") a.symbol = clean_element_symbol(tokens[c]);
+                else if (atom_cols[c] == "_atom_site_fract_x") a.fx = parse_cif_number(tokens[c]);
+                else if (atom_cols[c] == "_atom_site_fract_y") a.fy = parse_cif_number(tokens[c]);
+                else if (atom_cols[c] == "_atom_site_fract_z") a.fz = parse_cif_number(tokens[c]);
+                else if (atom_cols[c] == "_atom_site_charge") {
+                    a.has_charge = true;
+                    a.charge = parse_cif_number(tokens[c]);
+                }
+            }
+            if (a.symbol.empty() && !a.label.empty()) {
+                a.symbol = clean_element_symbol(a.label);
             }
             asym_atoms.push_back(a);
         }
     }
 
     if (symops.empty()) {
-        std::fprintf(stderr, "Error: no symmetry operations parsed from %s\n", cif_path.c_str());
-        return false;
+        symops.push_back(parse_symop("x,y,z"));
     }
 
     cell_out.init(info_out.a, info_out.b, info_out.c,
@@ -200,7 +227,7 @@ bool load_mg_mof74_cif(
             return false;
         }
         UffParam lj = get_uff_param(elem);
-        double q = get_repeat_charge(aa.label);
+        double q = aa.has_charge ? aa.charge : get_repeat_charge(aa.label);
         int type_id = atom_type_from_label(aa.label);
 
         for (const auto& op : symops) {
@@ -239,19 +266,15 @@ bool load_mg_mof74_cif(
 
     info_out.num_atoms = (int)unit_atoms_out.size();
     info_out.total_charge_e = 0.0;
+    info_out.unit_mass_g_mol = 0.0;
     for (const auto& fa : unit_atoms_out) {
         info_out.total_charge_e += fa.q;
+        info_out.unit_mass_g_mol += get_atomic_mass(fa.elem);
         if (fa.elem == ELEM_MG) ++info_out.count_mg;
         else if (fa.elem == ELEM_O) ++info_out.count_o;
         else if (fa.elem == ELEM_C) ++info_out.count_c;
         else if (fa.elem == ELEM_H) ++info_out.count_h;
     }
-
-    info_out.unit_mass_g_mol =
-        info_out.count_mg * 24.305 +
-        info_out.count_o  * 15.999 +
-        info_out.count_c  * 12.011 +
-        info_out.count_h  * 1.008;
 
     // Verify shortest interatomic bond lengths in the 1x1x1 unit cell
     info_out.min_mg_o_A = 1e9;
@@ -295,6 +318,24 @@ bool load_mg_mof74_cif(
         }
     }
 
+    if (std::fabs(info_out.total_charge_e) > 1.0e-5) {
+        std::fprintf(stderr, "Error: non-neutral framework charge sum = %.8f e\n",
+                     info_out.total_charge_e);
+        return false;
+    }
+    return true;
+}
+
+bool load_mg_mof74_cif(
+    const std::string& cif_path,
+    int rep_a, int rep_b, int rep_c,
+    Cell& cell_out,
+    std::vector<FrameworkAtom>& unit_atoms_out,
+    CifStructureInfo& info_out) {
+
+    if (!load_cif_framework(cif_path, rep_a, rep_b, rep_c, cell_out, unit_atoms_out, info_out)) {
+        return false;
+    }
     if (info_out.num_atoms != 162 ||
         info_out.count_mg != 18 || info_out.count_o != 54 ||
         info_out.count_c != 72 || info_out.count_h != 18) {

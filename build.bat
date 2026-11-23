@@ -15,9 +15,10 @@ if "%TARGET%"=="" set TARGET=all
 if /I "%TARGET%"=="single" goto build_single
 if /I "%TARGET%"=="mix" goto build_mix
 if /I "%TARGET%"=="v2" goto build_v2
+if /I "%TARGET%"=="cli" goto build_cli
 if /I "%TARGET%"=="all" goto build_single
 
-echo Unknown target "%TARGET%". Usage: build.bat [all^|single^|mix^|v2]
+echo Unknown target "%TARGET%". Usage: build.bat [all^|single^|mix^|v2^|cli]
 exit /b 1
 
 :build_single
@@ -57,6 +58,19 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Build succeeded: build\mof_gcmc_v2.exe
+if /I "%TARGET%"=="v2" goto done
+
+:build_cli
+echo Building build\mof_gcmc_cli.exe for sm_120 (RTX 5070)...
+nvcc -O3 -std=c++17 -arch=sm_120 -Iinclude ^
+    -Xcompiler "/O2 /arch:AVX2 /utf-8 /FS" ^
+    src\cif_loader.cpp src\unified_grid_builder.cu src\unified_gcmc_kernel.cu src\main_cli.cu ^
+    -o build\mof_gcmc_cli.exe
+if errorlevel 1 (
+    echo Build mof_gcmc_cli.exe failed!
+    exit /b 1
+)
+echo Build succeeded: build\mof_gcmc_cli.exe
 
 :done
 exit /b 0
