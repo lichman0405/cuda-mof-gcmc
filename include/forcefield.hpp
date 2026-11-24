@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cctype>
 #include <cmath>
 #include <string>
 
@@ -38,78 +39,177 @@ struct UffParam {
     double sigma_A;
 };
 
-// UFF parameters (Rappe et al. JACS 1992): eps in Kelvin, sigma in Angstrom
-inline UffParam get_uff_param(int elem) {
-    switch (elem) {
-        case ELEM_MG: return {55.8574, 2.6914};
-        case ELEM_O:  return {30.1932, 3.1181};
-        case ELEM_C:  return {52.8381, 3.4309};
-        case ELEM_H:  return {22.1417, 2.5711};
-        case ELEM_N:  return {34.7221, 3.2607};
-        case ELEM_S:  return {137.882, 3.5948};
-        case ELEM_F:  return {25.1610, 2.9970};
-        case ELEM_CL: return {114.231, 3.5164};
-        case ELEM_ZN: return {62.3992, 2.4616};
-        case ELEM_CU: return {2.5161,  3.1137};
-        case ELEM_FE: return {6.5419,  2.5943};
-        case ELEM_CO: return {7.0451,  2.5587};
-        case ELEM_NI: return {7.5483,  2.5248};
-        case ELEM_MN: return {6.5419,  2.6380};
-        case ELEM_AL: return {254.126, 4.0082};
-        case ELEM_CR: return {7.5483,  2.6932};
-        case ELEM_ZR: return {34.7221, 2.7832};
-        case ELEM_TI: return {8.5547,  2.8286};
-        case ELEM_V:  return {8.0515,  2.8009};
-        default:      return {0.0, 1.0};
-    }
+struct PeriodicElementData {
+    double uff_eps_K;
+    double uff_sigma_A;
+    double mass_g_mol;
+    const char* symbol;
+};
+
+// Complete 103-element UFF table (Rappe et al., J. Am. Chem. Soc. 1992, 114, 10024-10035)
+// Index Z = 0..103; eps_K = D_i * 503.21959899, sigma_A = x_i / 2^(1/6).
+inline const PeriodicElementData& get_periodic_element_data(int Z) {
+    static const PeriodicElementData TABLE[104] = {
+        /*  0 Du*/ {   0.0000, 1.0000,   0.0000, ""   },
+        /*  1 H */ {  22.1417, 2.5711,   1.0080, "H"  },
+        /*  2 He*/ {  28.1803, 2.1043,   4.0026, "He" },
+        /*  3 Li*/ {  12.5805, 2.1836,   6.9400, "Li" },
+        /*  4 Be*/ {  42.7737, 2.4455,   9.0122, "Be" },
+        /*  5 B */ {  90.5795, 3.6375,  10.8100, "B"  },
+        /*  6 C */ {  52.8381, 3.4309,  12.0110, "C"  },
+        /*  7 N */ {  34.7221, 3.2607,  14.0070, "N"  },
+        /*  8 O */ {  30.1932, 3.1181,  15.9990, "O"  },
+        /*  9 F */ {  25.1610, 2.9970,  18.9980, "F"  },
+        /* 10 Ne*/ {  21.1352, 2.8892,  20.1797, "Ne" },
+        /* 11 Na*/ {  15.0966, 2.6576,  22.9898, "Na" },
+        /* 12 Mg*/ {  55.8574, 2.6914,  24.3050, "Mg" },
+        /* 13 Al*/ { 254.1260, 4.0082,  26.9820, "Al" },
+        /* 14 Si*/ { 202.2943, 3.8264,  28.0850, "Si" },
+        /* 15 P */ { 153.4820, 3.6946,  30.9738, "P"  },
+        /* 16 S */ { 137.8820, 3.5948,  32.0600, "S"  },
+        /* 17 Cl*/ { 114.2310, 3.5164,  35.4500, "Cl" },
+        /* 18 Ar*/ {  93.0956, 3.4460,  39.9480, "Ar" },
+        /* 19 K */ {  17.6127, 3.3961,  39.0983, "K"  },
+        /* 20 Ca*/ { 119.7663, 3.0282,  40.0780, "Ca" },
+        /* 21 Sc*/ {   9.5612, 2.9355,  44.9559, "Sc" },
+        /* 22 Ti*/ {   8.5547, 2.8286,  47.8670, "Ti" },
+        /* 23 V */ {   8.0515, 2.8009,  50.9420, "V"  },
+        /* 24 Cr*/ {   7.5483, 2.6932,  51.9960, "Cr" },
+        /* 25 Mn*/ {   6.5419, 2.6380,  54.9380, "Mn" },
+        /* 26 Fe*/ {   6.5419, 2.5943,  55.8450, "Fe" },
+        /* 27 Co*/ {   7.0451, 2.5587,  58.9330, "Co" },
+        /* 28 Ni*/ {   7.5483, 2.5248,  58.6930, "Ni" },
+        /* 29 Cu*/ {   2.5161, 3.1137,  63.5460, "Cu" },
+        /* 30 Zn*/ {  62.3992, 2.4616,  65.3800, "Zn" },
+        /* 31 Ga*/ { 208.8361, 3.9048,  69.7230, "Ga" },
+        /* 32 Ge*/ { 190.7202, 3.8130,  72.6300, "Ge" },
+        /* 33 As*/ { 155.4949, 3.7685,  74.9216, "As" },
+        /* 34 Se*/ { 146.4369, 3.7462,  78.9710, "Se" },
+        /* 35 Br*/ { 126.3081, 3.7320,  79.9040, "Br" },
+        /* 36 Kr*/ { 110.7083, 3.6892,  83.7980, "Kr" },
+        /* 37 Rb*/ {  20.1288, 3.6652,  85.4678, "Rb" },
+        /* 38 Sr*/ { 118.2566, 3.2438,  87.6200, "Sr" },
+        /* 39 Y */ {  36.2318, 2.9801,  88.9058, "Y"  },
+        /* 40 Zr*/ {  34.7221, 2.7832,  91.2240, "Zr" },
+        /* 41 Nb*/ {  29.6900, 2.8197,  92.9064, "Nb" },
+        /* 42 Mo*/ {  28.1803, 2.7190,  95.9500, "Mo" },
+        /* 43 Tc*/ {  24.1545, 2.6709,  97.9072, "Tc" },
+        /* 44 Ru*/ {  28.1803, 2.6397, 101.0700, "Ru" },
+        /* 45 Rh*/ {  26.6706, 2.6094, 102.9055, "Rh" },
+        /* 46 Pd*/ {  24.1545, 2.5827, 106.4200, "Pd" },
+        /* 47 Ag*/ {  18.1159, 2.8045, 107.8682, "Ag" },
+        /* 48 Cd*/ { 114.7341, 2.5373, 112.4140, "Cd" },
+        /* 49 In*/ { 301.4285, 3.9761, 114.8180, "In" },
+        /* 50 Sn*/ { 285.3255, 3.9128, 118.7100, "Sn" },
+        /* 51 Sb*/ { 225.9456, 3.9378, 121.7600, "Sb" },
+        /* 52 Te*/ { 200.2814, 3.9823, 127.6000, "Te" },
+        /* 53 I */ { 170.5914, 4.0090, 126.9045, "I"  },
+        /* 54 Xe*/ { 167.0689, 3.9235, 131.2930, "Xe" },
+        /* 55 Cs*/ {  22.6449, 4.0242, 132.9055, "Cs" },
+        /* 56 Ba*/ { 183.1719, 3.2990, 137.3270, "Ba" },
+        /* 57 La*/ {   8.5547, 3.1377, 138.9055, "La" },
+        /* 58 Ce*/ {   6.5419, 3.1680, 140.1160, "Ce" },
+        /* 59 Pr*/ {   5.0322, 3.2126, 140.9077, "Pr" },
+        /* 60 Nd*/ {   5.0322, 3.1850, 144.2420, "Nd" },
+        /* 61 Pm*/ {   4.5290, 3.1600, 144.9128, "Pm" },
+        /* 62 Sm*/ {   4.0258, 3.1360, 150.3600, "Sm" },
+        /* 63 Eu*/ {   4.0258, 3.1119, 151.9640, "Eu" },
+        /* 64 Gd*/ {   4.5290, 3.0005, 157.2500, "Gd" },
+        /* 65 Tb*/ {   3.5225, 3.0745, 158.9254, "Tb" },
+        /* 66 Dy*/ {   3.5225, 3.0540, 162.5000, "Dy" },
+        /* 67 Ho*/ {   3.5225, 3.0371, 164.9303, "Ho" },
+        /* 68 Er*/ {   3.5225, 3.0210, 167.2590, "Er" },
+        /* 69 Tm*/ {   3.0193, 3.0059, 168.9342, "Tm" },
+        /* 70 Yb*/ { 114.7341, 2.9890, 173.0540, "Yb" },
+        /* 71 Lu*/ {  20.6320, 3.2429, 174.9668, "Lu" },
+        /* 72 Hf*/ {  36.2318, 2.7983, 178.4900, "Hf" },
+        /* 73 Ta*/ {  40.7608, 2.8241, 180.9479, "Ta" },
+        /* 74 W */ {  33.7157, 2.7342, 183.8400, "W"  },
+        /* 75 Re*/ {  33.2125, 2.6317, 186.2070, "Re" },
+        /* 76 Os*/ {  18.6191, 2.7796, 190.2300, "Os" },
+        /* 77 Ir*/ {  36.7350, 2.5302, 192.2170, "Ir" },
+        /* 78 Pt*/ {  40.2576, 2.4535, 195.0840, "Pt" },
+        /* 79 Au*/ {  19.6256, 2.9337, 196.9666, "Au" },
+        /* 80 Hg*/ { 193.7395, 2.4099, 200.5920, "Hg" },
+        /* 81 Tl*/ { 342.1893, 3.8727, 204.3800, "Tl" },
+        /* 82 Pb*/ { 333.6346, 3.8282, 207.2000, "Pb" },
+        /* 83 Bi*/ { 260.6678, 3.8932, 208.9804, "Bi" },
+        /* 84 Po*/ { 163.5464, 4.1952, 208.9824, "Po" },
+        /* 85 At*/ { 142.9144, 4.2318, 209.9872, "At" },
+        /* 86 Rn*/ { 124.7985, 4.2451, 222.0176, "Rn" },
+        /* 87 Fr*/ {  25.1610, 4.3654, 223.0197, "Fr" },
+        /* 88 Ra*/ { 203.3007, 3.2758, 226.0254, "Ra" },
+        /* 89 Ac*/ {  16.6062, 3.0985, 227.0277, "Ac" },
+        /* 90 Th*/ {  13.0837, 3.0255, 232.0377, "Th" },
+        /* 91 Pa*/ {  11.0708, 3.0504, 231.0359, "Pa" },
+        /* 92 U */ {  11.0708, 3.0246, 238.0289, "U"  },
+        /* 93 Np*/ {   9.5612, 3.0504, 237.0482, "Np" },
+        /* 94 Pu*/ {   8.0515, 3.0504, 244.0642, "Pu" },
+        /* 95 Am*/ {   7.0451, 3.0121, 243.0614, "Am" },
+        /* 96 Cm*/ {   6.5419, 2.9631, 247.0703, "Cm" },
+        /* 97 Bk*/ {   6.5419, 2.9747, 247.0703, "Bk" },
+        /* 98 Cf*/ {   6.5419, 2.9515, 251.0796, "Cf" },
+        /* 99 Es*/ {   6.0386, 2.9391, 252.0830, "Es" },
+        /*100 Fm*/ {   6.0386, 2.9275, 257.0951, "Fm" },
+        /*101 Md*/ {   5.5354, 2.9168, 258.0984, "Md" },
+        /*102 No*/ {   5.5354, 2.8936, 259.1010, "No" },
+        /*103 Lr*/ {   5.5354, 2.8829, 262.1100, "Lr" }
+    };
+    if (Z >= 1 && Z <= 103) return TABLE[Z];
+    return TABLE[0];
 }
 
-inline double get_atomic_mass(int elem) {
-    switch (elem) {
-        case ELEM_MG: return 24.305;
-        case ELEM_O:  return 15.999;
-        case ELEM_C:  return 12.011;
-        case ELEM_H:  return 1.008;
-        case ELEM_N:  return 14.007;
-        case ELEM_S:  return 32.060;
-        case ELEM_F:  return 18.998;
-        case ELEM_CL: return 35.450;
-        case ELEM_ZN: return 65.380;
-        case ELEM_CU: return 63.546;
-        case ELEM_FE: return 55.845;
-        case ELEM_CO: return 58.933;
-        case ELEM_NI: return 58.693;
-        case ELEM_MN: return 54.938;
-        case ELEM_AL: return 26.982;
-        case ELEM_CR: return 51.996;
-        case ELEM_ZR: return 91.224;
-        case ELEM_TI: return 47.867;
-        case ELEM_V:  return 50.942;
-        default:      return 0.0;
-    }
+inline UffParam get_uff_param_by_Z(int Z) {
+    const auto& d = get_periodic_element_data(Z);
+    return {d.uff_eps_K, d.uff_sigma_A};
 }
 
-inline int element_from_symbol(const std::string& sym) {
-    if (sym == "Mg") return ELEM_MG;
-    if (sym == "O")  return ELEM_O;
-    if (sym == "C")  return ELEM_C;
-    if (sym == "H")  return ELEM_H;
-    if (sym == "N")  return ELEM_N;
-    if (sym == "S")  return ELEM_S;
-    if (sym == "F")  return ELEM_F;
-    if (sym == "Cl") return ELEM_CL;
-    if (sym == "Zn") return ELEM_ZN;
-    if (sym == "Cu") return ELEM_CU;
-    if (sym == "Fe") return ELEM_FE;
-    if (sym == "Co") return ELEM_CO;
-    if (sym == "Ni") return ELEM_NI;
-    if (sym == "Mn") return ELEM_MN;
-    if (sym == "Al") return ELEM_AL;
-    if (sym == "Cr") return ELEM_CR;
-    if (sym == "Zr") return ELEM_ZR;
-    if (sym == "Ti") return ELEM_TI;
-    if (sym == "V")  return ELEM_V;
-    return -1;
+inline double get_atomic_mass_by_Z(int Z) {
+    return get_periodic_element_data(Z).mass_g_mol;
+}
+
+inline int atomic_number_from_symbol(const std::string& sym) {
+    if (sym.empty()) return 0;
+    std::string norm;
+    for (char ch : sym) {
+        if (std::isalpha((unsigned char)ch)) {
+            if (norm.empty()) norm.push_back((char)std::toupper((unsigned char)ch));
+            else norm.push_back((char)std::tolower((unsigned char)ch));
+        } else {
+            break;
+        }
+    }
+    if (norm == "D") return 1;
+    if (norm == "Lw") return 103;
+    for (int z = 1; z <= 103; ++z) {
+        if (norm == get_periodic_element_data(z).symbol) return z;
+    }
+    return 0;
+}
+
+inline int atomic_number_to_elem(int Z) {
+    switch (Z) {
+        case 12: return ELEM_MG;
+        case 8:  return ELEM_O;
+        case 6:  return ELEM_C;
+        case 1:  return ELEM_H;
+        case 7:  return ELEM_N;
+        case 16: return ELEM_S;
+        case 9:  return ELEM_F;
+        case 17: return ELEM_CL;
+        case 30: return ELEM_ZN;
+        case 29: return ELEM_CU;
+        case 26: return ELEM_FE;
+        case 27: return ELEM_CO;
+        case 28: return ELEM_NI;
+        case 25: return ELEM_MN;
+        case 13: return ELEM_AL;
+        case 24: return ELEM_CR;
+        case 40: return ELEM_ZR;
+        case 22: return ELEM_TI;
+        case 23: return ELEM_V;
+        default: return (Z >= 1 && Z <= 103) ? (100 + Z) : -1;
+    }
 }
 
 inline int get_atomic_number(int elem) {
@@ -133,8 +233,24 @@ inline int get_atomic_number(int elem) {
         case ELEM_ZR: return 40;
         case ELEM_TI: return 22;
         case ELEM_V:  return 23;
-        default:      return 0;
+        default:      return (elem >= 101 && elem <= 203) ? (elem - 100) : 0;
     }
+}
+
+// UFF parameters (Rappe et al. JACS 1992): eps in Kelvin, sigma in Angstrom
+inline UffParam get_uff_param(int elem) {
+    int Z = get_atomic_number(elem);
+    return (Z > 0) ? get_uff_param_by_Z(Z) : UffParam{0.0, 1.0};
+}
+
+inline double get_atomic_mass(int elem) {
+    int Z = get_atomic_number(elem);
+    return (Z > 0) ? get_atomic_mass_by_Z(Z) : 0.0;
+}
+
+inline int element_from_symbol(const std::string& sym) {
+    int Z = atomic_number_from_symbol(sym);
+    return (Z > 0) ? atomic_number_to_elem(Z) : -1;
 }
 
 // REPEAT partial atomic charges for Mg-MOF-74 (exact sum = 0.000000 e)
@@ -332,12 +448,14 @@ struct FugacityResult {
     double f_Pa;
 };
 
-// Peng-Robinson EOS for CO2: computes compressibility factor Z and fugacity f
-inline FugacityResult compute_co2_fugacity_pr(double T_K, double P_bar) {
+// Generic pure-component Peng-Robinson EOS: computes compressibility factor Z and fugacity f
+inline FugacityResult compute_pure_fugacity_pr(
+    double T_K, double P_bar, double Tc, double Pc, double omega) {
+    if (Tc <= 0.0 || Pc <= 0.0 || P_bar <= 0.0) {
+        FugacityResult res{P_bar, 1.0, 1.0, P_bar, P_bar * 1.0e5};
+        return res;
+    }
     constexpr double R_BAR_L = 0.08314462618; // bar * L / (mol * K)
-    constexpr double Tc = 304.1282;
-    constexpr double Pc = 73.773;
-    constexpr double omega = 0.22394;
 
     double Tr = T_K / Tc;
     double kappa = 0.37464 + 1.54226 * omega - 0.26992 * omega * omega;
@@ -402,6 +520,10 @@ inline FugacityResult compute_co2_fugacity_pr(double T_K, double P_bar) {
     res.f_bar = best_phi * P_bar;
     res.f_Pa = res.f_bar * 1.0e5;
     return res;
+}
+
+inline FugacityResult compute_co2_fugacity_pr(double T_K, double P_bar) {
+    return compute_pure_fugacity_pr(T_K, P_bar, 304.1282, 73.773, 0.22394);
 }
 
 struct BinaryFugacityResult {

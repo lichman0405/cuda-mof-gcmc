@@ -24,6 +24,8 @@ from nested_mc_engine import (
     run_nested_mc,
     verify_proposer_target_consistency,
 )
+from guests import load_guest
+from qeq_charges import extract_framework_for_proposer
 
 PROPOSER_MAP = {
     "uff": (0, 0),       # Generic UFF + REPEAT (0 charge supported) + TraPPE CO2
@@ -38,14 +40,19 @@ def parse_args():
     p.add_argument("--supercell", nargs=3, type=int, default=[1, 1, 2], help="Supercell replicas na nb nc")
     p.add_argument("--temp", type=float, default=298.0, help="Temperature in Kelvin")
     p.add_argument("--pressures", nargs="+", type=float, required=True, help="Pressures in bar")
+    p.add_argument("--guest", default="co2", help="Rigid guest preset (co2, ch4, n2, h2, ar, h2o, nh3)")
+    p.add_argument("--guest-json", default="", help="Optional custom rigid guest JSON path")
     p.add_argument("--proposer", choices=["uff", "pol3site", "mercado"], default="mercado", help="Inner GPU classical proposer")
+    p.add_argument("--charge-mode", choices=["auto", "cif", "qeq", "zero"], default="auto", help="Inner framework charge mode")
     p.add_argument("--model", default="medium", help="MACE foundation model name or checkpoint path")
     p.add_argument("--dispersion", choices=["on", "off"], default="on", help="Enable TorchDFTD3 D3(BJ)")
     p.add_argument("--xc", default="pbe", help="D3(BJ) functional parameter set (e.g. pbe, r2scan)")
     p.add_argument("--device", default="cuda", help="PyTorch MLIP device")
-    p.add_argument("--grid-dims", nargs=3, type=int, default=[256, 256, 72], help="3D tricubic grid dims")
+    p.add_argument("--mace-chunk", type=int, default=None, help="Micro-batch size for MACE forward (auto by VRAM if omitted)")
+    p.add_argument("--grid-dims", nargs=3, type=int, default=None, help="3D tricubic grid dims (auto from --grid-spacing if omitted)")
+    p.add_argument("--grid-spacing", type=float, default=0.11, help="Target unit-cell grid spacing (Angstrom) for auto grid dims")
     p.add_argument("--boxes", type=int, default=4, help="Parallel simulation replicas")
-    p.add_argument("--max-mol", type=int, default=128, help="Max CO2 molecules per supercell")
+    p.add_argument("--max-mol", type=int, default=128, help="Max guest molecules per supercell")
     p.add_argument("--k-steps", type=int, default=25, help="Inner GPU GCMC steps per outer Nested MC cycle")
     p.add_argument("--eq-cycles", type=int, default=120, help="Outer equilibration cycles")
     p.add_argument("--prod-cycles", type=int, default=320, help="Outer production cycles")
@@ -57,6 +64,23 @@ def parse_args():
     p.add_argument("--out-json", required=True, help="Output JSON path")
     p.add_argument("--out-csv", default="", help="Optional summary CSV path")
     return p.parse_args()
+
+
+def compute_grid_dims(uc_atoms, grid_spacing: float = 0.11):
+    lengths = np.linalg.norm(np.array(uc_atoms.get_cell(), dtype=np.float64), axis=1)
+    dims = []
+    for L in lengths:
+        n = int(math.ceil(float(L) / float(grid_spacing)))
+        n = ((n + 7) // 8) * 8
+        dims.append(max(32, min(256, n)))
+    return tuple(dims)
+
+
+def parse_cuda_device_id(device_str: str) -> int:
+    s = str(device_str).strip().lower()
+    if s.startswith("cuda:"):
+        return int(s.split(":", 1)[1])
+    return 0
 
 
 def evaluate_convergence_diagnostics(res: dict) -> dict:
@@ -108,7 +132,8 @@ def save_outputs(out_json: Path, out_csv: Path | None, payload: dict):
             w.writerow([
                 "P_bar", "uptake_mmol_g", "uptake_sem_mmol_g", "Qst_kJ_mol", "Qst_sem_kJ_mol",
                 "delta_eps_kJ_mol", "outer_acc_rate", "prod_ins_acc", "prod_ins_att",
-                "prod_del_acc", "prod_del_att", "stationarity_drift_mmol_g", "elapsed_s", "converged"
+                "prod_del_acc", "prod_del_att", "stationarity_drift_mmol_g",
+                "tau_int_N", "ess_N", "ess_N_per_s", "elapsed_s", "converged"
             ])
             for pt in payload["points"]:
                 conv = pt.get("diagnostics", {}).get("converged", True)
@@ -117,6 +142,7 @@ def save_outputs(out_json: Path, out_csv: Path | None, payload: dict):
                     pt["Qst_kJ_mol"], pt["Qst_sem_kJ_mol"], pt["delta_eps_kJ_mol"],
                     pt["outer_acc_rate"], pt["prod_ins_acc"], pt["prod_ins_att"],
                     pt["prod_del_acc"], pt["prod_del_att"], pt["stationarity_drift_mmol_g"],
+                    pt.get("tau_int_N", 1.0), pt.get("ess_N", 0.0), pt.get("ess_N_per_s", 0.0),
                     pt["elapsed_s"], conv,
                 ])
         os.replace(tmp_csv, out_csv)
@@ -133,7 +159,8 @@ def _cif_matches(old_cif: str, new_cif: str) -> bool:
 
 
 def run_pressure_point(
-    cif_path: str,
+    fw_data: dict,
+    guest,
     supercell,
     T_K: float,
     P_bar: float,
@@ -151,9 +178,11 @@ def run_pressure_point(
     pilot_cycles: int = 60,
     shift_override=None,
     verify_consistency: bool = False,
+    device_id: int = 0,
 ):
-    prop = CudaGcmcProposer(
-        cif_path=cif_path,
+    prop = CudaGcmcProposer.from_atoms(
+        fw_data=fw_data,
+        guest=guest,
         supercell=tuple(supercell),
         T_K=T_K,
         pressure_bar=P_bar,
@@ -163,6 +192,7 @@ def run_pressure_point(
         n_boxes=n_boxes,
         max_mol=max_mol,
         seed=seed,
+        device_id=device_id,
     )
     if verify_consistency:
         cons = verify_proposer_target_consistency(prop, target)
@@ -181,12 +211,12 @@ def run_pressure_point(
         print(f"  [P={P_bar:.4g} bar] Override Shift={de_final:.2f} kJ/mol ({fug_mult:.2f}x inner f_ref)")
     elif shift_mode == "auto":
         prop.equilibrate(20000)
-        cal1_st = prop.get_accepted()
+        cal1_st = prop.get_accepted_quat()
         if np.mean([s["N"] for s in cal1_st]) < 4.0:
-            for boost in (-4.0, -8.0, -12.0):
+            for boost in (-4.0, -8.0, -12.0, -16.0):
                 prop.set_chem_pot_shift(boost)
                 prop.equilibrate(15000)
-                cal1_st = prop.get_accepted()
+                cal1_st = prop.get_accepted_quat()
                 if np.mean([s["N"] for s in cal1_st]) >= 4.0:
                     break
         cal1_u = target.eval_batch(cal1_st)
@@ -195,40 +225,68 @@ def run_pressure_point(
             for b in range(n_boxes) if cal1_st[b]["N"] > 0 and not cal1_u[b][1]
         ]
         # Cap initial classical positive shift to +2.0 kJ/mol to avoid starving inner proposals
-        de1 = float(max(-12.0, min(2.0, np.mean(diffs1)))) if diffs1 else 0.0
+        de1 = float(max(-24.0, min(2.0, np.mean(diffs1)))) if diffs1 else 0.0
         prop.set_chem_pot_shift(de1)
         prop.equilibrate(30000)
 
-        cal2_st = prop.get_accepted()
+        cal2_st = prop.get_accepted_quat()
         cal2_u = target.eval_batch(cal2_st)
         diffs2 = [
             float(((cal2_u[b][0] - cal2_st[b]["U_ref_K"]) * K_TO_KJMOL) / cal2_st[b]["N"])
             for b in range(n_boxes) if cal2_st[b]["N"] > 0 and not cal2_u[b][1]
         ]
-        de2 = float(max(-12.0, min(2.0, np.mean(diffs2)))) if diffs2 else de1
+        de2 = float(max(-24.0, min(2.0, np.mean(diffs2)))) if diffs2 else de1
         prop.set_chem_pot_shift(de2)
         prop.equilibrate(20000)
 
         if pilot_cycles > 0:
-            # Stage 3: brief target-ensemble pilot burn-in to refine chem-pot shift
-            _ = run_nested_mc(
-                prop, None,
-                k_steps=k_steps, eq_cycles=pilot_cycles, prod_cycles=0,
-                seed=seed + 5, log_every=pilot_cycles + 10,
-                batch_target_fn=target.eval_batch,
-            )
-            cal3_st = prop.get_accepted()
-            cal3_u = target.eval_batch(cal3_st)
-            diffs3 = [
-                float(((cal3_u[b][0] - cal3_st[b]["U_ref_K"]) * K_TO_KJMOL) / cal3_st[b]["N"])
-                for b in range(n_boxes) if cal3_st[b]["N"] > 0 and not cal3_u[b][1]
-            ]
-            if diffs3:
-                de_final = float(max(-12.0, min(4.0, 0.5 * de2 + 0.5 * float(np.mean(diffs3)))))
+            # Stage 3: two-step target-ensemble pilot burn-in without artificial 0.5 classical damping
+            if pilot_cycles >= 20:
+                p1 = pilot_cycles // 2
+                p2 = pilot_cycles - p1
+                _ = run_nested_mc(
+                    prop, None, k_steps=k_steps, eq_cycles=p1, prod_cycles=0,
+                    seed=seed + 5, log_every=p1 + 10, batch_target_fn=target.eval_batch,
+                )
+                cal3a_st = prop.get_accepted_quat()
+                cal3a_u = target.eval_batch(cal3a_st)
+                diffs3a = [
+                    float(((cal3a_u[b][0] - cal3a_st[b]["U_ref_K"]) * K_TO_KJMOL) / cal3a_st[b]["N"])
+                    for b in range(n_boxes) if cal3a_st[b]["N"] > 0 and not cal3a_u[b][1]
+                ]
+                de3a = float(max(-24.0, min(4.0, np.mean(diffs3a)))) if diffs3a else de2
+                prop.set_chem_pot_shift(de3a)
+                if abs(de3a - de2) > 1.0:
+                    prop.equilibrate(10000)
+                _ = run_nested_mc(
+                    prop, None, k_steps=k_steps, eq_cycles=p2, prod_cycles=0,
+                    seed=seed + 9, log_every=p2 + 10, batch_target_fn=target.eval_batch,
+                )
+                cal3b_st = prop.get_accepted_quat()
+                cal3b_u = target.eval_batch(cal3b_st)
+                diffs3b = [
+                    float(((cal3b_u[b][0] - cal3b_st[b]["U_ref_K"]) * K_TO_KJMOL) / cal3b_st[b]["N"])
+                    for b in range(n_boxes) if cal3b_st[b]["N"] > 0 and not cal3b_u[b][1]
+                ]
+                de_final = float(max(-24.0, min(4.0, np.mean(diffs3b)))) if diffs3b else de3a
+                prop.set_chem_pot_shift(de_final)
+                if abs(de_final - de3a) > 1.0:
+                    prop.equilibrate(10000)
             else:
-                de_final = de2
-            prop.set_chem_pot_shift(de_final)
-            prop.equilibrate(10000)
+                _ = run_nested_mc(
+                    prop, None, k_steps=k_steps, eq_cycles=pilot_cycles, prod_cycles=0,
+                    seed=seed + 5, log_every=pilot_cycles + 10, batch_target_fn=target.eval_batch,
+                )
+                cal3_st = prop.get_accepted_quat()
+                cal3_u = target.eval_batch(cal3_st)
+                diffs3 = [
+                    float(((cal3_u[b][0] - cal3_st[b]["U_ref_K"]) * K_TO_KJMOL) / cal3_st[b]["N"])
+                    for b in range(n_boxes) if cal3_st[b]["N"] > 0 and not cal3_u[b][1]
+                ]
+                de_final = float(max(-24.0, min(4.0, np.mean(diffs3)))) if diffs3 else de2
+                prop.set_chem_pot_shift(de_final)
+                prop.equilibrate(10000)
+
             fug_mult = math.exp(-de_final / (K_TO_KJMOL * T_K))
             print(
                 f"  [P={P_bar:.4g} bar] Shift Stage1={de1:.2f} -> Stage2={de2:.2f} -> "
@@ -242,7 +300,7 @@ def run_pressure_point(
         de_final = 0.0
         prop.equilibrate(30000)
 
-    warm_st = prop.get_accepted()
+    warm_st = prop.get_accepted_quat()
     print(f"  [P={P_bar:.4g} bar] Warm-start N={[s['N'] for s in warm_st]} ({[round(s['N']*conv_mmol_g, 2) for s in warm_st]} mmol/g)")
 
     target.n_evals = 0
@@ -285,12 +343,15 @@ def run_pressure_point(
         f"Fluc Qst={res['Qst_kJ_mol']:.2f} +- {res['Qst_sem_kJ_mol']:.2f} | "
         f"Molar Qst={res['mean_molar_qst_kJ_mol']:.2f} +- {res['mean_molar_qst_sem_kJ_mol']:.2f} kJ/mol | "
         f"Ins={res['prod_ins_acc']}/{res['prod_ins_att']} Del={res['prod_del_acc']}/{res['prod_del_att']} | "
-        f"Acc={res['outer_acc_rate']*100:.1f}% | |drift|={drift:.3f} | conv={diag['converged']} | {res['elapsed_s']:.1f}s"
+        f"Acc={res['outer_acc_rate']*100:.1f}% | tauN={res['tau_int_N']:.1f} ESS/s={res['ess_N_per_s']:.2f} | "
+        f"|drift|={drift:.3f} | conv={diag['converged']} | {res['elapsed_s']:.1f}s"
     )
     if not diag["converged"]:
         for msg in diag["warnings"]:
             print(f"  [DIAG WARNING] P={P_bar:.4g} bar: {msg}")
     prop.close()
+    if getattr(target, "device", None) is not None and target.device.type == "cuda":
+        target.torch.cuda.empty_cache()
     return res
 
 
@@ -301,9 +362,19 @@ def main():
     out_json = Path(args.out_json)
     out_csv = Path(args.out_csv) if args.out_csv else None
 
+    guest = load_guest(name=args.guest, guest_json=args.guest_json, proposer=args.proposer)
+    guest_label = Path(args.guest_json).stem if args.guest_json else args.guest.strip().lower()
+    if ff_mode == 1 and guest.formula != "CO2":
+        raise ValueError(f"--proposer mercado only supports CO2; use --proposer uff for '{guest.name}'.")
+
+    fw_data = extract_framework_for_proposer(args.cif, charge_mode=args.charge_mode)
+    grid_dims = tuple(args.grid_dims) if args.grid_dims is not None else compute_grid_dims(fw_data["uc"], args.grid_spacing)
+    device_id = parse_cuda_device_id(args.device)
+
     print(
         f"=== Hybrid GPU-GCMC + MLIP Engine ===\n"
         f"  CIF={args.cif} supercell={args.supercell} T={args.temp} K Pressures={args.pressures}\n"
+        f"  Guest={guest.name} ({guest.formula}, {len(guest.sites)} sites) | Grid={grid_dims} | Charges={fw_data['charge_source']}\n"
         f"  Proposer={args.proposer} (ff={ff_mode}, pol={pol_mode}) | MLIP={args.model} (dispersion={use_disp}, xc={args.xc})"
     )
 
@@ -311,6 +382,9 @@ def main():
         "cif": str(args.cif),
         "supercell": list(args.supercell),
         "T_K": float(args.temp),
+        "guest": guest_label,
+        "charge_mode": args.charge_mode,
+        "charge_source": fw_data["charge_source"],
         "proposer": args.proposer,
         "model": args.model,
         "dispersion": use_disp,
@@ -327,6 +401,8 @@ def main():
             mismatches.append(f"supercell: {existing.get('supercell')} != {list(args.supercell)}")
         if not math.isclose(float(existing.get("T_K", -1.0)), float(args.temp), rel_tol=1e-6, abs_tol=1e-6):
             mismatches.append(f"T_K: {existing.get('T_K')} != {args.temp}")
+        if existing.get("guest", guest_label) != guest_label:
+            mismatches.append(f"guest: {existing.get('guest')} != {guest_label}")
         if existing.get("proposer") != args.proposer:
             mismatches.append(f"proposer: {existing.get('proposer')} != {args.proposer}")
         if existing.get("model") != args.model:
@@ -360,19 +436,23 @@ def main():
             device=args.device,
             dispersion=use_disp,
             dispersion_xc=args.xc,
+            guest=guest,
+            mace_chunk=args.mace_chunk,
+            uc_atoms=fw_data["uc"],
         )
 
         consistency_checked = False
         for i, p_bar in pending:
             print(f"\n--- Pressure Point {i+1}/{len(args.pressures)}: {p_bar} bar ---")
             pt = run_pressure_point(
-                cif_path=args.cif,
+                fw_data=fw_data,
+                guest=guest,
                 supercell=args.supercell,
                 T_K=args.temp,
                 P_bar=p_bar,
                 ff_mode=ff_mode,
                 pol_mode=pol_mode,
-                grid_dims=args.grid_dims,
+                grid_dims=grid_dims,
                 n_boxes=args.boxes,
                 max_mol=args.max_mol,
                 k_steps=args.k_steps,
@@ -384,6 +464,7 @@ def main():
                 pilot_cycles=args.pilot_cycles,
                 shift_override=args.shift_override,
                 verify_consistency=(not consistency_checked),
+                device_id=device_id,
             )
             consistency_checked = True
             payload["points"].append(pt)

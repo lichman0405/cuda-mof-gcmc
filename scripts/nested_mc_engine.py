@@ -31,6 +31,16 @@ def _register_dll_dirs():
                 pass
 
 
+def quat_rotate_batch(qw, qx, qy, qz, local_xyz: np.ndarray) -> np.ndarray:
+    """Rotate local_xyz (M, 3) by N unit quaternions -> (N, M, 3)."""
+    if len(qw) == 0:
+        return np.zeros((0, local_xyz.shape[0], 3), dtype=np.float64)
+    qxyz = np.stack([qx, qy, qz], axis=1)[:, None, :]  # (N, 1, 3)
+    v = local_xyz[None, :, :]  # (1, M, 3)
+    t = 2.0 * np.cross(qxyz, v)
+    return v + np.asarray(qw, dtype=np.float64)[:, None, None] * t + np.cross(qxyz, t)
+
+
 class CudaGcmcProposer:
     """Zero-I/O ctypes wrapper around build/mof_gcmc_proposer.dll."""
 
@@ -69,7 +79,78 @@ class CudaGcmcProposer:
         )
         if not self.handle:
             raise RuntimeError("proposer_create returned NULL")
+        self._init_after_handle()
 
+    @classmethod
+    def from_atoms(
+        cls,
+        fw_data: dict,
+        guest,
+        supercell=(1, 1, 2),
+        T_K: float = 298.0,
+        pressure_bar: float = 0.15,
+        ff_mode: int = 0,
+        pol_mode: int = 0,
+        grid_dims=(256, 256, 72),
+        n_boxes: int = 1,
+        max_mol: int = 128,
+        seed: int = 20261123,
+        device_id: int = 0,
+    ):
+        obj = cls.__new__(cls)
+        _register_dll_dirs()
+        dll_path = BUILD / "mof_gcmc_proposer.dll"
+        if not dll_path.exists():
+            raise FileNotFoundError(f"Missing {dll_path}. Run `cmd /c build.bat proposer` first.")
+        obj.lib = ctypes.CDLL(str(dll_path))
+        obj._bind()
+        rc = obj.lib.proposer_set_device(int(device_id))
+        if rc != 0:
+            raise RuntimeError(f"proposer_set_device({device_id}) failed with code {rc}")
+
+        obj.supercell = tuple(int(x) for x in supercell)
+        obj.n_boxes = int(n_boxes)
+        obj.max_mol = int(min(256, max(16, max_mol)))
+        obj.T_K = float(T_K)
+        obj.delta_eps_K = 0.0
+
+        H_u = np.ascontiguousarray(fw_data["H_unit_cols"], dtype=np.float64).reshape(9)
+        frac = np.ascontiguousarray(fw_data["frac"], dtype=np.float64).reshape(-1)
+        Z_arr = np.ascontiguousarray(fw_data["Z"], dtype=np.int32).reshape(-1)
+        q_arr = np.ascontiguousarray(fw_data["charges"], dtype=np.float64).reshape(-1)
+        tid_arr = np.ascontiguousarray(fw_data["type_ids"], dtype=np.int32).reshape(-1)
+        n_fw = int(len(Z_arr))
+
+        g = guest.to_c_arrays()
+        obj.handle = obj.lib.proposer_create_from_data(
+            H_u.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            int(supercell[0]), int(supercell[1]), int(supercell[2]),
+            n_fw,
+            frac.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            Z_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            q_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            tid_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            int(g["n_sites"]),
+            g["lxyz"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            g["q"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            g["eps"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            g["sig"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            g["lj_type"].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            float(g["Tc_K"]),
+            float(g["Pc_bar"]),
+            float(g["omega"]),
+            int(g["is_isotropic"]),
+            float(T_K), float(pressure_bar),
+            int(ff_mode), int(pol_mode),
+            int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]),
+            obj.n_boxes, obj.max_mol, int(seed),
+        )
+        if not obj.handle:
+            raise RuntimeError("proposer_create_from_data returned NULL")
+        obj._init_after_handle()
+        return obj
+
+    def _init_after_handle(self):
         self.fw_mass_gmol = float(self.lib.proposer_get_framework_mass(self.handle))
         self.f_Pa = float(self.lib.proposer_get_fugacity_Pa(self.handle))
         self.r_cut_gg = float(self.lib.proposer_get_rcut_gg(self.handle))
@@ -78,7 +159,6 @@ class CudaGcmcProposer:
         self.lib.proposer_get_cell_H(self.handle, h9)
         self.H_cols = np.array(list(h9), dtype=np.float64).reshape(3, 3)
 
-        # Reusable host transfer buffers
         nb, nm = self.n_boxes, self.n_boxes * self.max_mol
         self._buf_N = np.zeros(nb, dtype=np.int32)
         self._buf_U = np.zeros(nb, dtype=np.float64)
@@ -90,16 +170,36 @@ class CudaGcmcProposer:
         self._buf_ux = np.zeros(nm, dtype=np.float64)
         self._buf_uy = np.zeros(nm, dtype=np.float64)
         self._buf_uz = np.zeros(nm, dtype=np.float64)
+        self._buf_qw = np.zeros(nm, dtype=np.float64)
+        self._buf_qx = np.zeros(nm, dtype=np.float64)
+        self._buf_qy = np.zeros(nm, dtype=np.float64)
+        self._buf_qz = np.zeros(nm, dtype=np.float64)
         self._mask = np.zeros(nb, dtype=np.int32)
 
     def _bind(self):
         L = self.lib
+        L.proposer_set_device.argtypes = [ctypes.c_int]
+        L.proposer_set_device.restype = ctypes.c_int
         L.proposer_create.argtypes = [
             ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
             ctypes.c_double, ctypes.c_double, ctypes.c_int, ctypes.c_int,
             ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
         ]
         L.proposer_create.restype = ctypes.c_void_p
+        L.proposer_create_from_data.argtypes = [
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int),
+            ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int,
+            ctypes.c_double, ctypes.c_double, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+        ]
+        L.proposer_create_from_data.restype = ctypes.c_void_p
         L.proposer_destroy.argtypes = [ctypes.c_void_p]
         L.proposer_destroy.restype = None
         L.proposer_get_framework_mass.argtypes = [ctypes.c_void_p]
@@ -146,6 +246,35 @@ class CudaGcmcProposer:
             ctypes.POINTER(ctypes.c_int),
         ]
         L.proposer_eval_energy.restype = ctypes.c_double
+        L.proposer_propose_k_quat.argtypes = [
+            ctypes.c_void_p, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ]
+        L.proposer_propose_k_quat.restype = ctypes.c_int
+        L.proposer_get_accepted_quat.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ]
+        L.proposer_get_accepted_quat.restype = ctypes.c_int
+        L.proposer_set_accepted_quat.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ]
+        L.proposer_set_accepted_quat.restype = ctypes.c_int
+        L.proposer_eval_energy_quat.argtypes = [
+            ctypes.c_void_p, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        L.proposer_eval_energy_quat.restype = ctypes.c_double
         L.proposer_run_direct_benchmark.argtypes = [
             ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
@@ -253,6 +382,8 @@ class CudaGcmcProposer:
         n = int(state["N"])
         if n == 0:
             return 0.0, False
+        if "qw" in state:
+            return self.eval_energy_quat(state)
         ov = ctypes.c_int(0)
         u = self.lib.proposer_eval_energy(
             self.handle, n,
@@ -262,6 +393,118 @@ class CudaGcmcProposer:
             state["ux"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             state["uy"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             state["uz"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            ctypes.byref(ov),
+        )
+        return float(u), bool(ov.value != 0)
+
+    def _unpack_quat(self, include_dU: bool):
+        boxes = []
+        for b in range(self.n_boxes):
+            n = int(self._buf_N[b])
+            s = b * self.max_mol
+            e = s + n
+            boxes.append({
+                "N": n,
+                "U_ref_K": float(self._buf_U[b]),
+                "dU_ref_K": float(self._buf_dU[b]) if include_dU else 0.0,
+                "inner_acc": int(self._buf_acc[b]) if include_dU else 0,
+                "cx": self._buf_cx[s:e].copy(),
+                "cy": self._buf_cy[s:e].copy(),
+                "cz": self._buf_cz[s:e].copy(),
+                "qw": self._buf_qw[s:e].copy(),
+                "qx": self._buf_qx[s:e].copy(),
+                "qy": self._buf_qy[s:e].copy(),
+                "qz": self._buf_qz[s:e].copy(),
+            })
+        return boxes
+
+    def get_accepted_quat(self):
+        rc = self.lib.proposer_get_accepted_quat(
+            self.handle,
+            self._buf_N.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._buf_U.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_cx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_cy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_cz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qw.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        )
+        if rc != 0:
+            raise RuntimeError(f"proposer_get_accepted_quat failed with code {rc}")
+        return self._unpack_quat(False)
+
+    def set_accepted_quat(self, states):
+        if len(states) != self.n_boxes:
+            raise ValueError(f"Expected {self.n_boxes} box states, got {len(states)}")
+        self._buf_cx.fill(0.0)
+        self._buf_cy.fill(0.0)
+        self._buf_cz.fill(0.0)
+        self._buf_qw.fill(1.0)
+        self._buf_qx.fill(0.0)
+        self._buf_qy.fill(0.0)
+        self._buf_qz.fill(0.0)
+        for b, st in enumerate(states):
+            n = int(st["N"])
+            self._buf_N[b] = n
+            if n > 0:
+                s = b * self.max_mol
+                e = s + n
+                self._buf_cx[s:e] = np.asarray(st["cx"], dtype=np.float64)
+                self._buf_cy[s:e] = np.asarray(st["cy"], dtype=np.float64)
+                self._buf_cz[s:e] = np.asarray(st["cz"], dtype=np.float64)
+                self._buf_qw[s:e] = np.asarray(st["qw"], dtype=np.float64)
+                self._buf_qx[s:e] = np.asarray(st["qx"], dtype=np.float64)
+                self._buf_qy[s:e] = np.asarray(st["qy"], dtype=np.float64)
+                self._buf_qz[s:e] = np.asarray(st["qz"], dtype=np.float64)
+        rc = self.lib.proposer_set_accepted_quat(
+            self.handle,
+            self._buf_N.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._buf_cx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_cy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_cz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qw.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        )
+        if rc != 0:
+            raise RuntimeError(f"proposer_set_accepted_quat failed with code {rc}")
+
+    def propose_k_quat(self, k_steps: int):
+        rc = self.lib.proposer_propose_k_quat(
+            self.handle, int(k_steps),
+            self._buf_N.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._buf_U.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_dU.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_acc.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            self._buf_cx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_cy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_cz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qw.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            self._buf_qz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        )
+        if rc != 0:
+            raise RuntimeError(f"proposer_propose_k_quat failed with code {rc}")
+        return self._unpack_quat(True)
+
+    def eval_energy_quat(self, state):
+        n = int(state["N"])
+        if n == 0:
+            return 0.0, False
+        ov = ctypes.c_int(0)
+        u = self.lib.proposer_eval_energy_quat(
+            self.handle, n,
+            np.asarray(state["cx"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            np.asarray(state["cy"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            np.asarray(state["cz"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            np.asarray(state["qw"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            np.asarray(state["qx"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            np.asarray(state["qy"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            np.asarray(state["qz"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             ctypes.byref(ov),
         )
         return float(u), bool(ov.value != 0)
@@ -317,7 +560,16 @@ class MaceD3Target:
             return 0.0, False
         bond = 1.160
         cx, cy, cz = state["cx"], state["cy"], state["cz"]
-        ux, uy, uz = state["ux"], state["uy"], state["uz"]
+        if "qw" in state and "ux" not in state:
+            qw = np.asarray(state["qw"], dtype=np.float64)
+            qx = np.asarray(state["qx"], dtype=np.float64)
+            qy = np.asarray(state["qy"], dtype=np.float64)
+            qz = np.asarray(state["qz"], dtype=np.float64)
+            ux = 1.0 - 2.0 * (qy * qy + qz * qz)
+            uy = 2.0 * (qx * qy + qw * qz)
+            uz = 2.0 * (qx * qz - qw * qy)
+        else:
+            ux, uy, uz = state["ux"], state["uy"], state["uz"]
         guest_pos = np.empty((3 * n, 3), dtype=np.float64)
         for i in range(n):
             c = np.array([cx[i], cy[i], cz[i]], dtype=np.float64)
@@ -335,15 +587,27 @@ class MaceD3Target:
 
 
 class FastMaceD3Target:
-    """Fast batched energy-only MACE-MP-0 + exact GPU-edge DFT-D3(BJ) evaluator."""
+    """Fast batched energy-only MACE + exact GPU-edge DFT-D3(BJ) evaluator for any rigid guest."""
 
-    def __init__(self, cif_path: str, supercell=(1, 1, 2), model="medium", device="cuda", dispersion: bool = True, dispersion_xc: str = "pbe"):
+    def __init__(
+        self,
+        cif_path: str,
+        supercell=(1, 1, 2),
+        model="medium",
+        device="cuda",
+        dispersion: bool = True,
+        dispersion_xc: str = "pbe",
+        guest=None,
+        mace_chunk: int = None,
+        uc_atoms=None,
+    ):
         import torch
         from ase import Atoms
         from ase.io import read as ase_read
         from mace.calculators import mace_mp
         from mace import data as mace_data
         from mace.tools import torch_geometric, torch_tools
+        from guests import load_guest
 
         self.torch = torch
         self.Atoms = Atoms
@@ -353,11 +617,29 @@ class FastMaceD3Target:
         self.device = torch.device(device)
         self.use_dispersion = bool(dispersion)
         self.dispersion_xc = str(dispersion_xc)
+        self.guest = load_guest("co2") if guest is None else guest
+        self.guest_local_pos = self.guest.real_local_positions()
+        self.guest_symbols_unit = [s.symbol for s in self.guest.real_sites()]
+        self.guest_n_real = len(self.guest_symbols_unit)
 
-        uc = ase_read(str(cif_path))
+        uc = ase_read(str(cif_path)) if uc_atoms is None else uc_atoms.copy()
         self.uc = uc
         self.fw = uc.repeat(tuple(supercell))
         self.n_fw = len(self.fw)
+
+        if mace_chunk is not None:
+            self.default_mace_chunk = max(1, int(mace_chunk))
+        elif self.device.type == "cuda":
+            tot_gb = torch.cuda.get_device_properties(self.device).total_memory / 1e9
+            if tot_gb >= 20.0 and self.n_fw < 700:
+                self.default_mace_chunk = 4
+            elif self.n_fw >= 550:
+                self.default_mace_chunk = 1
+            else:
+                self.default_mace_chunk = 2
+        else:
+            self.default_mace_chunk = 1 if self.n_fw >= 550 else 2
+
         calc = mace_mp(
             model=model, dispersion=self.use_dispersion, dispersion_xc=self.dispersion_xc,
             default_dtype="float32", device=device
@@ -394,19 +676,18 @@ class FastMaceD3Target:
             self.fw_pos_t = torch.tensor(self.fw.get_positions(), device=self.device, dtype=torch.float32)
             self.fw_Z_t = torch.tensor(self.fw.get_atomic_numbers(), device=self.device, dtype=torch.long)
             self.pbc_t = torch.tensor([True, True, True], device=self.device, dtype=torch.bool)
-            self.co2_Z_unit = torch.tensor([6, 8, 8], device=self.device, dtype=torch.long)
+            self.guest_Z_unit = torch.tensor(self.guest.real_atomic_numbers(), device=self.device, dtype=torch.long)
 
             self.fw_ei, self.fw_sp = self._pair_edges_chunked(
                 self.fw_pos_t, self.fw_pos_t, same_set=True, row_offset=0, col_offset=0
             )
 
-        # Reference isolated framework and isolated CO2 energies using identical fast evaluator
+        # Reference isolated framework and isolated guest energies using identical evaluator
         self.e_fw_eV = self._eval_raw_eV_batch([self.fw.copy()], [None])[0]
-        co2 = Atoms("CO2", positions=[[0.0, 0.0, 0.0], [1.16, 0.0, 0.0], [-1.16, 0.0, 0.0]])
-        co2.set_cell([30.0, 30.0, 30.0])
-        co2.set_pbc(True)
-        co2.calc = calc
-        self.e_co2_eV = float(co2.get_potential_energy())
+        g_iso = self.guest.to_ase_atoms(box_A=30.0)
+        g_iso.calc = calc
+        self.e_guest_eV = float(g_iso.get_potential_energy())
+        self.e_co2_eV = self.e_guest_eV
         self.n_evals = 0
 
     def _pair_edges_chunked(self, pos_row, pos_col, same_set: bool, row_offset: int, col_offset: int, shift_chunk: int = 16):
@@ -450,22 +731,22 @@ class FastMaceD3Target:
         n = int(state["N"])
         if n == 0:
             return np.zeros((0, 3), dtype=np.float64)
-        bond = 1.160
-        cx, cy, cz = state["cx"], state["cy"], state["cz"]
-        ux, uy, uz = state["ux"], state["uy"], state["uz"]
-        c = np.stack([cx, cy, cz], axis=1)
-        u = np.stack([ux, uy, uz], axis=1)
-        gp = np.empty((3 * n, 3), dtype=np.float64)
-        gp[0::3] = c
-        gp[1::3] = c + bond * u
-        gp[2::3] = c - bond * u
+        c = np.stack([state["cx"], state["cy"], state["cz"]], axis=1)
+        if "qw" in state:
+            offsets = quat_rotate_batch(
+                state["qw"], state["qx"], state["qy"], state["qz"], self.guest_local_pos
+            )
+        else:
+            u = np.stack([state["ux"], state["uy"], state["uz"]], axis=1)
+            offsets = u[:, None, :] * self.guest_local_pos[None, :, 0:1]
+        gp = (c[:, None, :] + offsets).reshape(n * self.guest_n_real, 3)
         return gp
 
     def _eval_raw_eV_batch(self, atoms_list, guest_pos_list, mace_chunk: int = None):
         if mace_chunk is None:
-            mace_chunk = 1 if self.n_fw >= 550 else 2
+            mace_chunk = self.default_mace_chunk
         torch = self.torch
-        # 1. Micro-batched MACE forward (no_grad, compute_force=False) to keep peak VRAM < 3.5 GB
+        # 1. Micro-batched MACE forward (no_grad, compute_force=False)
         graphs = []
         with self.torch_tools.default_dtype(self.mace_calc.default_dtype):
             for at in atoms_list:
@@ -488,9 +769,15 @@ class FastMaceD3Target:
                 e_mace_parts.append(em.detach().cpu().numpy().astype(np.float64))
         e_mace_np = np.concatenate(e_mace_parts, axis=0)
         if not self.use_dispersion:
+            if self.device.type == "cuda":
+                tot_mem = float(torch.cuda.get_device_properties(self.device).total_memory)
+                res_mem = float(torch.cuda.memory_reserved(self.device))
+                alloc_mem = float(torch.cuda.memory_allocated(self.device))
+                if res_mem > 0.50 * tot_mem or (res_mem > 3.5e9 and res_mem > 2.5 * alloc_mem):
+                    torch.cuda.empty_cache()
             return e_mace_np
 
-        # 2. Exact GPU PBE-D3(BJ) via cached fw-fw edges + vectorized dynamic edges
+        # 2. Exact GPU D3(BJ) via cached fw-fw edges + vectorized dynamic edges
         e_d3_np = np.zeros(len(atoms_list), dtype=np.float64)
         for g_idx, gp_np in enumerate(guest_pos_list):
             if gp_np is None or len(gp_np) == 0:
@@ -500,12 +787,11 @@ class FastMaceD3Target:
                 sp_tot = self.fw_sp
             else:
                 n_g = gp_np.shape[0]
-                n_mol = n_g // 3
+                n_mol = n_g // self.guest_n_real
                 g_pos_t = torch.tensor(gp_np, device=self.device, dtype=torch.float32)
-                g_Z_t = self.co2_Z_unit.repeat(n_mol)
+                g_Z_t = self.guest_Z_unit.repeat(n_mol)
                 Z_tot = torch.cat([self.fw_Z_t, g_Z_t], dim=0)
                 pos_tot = torch.cat([self.fw_pos_t, g_pos_t], dim=0)
-                # fw -> guest (and bidirectional transpose guest -> fw with negated shift!)
                 ei_fg, sp_fg = self._pair_edges_chunked(
                     self.fw_pos_t, g_pos_t, same_set=False, row_offset=0, col_offset=self.n_fw
                 )
@@ -522,6 +808,13 @@ class FastMaceD3Target:
                 )
             e_d3_np[g_idx] = float(ed[0].item())
 
+        if self.device.type == "cuda":
+            tot_mem = float(torch.cuda.get_device_properties(self.device).total_memory)
+            res_mem = float(torch.cuda.memory_reserved(self.device))
+            alloc_mem = float(torch.cuda.memory_allocated(self.device))
+            if res_mem > 0.50 * tot_mem or (res_mem > 3.5e9 and res_mem > 2.5 * alloc_mem):
+                torch.cuda.empty_cache()
+
         return e_mace_np + e_d3_np
 
     def eval_batch(self, states):
@@ -533,7 +826,7 @@ class FastMaceD3Target:
             if n == 0:
                 continue
             gp = self._guest_positions_from_state(st)
-            sys_at = self.fw.copy() + self.Atoms("CO2" * n, positions=gp)
+            sys_at = self.fw.copy() + self.Atoms(self.guest_symbols_unit * n, positions=gp)
             non_empty_idx.append(idx)
             atoms_list.append(sys_at)
             guest_pos_list.append(gp)
@@ -545,7 +838,7 @@ class FastMaceD3Target:
         self.n_evals += len(non_empty_idx)
         for k, idx in enumerate(non_empty_idx):
             n = int(states[idx]["N"])
-            u_int_K = (float(e_tot[k]) - self.e_fw_eV - n * self.e_co2_eV) * EV_TO_K
+            u_int_K = (float(e_tot[k]) - self.e_fw_eV - n * self.e_guest_eV) * EV_TO_K
             results[idx] = (u_int_K, False)
         return results
 
@@ -676,6 +969,63 @@ def compute_pooled_jackknife_qst(box_moments, T_K: float) -> dict:
     return {"Qst_kJ_mol": q_pooled, "Qst_sem_kJ_mol": sem_jack, "Qst_loo_kJ_mol": q_loo}
 
 
+def _integrated_autocorr_time(series_list) -> float:
+    """Pooled FFT integrated autocorrelation time tau_int >= 1.0 (Geyer initial positive cutoff)."""
+    valid = []
+    for arr in series_list:
+        x = np.asarray(arr, dtype=np.float64)
+        if len(x) >= 4 and np.var(x) > 1e-12:
+            valid.append(x - np.mean(x))
+    if not valid:
+        return 1.0
+    m = min(len(x) for x in valid)
+    n_fft = 1 << (2 * m - 1).bit_length()
+    acfs = []
+    for x in valid:
+        xm = x[:m]
+        f = np.fft.rfft(xm, n=n_fft)
+        c = np.fft.irfft(f * np.conjugate(f), n=n_fft)[:m]
+        c /= (np.arange(m, 0, -1, dtype=np.float64))
+        if c[0] > 1e-12:
+            acfs.append(c / c[0])
+    if not acfs:
+        return 1.0
+    rho = np.mean(np.stack(acfs, axis=0), axis=0)
+    tau = 1.0
+    for k in range(1, min(len(rho), m // 2)):
+        if rho[k] <= 0.0:
+            break
+        tau += 2.0 * float(rho[k]) * (1.0 - k / float(m))
+    return max(1.0, tau)
+
+
+def compute_ess_stats(prod_N_history, prod_U_history, elapsed_s: float) -> dict:
+    """Compute integrated autocorrelation time, ESS, and ESS/GPU-s from production traces."""
+    if not prod_N_history:
+        return {
+            "tau_int_N": 1.0, "ess_N": 0.0, "ess_N_per_s": 0.0,
+            "tau_int_U": 1.0, "ess_U": 0.0, "ess_U_per_s": 0.0,
+        }
+    n_arr = np.asarray(prod_N_history, dtype=np.float64)  # (prod_cycles, n_boxes)
+    u_arr = np.asarray(prod_U_history, dtype=np.float64)
+    n_cyc, n_b = n_arr.shape
+    n_tot = float(n_cyc * n_b)
+    dt = max(float(elapsed_s), 1e-6)
+
+    tau_n = _integrated_autocorr_time([n_arr[:, b] for b in range(n_b)])
+    tau_u = _integrated_autocorr_time([u_arr[:, b] for b in range(n_b)])
+    ess_n = max(1.0, min(n_tot, n_tot / tau_n))
+    ess_u = max(1.0, min(n_tot, n_tot / tau_u))
+    return {
+        "tau_int_N": float(tau_n),
+        "ess_N": float(ess_n),
+        "ess_N_per_s": float(ess_n / dt),
+        "tau_int_U": float(tau_u),
+        "ess_U": float(ess_u),
+        "ess_U_per_s": float(ess_u / dt),
+    }
+
+
 def run_nested_mc(
     proposer: CudaGcmcProposer,
     target_fn,
@@ -692,8 +1042,9 @@ def run_nested_mc(
     T_K = proposer.T_K
     delta_eps_K = float(getattr(proposer, "delta_eps_K", 0.0))
     conv_mmol_g = 1000.0 / proposer.fw_mass_gmol
+    use_quat = hasattr(proposer, "propose_k_quat") and hasattr(proposer, "get_accepted_quat")
 
-    curr = proposer.get_accepted()
+    curr = proposer.get_accepted_quat() if use_quat else proposer.get_accepted()
     U_tgt_curr = np.zeros(n_b, dtype=np.float64)
     U_ref_curr = np.zeros(n_b, dtype=np.float64)
     N_curr = np.zeros(n_b, dtype=np.int32)
@@ -725,10 +1076,12 @@ def run_nested_mc(
 
     trajectory = []
     box_N_history = []
+    prod_N_history = []
+    prod_U_history = []
     t0 = time.perf_counter()
 
     for cyc in range(total_cycles):
-        trials = proposer.propose_k(k_steps)
+        trials = proposer.propose_k_quat(k_steps) if use_quat else proposer.propose_k(k_steps)
         if batch_target_fn is not None:
             tri_evals = batch_target_fn(trials)
         else:
@@ -771,6 +1124,8 @@ def run_nested_mc(
         proposer.commit(mask)
 
         if cyc >= eq_cycles:
+            prod_N_history.append([int(x) for x in N_curr])
+            prod_U_history.append([float(U_tgt_curr[b] * K_TO_KJMOL) for b in range(n_b)])
             for b in range(n_b):
                 dn = float(N_curr[b])
                 du = float(U_tgt_curr[b])
@@ -844,20 +1199,27 @@ def run_nested_mc(
     mean_mq = float(np.mean(box_molar_qst))
     sem_mq = float(np.std(box_molar_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
 
-    final_acc = proposer.get_accepted()
-    final_states = [
-        {
+    ess_stats = compute_ess_stats(prod_N_history, prod_U_history, dt)
+    final_acc = proposer.get_accepted_quat() if use_quat else proposer.get_accepted()
+    final_states = []
+    for st in final_acc:
+        d_st = {
             "N": int(st["N"]),
             "U_ref_K": float(st["U_ref_K"]),
             "cx": st["cx"].tolist(),
             "cy": st["cy"].tolist(),
             "cz": st["cz"].tolist(),
-            "ux": st["ux"].tolist(),
-            "uy": st["uy"].tolist(),
-            "uz": st["uz"].tolist(),
         }
-        for st in final_acc
-    ]
+        if "qw" in st:
+            d_st["qw"] = st["qw"].tolist()
+            d_st["qx"] = st["qx"].tolist()
+            d_st["qy"] = st["qy"].tolist()
+            d_st["qz"] = st["qz"].tolist()
+        else:
+            d_st["ux"] = st["ux"].tolist()
+            d_st["uy"] = st["uy"].tolist()
+            d_st["uz"] = st["uz"].tolist()
+        final_states.append(d_st)
 
     return {
         "n_boxes": n_b,
@@ -879,6 +1241,12 @@ def run_nested_mc(
         "mean_molar_binding_kJ_mol": mean_mb,
         "mean_molar_qst_kJ_mol": mean_mq,
         "mean_molar_qst_sem_kJ_mol": sem_mq,
+        "tau_int_N": ess_stats["tau_int_N"],
+        "ess_N": ess_stats["ess_N"],
+        "ess_N_per_s": ess_stats["ess_N_per_s"],
+        "tau_int_U": ess_stats["tau_int_U"],
+        "ess_U": ess_stats["ess_U"],
+        "ess_U_per_s": ess_stats["ess_U_per_s"],
         "outer_acc_rate": float(np.mean(acc_outer) / tot_denom),
         "prod_outer_acc_rate": float(np.mean(prod_acc_outer) / prod_denom) if prod_cycles > 0 else 0.0,
         "prod_ins_att": int(prod_ins_att),
@@ -888,6 +1256,8 @@ def run_nested_mc(
         "mean_inner_acc_per_burst": float(np.mean(inner_acc_tot) / tot_denom),
         "effective_mc_steps_per_target_eval": float(k_steps * np.mean(acc_outer) / tot_denom),
         "box_N_history": box_N_history,
+        "prod_N_history": prod_N_history,
+        "prod_U_history": prod_U_history,
         "trajectory": trajectory,
         "final_states": final_states,
     }

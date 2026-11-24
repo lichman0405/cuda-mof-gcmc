@@ -10,12 +10,41 @@
 
 extern "C" {
 
-// Create a GPU batched GCMC proposal / evaluation context.
+// Select active CUDA device for subsequent proposer calls on this host thread.
+PROPOSER_API int proposer_set_device(int device_id);
+
+// Create a GPU batched GCMC proposal / evaluation context from a CIF path (CO2 guest).
 // ff_mode : 0 = UFF + REPEAT (TraPPE CO2), 1 = Mercado 2016 DFT-FF (EPM2 CO2)
 // pol_mode: 0 = NonPol, 2 = Pol-3Site (1st-order framework E-field + Thole coupling)
 PROPOSER_API void* proposer_create(
     const char* cif_path,
     int sc_a, int sc_b, int sc_c,
+    double T_K, double pressure_bar,
+    int ff_mode, int pol_mode,
+    int nx, int ny, int nz,
+    int n_boxes, int max_mol,
+    uint64_t seed);
+
+// Universal memory-fed proposer constructor supporting arbitrary P1 frameworks and multi-site rigid guests.
+// H_unit_cols9: 3x3 row-major unit-cell matrix whose columns are lattice vectors A, B, C (Angstrom).
+PROPOSER_API void* proposer_create_from_data(
+    const double H_unit_cols9[9],
+    int sc_a, int sc_b, int sc_c,
+    int n_fw_unit,
+    const double* fw_frac_3n,
+    const int* fw_Z_n,
+    const double* fw_q_n,
+    const int* fw_type_id_n,
+    int n_guest_sites,
+    const double* site_lxyz_3s,
+    const double* site_q_s,
+    const double* site_eps_s,
+    const double* site_sig_s,
+    const int* site_lj_type_s,
+    double guest_Tc,
+    double guest_Pc,
+    double guest_omega,
+    int guest_is_isotropic,
     double T_K, double pressure_bar,
     int ff_mode, int pol_mode,
     int nx, int ny, int nz,
@@ -63,6 +92,31 @@ PROPOSER_API double proposer_eval_energy(
     void* handle, int N,
     const double* cx, const double* cy, const double* cz,
     const double* ux, const double* uy, const double* uz,
+    int* out_overlap);
+
+// Quaternion APIs for arbitrary 3D rigid-body guests.
+PROPOSER_API int proposer_propose_k_quat(
+    void* handle, int k_steps,
+    int* out_N, double* out_U_ref_K, double* out_dU_ref_K, int* out_inner_acc,
+    double* out_cx, double* out_cy, double* out_cz,
+    double* out_qw, double* out_qx, double* out_qy, double* out_qz);
+
+PROPOSER_API int proposer_get_accepted_quat(
+    void* handle,
+    int* out_N, double* out_U_ref_K,
+    double* out_cx, double* out_cy, double* out_cz,
+    double* out_qw, double* out_qx, double* out_qy, double* out_qz);
+
+PROPOSER_API int proposer_set_accepted_quat(
+    void* handle,
+    const int* in_N,
+    const double* in_cx, const double* in_cy, const double* in_cz,
+    const double* in_qw, const double* in_qx, const double* in_qy, const double* in_qz);
+
+PROPOSER_API double proposer_eval_energy_quat(
+    void* handle, int N,
+    const double* cx, const double* cy, const double* cz,
+    const double* qw, const double* qx, const double* qy, const double* qz,
     int* out_overlap);
 
 // Run direct classical GPU GCMC benchmark (same grids/supercell/r_cut_gg) for null-bias verification.

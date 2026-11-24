@@ -342,9 +342,19 @@ bool load_cif_framework(
     }
 
     if (std::fabs(info_out.total_charge_e) > 1.0e-5) {
-        std::fprintf(stderr, "Error: non-neutral framework charge sum = %.8f e\n",
-                     info_out.total_charge_e);
-        return false;
+        if (std::fabs(info_out.total_charge_e) < 1.0e-2 && !unit_atoms_out.empty()) {
+            double corr = -info_out.total_charge_e / (double)unit_atoms_out.size();
+            std::fprintf(stderr, "Notice: CIF %s residual net charge = %.6e e (< 1e-2 e); neutralizing evenly.\n",
+                         cif_path.c_str(), info_out.total_charge_e);
+            for (auto& fa : unit_atoms_out) {
+                fa.q += corr;
+            }
+            info_out.total_charge_e = 0.0;
+        } else {
+            std::fprintf(stderr, "Error: non-neutral framework charge sum = %.8f e\n",
+                         info_out.total_charge_e);
+            return false;
+        }
     }
     return true;
 }

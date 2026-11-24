@@ -126,6 +126,7 @@ __global__ void build_unified_grids_kernel(
     MercadoSitePairs merc_tbl,
     int ff_mode,
     int nx, int ny, int nz,
+    int max_na, int max_nb, int max_nc,
     double r_cut_A, double ewald_alpha,
     float* __restrict__ U_lj0,
     float* __restrict__ U_lj1,
@@ -178,9 +179,9 @@ __global__ void build_unified_grids_kernel(
         double dsb = sb - (double)at.sb; dsb -= round(dsb);
         double dsc = sc - (double)at.sc; dsc -= round(dsc);
 
-        for (int na = -1; na <= 1; ++na) {
-            for (int nb = -1; nb <= 1; ++nb) {
-                for (int nc = -2; nc <= 2; ++nc) {
+        for (int na = -max_na; na <= max_na; ++na) {
+            for (int nb = -max_nb; nb <= max_nb; ++nb) {
+                for (int nc = -max_nc; nc <= max_nc; ++nc) {
                     double dx, dy, dz;
                     cell.unit_frac_to_cart(dsa + na, dsb + nb, dsc + nc, dx, dy, dz);
                     double r2 = dx * dx + dy * dy + dz * dz;
@@ -301,6 +302,7 @@ void eval_unified_direct(
     const std::vector<UnifiedKVec>& kvecs,
     const MercadoSitePairs& merc_tbl,
     int ff_mode,
+    int max_na, int max_nb, int max_nc,
     double sa, double sb, double sc,
     double r_cut_A, double alpha,
     double u_out[4], double& phi_out, double e_out[3]) {
@@ -331,9 +333,9 @@ void eval_unified_direct(
         double dsb = sb - (double)at.sb; dsb -= std::round(dsb);
         double dsc = sc - (double)at.sc; dsc -= std::round(dsc);
 
-        for (int na = -1; na <= 1; ++na) {
-            for (int nb = -1; nb <= 1; ++nb) {
-                for (int nc = -2; nc <= 2; ++nc) {
+        for (int na = -max_na; na <= max_na; ++na) {
+            for (int nb = -max_nb; nb <= max_nb; ++nb) {
+                for (int nc = -max_nc; nc <= max_nc; ++nc) {
                     double dx, dy, dz;
                     cell.unit_frac_to_cart(dsa + na, dsb + nb, dsc + nc, dx, dy, dz);
                     double r2 = dx * dx + dy * dy + dz * dz;
@@ -406,6 +408,10 @@ void build_unified_grids_gpu(
     MercadoSitePairs merc_tbl = build_mercado_pairs(r_cut_A);
     auto kvecs = build_unified_kvecs(cell, atoms, ewald_alpha, 2.6);
 
+    int max_na = std::max(1, (int)std::ceil(r_cut_A / std::max(1.0e-3, cell.perp_width_unit[0])) + 1);
+    int max_nb = std::max(1, (int)std::ceil(r_cut_A / std::max(1.0e-3, cell.perp_width_unit[1])) + 1);
+    int max_nc = std::max(1, (int)std::ceil(r_cut_A / std::max(1.0e-3, cell.perp_width_unit[2])) + 1);
+
     size_t total = (size_t)nx * (size_t)ny * (size_t)nz;
     size_t bytes = total * sizeof(float);
 
@@ -433,7 +439,7 @@ void build_unified_grids_gpu(
     int blocks = ((int)total + threads - 1) / threads;
     build_unified_grids_kernel<<<blocks, threads>>>(
         cell, d_atoms, (int)atoms.size(), d_kvecs, (int)kvecs.size(), merc_tbl, ff_mode,
-        nx, ny, nz, r_cut_A, ewald_alpha,
+        nx, ny, nz, max_na, max_nb, max_nc, r_cut_A, ewald_alpha,
         d_u[0], d_u[1], d_u[2], d_u[3], d_phi, d_ex, d_ey, d_ez);
     CUDA_CHECK(cudaGetLastError());
 
@@ -485,7 +491,7 @@ void build_unified_grids_gpu(
         if (bad) continue;
 
         double du[4], dphi, de[3];
-        eval_unified_direct(cell, atoms, kvecs_ref, merc_tbl, ff_mode, sa, sb, sc, r_cut_A, ref_alpha, du, dphi, de);
+        eval_unified_direct(cell, atoms, kvecs_ref, merc_tbl, ff_mode, max_na, max_nb, max_nc, sa, sb, sc, r_cut_A, ref_alpha, du, dphi, de);
         if (du[0] > 100.0 || du[1] > 100.0 || du[2] > 100.0 || du[3] > 100.0) continue;
 
         double tp = tricubic_periodic(h_phi.data(), nx, ny, nz, sa, sb, sc, false, 5.0e5f);
