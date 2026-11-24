@@ -78,16 +78,29 @@
 
 ---
 
-## 快速开始
+## 快速开始（Windows 单卡使用指南）
 
-### 环境要求
-- Windows 10/11 + NVIDIA CUDA Toolkit（`sm_120`, RTX 5070）+ MSVC（Visual Studio 2022 生成工具）
-- 可选（用于 MLIP Nested MC 与 pytest）：Python 3.11+（先按本地 CUDA 版本安装 PyTorch，再执行 `pip install -r requirements.txt`，详见 [requirements.txt](requirements.txt) 与 [pyproject.toml](pyproject.toml)）
+### 一键检测、缺啥装啥与编译自检（`fast_start.bat`）
 
-### 编译与运行
+在仓库根目录直接执行 [`fast_start.bat`](fast_start.bat)（内部调用 [`scripts/fast_start_win.ps1`](scripts/fast_start_win.ps1)）。脚本会自动检测你的 NVIDIA 显卡架构（`sm_XX`）、CUDA Toolkit（`nvcc`）、MSVC 编译环境（VS 2022 或 VS 2019）、Python 3.10+、带 CUDA 的 PyTorch 及依赖库——**缺什么装什么**（已装好的直接跳过），随后自动编译 [`build.bat`](build.bat) 并跑完快速自检：
 
 ```powershell
-# 默认编译核心目标（mof_gcmc_cli.exe + mof_gcmc_proposer.dll）；若需归档的旧版可执行文件可执行 `build.bat all`
+# 仅检查当前电脑缺哪些依赖，不执行安装和编译
+cmd /c fast_start.bat -CheckOnly
+
+# 自动补齐缺失依赖、编译核心 DLL/EXE，并运行 Pol-SCF + pytest 自检
+cmd /c fast_start.bat
+
+# 常用选项：强制重编 CUDA 并追加一次 MACE 端到端冒烟验证
+cmd /c fast_start.bat -Rebuild -SmokeMlip
+```
+
+### 手动准备与编译说明
+- Windows 10/11 + NVIDIA 显卡驱动 + CUDA Toolkit（[`build.bat`](build.bat) 会通过 `nvidia-smi` 自动识别 `CUDA_ARCH`，也可用 `set CUDA_ARCH=sm_89` 手动指定）+ MSVC（Visual Studio **2022** 或 **2019** 生成工具，自动探测）
+- MLIP 与 `pytest`：Python 3.10+（需先装带 CUDA 的 PyTorch，再执行 `pip install -r requirements.txt`，详见 [requirements.txt](requirements.txt) 与 [pyproject.toml](pyproject.toml)）
+
+```powershell
+# 编译核心目标（mof_gcmc_cli.exe + mof_gcmc_proposer.dll）；若需归档旧版可执行文件可执行 `build.bat all`
 cmd /c build.bat
 
 # 经典与极化统一 CLI 预设及回归校验
@@ -95,21 +108,58 @@ cmd /c build.bat
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_uff.json
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_fluegas_298K_pol3site.json
 .\.venv-mlip\Scripts\python.exe -u scripts\verify_cli.py
-
-# Pytest 自动化回归套件（13 项经典 + 1 项 MLIP 一致性）
 .\.venv-mlip\Scripts\python.exe -m pytest -v
+```
 
-# 通用 MLIP Nested MC 示例（Mg-MOF-74 + CO2 / IRMOF-1 + CH4 自动 QEq）
+### 单卡运行指南（`run_mlip_gcmc.py`）
+
+```powershell
+# 任意刚性 MOF CIF + 内置气体（自动展开空间群并生成周期性 QEq 电荷）
 .\.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py `
-  --cif data\MgMOF-74.cif --pressures 0.01 0.05 0.15 `
-  --guest co2 --proposer mercado --model mace-matpes-r2scan-0 --dispersion on --xc r2scan `
-  --out-json build\mg_r2scan.json --out-csv build\mg_r2scan.csv
+  --cif path\to\your_mof.cif --supercell 1 1 1 --temp 298 --pressures 0.1 1.0 5.0 `
+  --guest ch4 --proposer uff --charge-mode auto `
+  --model medium --dispersion on --xc pbe `
+  --boxes 4 --k-steps 25 --pilot-cycles 60 --eq-cycles 120 --prod-cycles 320 `
+  --out-json build\my_mof_ch4.json --out-csv build\my_mof_ch4.csv
 
-.\.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py `
-  --cif data\IRMOF-1.cif --supercell 1 1 1 --pressures 5.0 `
-  --guest ch4 --proposer uff --charge-mode auto --model medium --dispersion on --xc pbe `
-  --out-json build\irmof1_ch4.json
+# 中途中断或追加压强点时，在原命令末尾加 --resume 即可跳过已完成的压强
+```
 
+| 参数 | 单卡怎么选 |
+| :--- | :--- |
+| `--supercell na nb nc` | 保证超胞三边垂直厚度 `>= 12 Å`（`MACE r_max=6 Å` 的两倍）：例如 `IRMOF-1`（`25.8 Å`）用 `1 1 1`，`Mg-MOF-74`（`c=6.9 Å`）用 `1 1 2`。 |
+| `--proposer` | 任意新 MOF/新气体一律用 **`uff`**；`mercado` **仅限** `Mg-MOF-74 + CO₂`。 |
+| `--charge-mode` | 默认 `auto`：CIF 带非零电荷就直接用（`Mg-MOF-74` 回退 `REPEAT`），无电荷则自动算周期性 QEq；`qeq` 强制重算，`zero` 置零。 |
+| `--guest` / `--guest-json` | 内置预设：`co2`、`ch4`、`n2`、`h2`、`ar`、`h2o`、`nh3`；自定义分子传 `--guest-json file.json`（最多 `12` 个位点）。 |
+| `--mace-chunk` | 不填时按显存自动选；`<= 12 GB` 显卡遇到骨架原子 `> 400` 的大超胞（如 `IRMOF-1 + CH₄`）建议设 `--mace-chunk 1` 防显存溢出。 |
+| `--model` / `--xc` | 通用推荐 `medium --dispersion on --xc pbe`；`Mg-MOF-74 + CO₂` 可用 `mace-matpes-r2scan-0 --dispersion on --xc r2scan`（注意该模型对甲烷存在过结合）。 |
+
+<details>
+<summary>自定义 <code>--guest-json</code> 格式与输出 CSV 结果列说明</summary>
+
+自定义刚体分子 JSON 示例（`Z = 0` 表示仅参与经典静电、不送入 MLIP 的无质量虚位点）：
+
+```json
+{
+  "name": "custom_co",
+  "formula": "CO",
+  "is_isotropic": false,
+  "Tc_K": 132.92,
+  "Pc_bar": 34.99,
+  "omega": 0.048,
+  "sites": [
+    {"symbol": "C", "Z": 6, "pos": [-0.646, 0.0, 0.0], "q": -0.24, "eps_K": 36.4, "sigma_A": 3.55},
+    {"symbol": "O", "Z": 8, "pos": [ 0.482, 0.0, 0.0], "q": -0.27, "eps_K": 51.0, "sigma_A": 2.95},
+    {"symbol": "X", "Z": 0, "pos": [ 0.000, 0.0, 0.0], "q":  0.51, "eps_K":  0.0, "sigma_A": 0.00}
+  ]
+}
+```
+
+`--out-csv` 主要指标：`uptake_mmol_g` ± `uptake_sem_mmol_g`（吸附量及标准误）、`Qst_kJ_mol` ± `Qst_sem_kJ_mol`（Pooled-Jackknife 吸附热）、`prod_ins_acc` / `prod_del_acc`（生产期净插入/删除成功次数，一般建议各 `>= 5`）、`tau_int_N`、`ess_N_per_s` 以及 `converged`（若为 `False` 会打印具体诊断提示，通常加大 `--eq-cycles` / `--prod-cycles` 即可）。
+
+</details>
+
+```powershell
 # 同卡 ESS / GPU-s 与 SJD_N / GPU-s 加速比对比基准（vs. Direct MLIP-GCMC）
 .\.venv-mlip\Scripts\python.exe -u scripts\benchmark_speedup.py
 ```
@@ -124,6 +174,8 @@ cmd /c build.bat
 
 ```text
 cuda-mof-gcmc/
+├── fast_start.bat  # Windows 一键检测、补齐依赖、编译与自检入口
+├── build.bat       # MSVC + CUDA 编译脚本（自动探测 VS2022/2019 与显卡 sm_XX）
 ├── pyproject.toml  # 项目打包配置与 pytest 标记（mlip, slow）
 ├── configs/        # mof_gcmc_cli.exe 预设配置（UFF、Mercado 2016、313K PSA、烟道气、Pol-SCF）
 ├── data/           # 晶体 CIF（Mg-MOF-74、Ni-MOF-74、Cu-BTC、IRMOF-1）、Mercado 力场与 NIST ISODB 实验表

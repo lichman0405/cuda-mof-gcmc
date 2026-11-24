@@ -78,38 +78,88 @@ Evaluated on the **same NVIDIA RTX 5070** starting from identical equilibrated M
 
 ---
 
-## Quickstart
+## Quickstart (Windows Single-GPU)
 
-### Prerequisites
-- Windows 10/11 + NVIDIA CUDA Toolkit (`sm_120`, RTX 5070) + MSVC (`Visual Studio 2022` Build Tools)
-- Optional (for MLIP Nested MC & pytest): Python 3.11+ (`pip install -r requirements.txt` after CUDA PyTorch; see [requirements.txt](requirements.txt) and [pyproject.toml](pyproject.toml))
+### One-Click Setup & Self-Check (`fast_start.bat`)
 
-### Build & Run
+Run [`fast_start.bat`](fast_start.bat) (wraps [`scripts/fast_start_win.ps1`](scripts/fast_start_win.ps1)) from the repo root. It detects your NVIDIA GPU compute capability (`sm_XX`), CUDA Toolkit (`nvcc`), MSVC Build Tools (VS 2022 or VS 2019), Python 3.10+, CUDA PyTorch, and required packages—installing only what is missing (`winget` / `pip`), compiling [`build.bat`](build.bat), and running quick self-checks:
 
 ```powershell
-# Default core targets (mof_gcmc_cli.exe + mof_gcmc_proposer.dll); use `build.bat all` for archived legacy binaries
+# Inspect environment only (no installs or builds)
+cmd /c fast_start.bat -CheckOnly
+
+# Auto-install any missing prerequisites, build core DLL/EXE, and run Pol-SCF + pytest
+cmd /c fast_start.bat
+
+# Optional flags: force clean CUDA rebuild, non-interactive install, or include live MACE smoke test
+cmd /c fast_start.bat -Rebuild -SmokeMlip
+```
+
+### Manual Prerequisites & Build
+- Windows 10/11 + NVIDIA Driver + CUDA Toolkit (`CUDA_ARCH` is auto-detected via `nvidia-smi`, or override with `set CUDA_ARCH=sm_89`) + MSVC (Visual Studio **2022** or **2019** Build Tools; [`build.bat`](build.bat) probes both)
+- Optional (for MLIP Nested MC & pytest): Python 3.10+ (install CUDA PyTorch first, then `pip install -r requirements.txt`; see [requirements.txt](requirements.txt) and [pyproject.toml](pyproject.toml))
+
+```powershell
+# Core targets (mof_gcmc_cli.exe + mof_gcmc_proposer.dll); `build.bat all` builds archived legacy binaries too
 cmd /c build.bat
 
-# Classical / Polarizable unified CLI presets & regression
+# Classical / Polarizable CLI presets & verification
 .\build\mof_gcmc_cli.exe --test-scf
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_uff.json
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_fluegas_298K_pol3site.json
 .\.venv-mlip\Scripts\python.exe -u scripts\verify_cli.py
-
-# Pytest regression suite (13 classical + 1 MLIP parity check)
 .\.venv-mlip\Scripts\python.exe -m pytest -v
+```
 
-# Universal MLIP Nested MC examples (CO2 in Mg-MOF-74 / CH4 in IRMOF-1 with auto QEq)
+### Single-GPU Usage Guide (`run_mlip_gcmc.py`)
+
+```powershell
+# General rigid MOF CIF + built-in guest (auto spacegroup expansion + periodic QEq charges)
 .\.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py `
-  --cif data\MgMOF-74.cif --pressures 0.01 0.05 0.15 `
-  --guest co2 --proposer mercado --model mace-matpes-r2scan-0 --dispersion on --xc r2scan `
-  --out-json build\mg_r2scan.json --out-csv build\mg_r2scan.csv
+  --cif path\to\your_mof.cif --supercell 1 1 1 --temp 298 --pressures 0.1 1.0 5.0 `
+  --guest ch4 --proposer uff --charge-mode auto `
+  --model medium --dispersion on --xc pbe `
+  --boxes 4 --k-steps 25 --pilot-cycles 60 --eq-cycles 120 --prod-cycles 320 `
+  --out-json build\my_mof_ch4.json --out-csv build\my_mof_ch4.csv
 
-.\.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py `
-  --cif data\IRMOF-1.cif --supercell 1 1 1 --pressures 5.0 `
-  --guest ch4 --proposer uff --charge-mode auto --model medium --dispersion on --xc pbe `
-  --out-json build\irmof1_ch4.json
+# Add --resume to the exact command above after an interruption to skip completed pressures
+```
 
+| Parameter | How to Choose on a Single GPU |
+| :--- | :--- |
+| `--supercell na nb nc` | Ensure supercell perpendicular width is `>= 12 Å` (`2 × MACE r_max`): e.g. `1 1 1` for `IRMOF-1` (`25.8 Å`), `1 1 2` for `Mg-MOF-74` (`c = 6.9 Å`). |
+| `--proposer` | Use **`uff`** for any general MOF/guest; use `mercado` **only** for `Mg-MOF-74 + CO₂`. |
+| `--charge-mode` | Default `auto` keeps non-zero CIF charges (or `REPEAT` for `Mg-MOF-74`) and computes screened periodic QEq otherwise; `qeq` forces QEq, `zero` disables charges. |
+| `--guest` / `--guest-json` | Presets: `co2`, `ch4`, `n2`, `h2`, `ar`, `h2o`, `nh3`; pass `--guest-json file.json` for custom rigid molecules (up to `12` sites). |
+| `--mace-chunk` | Auto-selected by VRAM; set `--mace-chunk 1` on `<= 12 GB` GPUs when supercells exceed `~400` framework atoms (e.g. `IRMOF-1 + CH₄`). |
+| `--model` / `--xc` | Recommended baseline: `medium --dispersion on --xc pbe`; for `Mg-MOF-74 + CO₂`, `mace-matpes-r2scan-0 --dispersion on --xc r2scan` works well (note it overbinds `CH₄`). |
+
+<details>
+<summary>Custom <code>--guest-json</code> format &amp; reading output CSV columns</summary>
+
+Example custom 3-site rigid molecule JSON (`Z = 0` designates massless electrostatic sites excluded from MLIP evaluation):
+
+```json
+{
+  "name": "custom_co",
+  "formula": "CO",
+  "is_isotropic": false,
+  "Tc_K": 132.92,
+  "Pc_bar": 34.99,
+  "omega": 0.048,
+  "sites": [
+    {"symbol": "C", "Z": 6, "pos": [-0.646, 0.0, 0.0], "q": -0.24, "eps_K": 36.4, "sigma_A": 3.55},
+    {"symbol": "O", "Z": 8, "pos": [ 0.482, 0.0, 0.0], "q": -0.27, "eps_K": 51.0, "sigma_A": 2.95},
+    {"symbol": "X", "Z": 0, "pos": [ 0.000, 0.0, 0.0], "q":  0.51, "eps_K":  0.0, "sigma_A": 0.00}
+  ]
+}
+```
+
+Key columns in `--out-csv`: `uptake_mmol_g` ± `uptake_sem_mmol_g`, Pooled-Jackknife `Qst_kJ_mol` ± `Qst_sem_kJ_mol`, production swaps `prod_ins_acc` / `prod_del_acc` (aim for `>= 5` each), `tau_int_N`, `ess_N_per_s`, and `converged` (`False` prints specific diagnostic warnings—usually resolved by increasing `--eq-cycles` / `--prod-cycles`).
+
+</details>
+
+```powershell
 # Head-to-head ESS / GPU-s & SJD_N / GPU-s speedup benchmark vs. Direct MLIP-GCMC
 .\.venv-mlip\Scripts\python.exe -u scripts\benchmark_speedup.py
 ```
@@ -124,6 +174,8 @@ cmd /c build.bat
 
 ```text
 cuda-mof-gcmc/
+├── fast_start.bat  # Windows one-click setup, auto-build & self-check launcher
+├── build.bat       # MSVC + CUDA compiler wrapper (auto-detects VS2022/2019 & GPU sm_XX)
 ├── pyproject.toml  # Package metadata & pytest markers (mlip, slow)
 ├── configs/        # JSON presets for mof_gcmc_cli.exe (UFF, Mercado 2016, 313K PSA, Flue Gas, Pol-SCF)
 ├── data/           # Crystal CIFs (Mg-MOF-74, Ni-MOF-74, Cu-BTC, IRMOF-1), Mercado FF & NIST ISODB tables
