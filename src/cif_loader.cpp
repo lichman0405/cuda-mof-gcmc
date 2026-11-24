@@ -219,6 +219,29 @@ bool load_cif_framework(
                   info_out.alpha_deg, info_out.beta_deg, info_out.gamma_deg,
                   rep_a, rep_b, rep_c);
 
+    bool any_explicit_charge = false;
+    bool has_mg1_site = false;
+    bool all_mg_mof74_labels = !asym_atoms.empty();
+    for (const auto& aa : asym_atoms) {
+        if (aa.has_charge) any_explicit_charge = true;
+        if (element_from_symbol(aa.symbol) == ELEM_MG && aa.label == "Mg1") {
+            has_mg1_site = true;
+        }
+        if (atom_type_from_label(aa.label) < 0) {
+            all_mg_mof74_labels = false;
+        }
+    }
+    const bool is_mg_mof74_asym = (!any_explicit_charge) && has_mg1_site && all_mg_mof74_labels;
+    if (!any_explicit_charge && !asym_atoms.empty()) {
+        if (is_mg_mof74_asym) {
+            std::fprintf(stderr, "Notice: CIF %s has no _atom_site_charge column; applying Mg-MOF-74 REPEAT charges.\n",
+                         cif_path.c_str());
+        } else {
+            std::fprintf(stderr, "Notice: CIF %s has no _atom_site_charge column; defaulting framework charges to 0.0 e.\n",
+                         cif_path.c_str());
+        }
+    }
+
     unit_atoms_out.clear();
     for (const auto& aa : asym_atoms) {
         int elem = element_from_symbol(aa.symbol);
@@ -227,7 +250,7 @@ bool load_cif_framework(
             return false;
         }
         UffParam lj = get_uff_param(elem);
-        double q = aa.has_charge ? aa.charge : get_repeat_charge(aa.label);
+        double q = aa.has_charge ? aa.charge : (is_mg_mof74_asym ? get_repeat_charge(aa.label) : 0.0);
         int type_id = atom_type_from_label(aa.label);
 
         for (const auto& op : symops) {

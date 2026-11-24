@@ -76,7 +76,7 @@
 
 ![Step 4 Validation: 0.10 A Tricubic Grid, RASPA3 & Mercado 2016 DFT-FF](../assets/step4_validated_mercado_raspa3.png)
 
-### 1. $O(h^4)$ 三维 Tricubic 插值与零漂移采样（[`src/main_v2.cu`](../src/main_v2.cu)）
+### 1. $O(h^4)$ 三维 Tricubic 插值与零漂移采样（[`src/legacy/main_v2.cu`](../src/legacy/main_v2.cu)）
 - **网格构建耗时**：6 张网格 **`3.03 s`**（`113 MB` 显存）——较单核 CPU `RASPA3` 构建 `151×151×46` 网格（`117.98 s`）提速 **`38.9×`**。
 - **近程插值精度**：`Mg–O` 径向插值 MAE（`2.3–3.8 Å`）下降 **`290.3×`**：**`190.46 K`**（`128` 三线性）→ **`12.53 K`**（`256` 三线性）→ **`0.656 K`**（`256` Tricubic）；Mercado 2016 降至 **`0.092 K`**。
 - **全双精度零能量漂移**：客体坐标与累计能量采用共享内存 `double`，每 `50,000` 步从头全盒重算——`128` 盒（每力场 `6,400 万` 步）最大漂移仅 **`5.879e-09 K`**（UFF）与 **`1.024e-08 K`**（Mercado 2016），细致平衡偏差 `max|acc_ins - acc_del| <= 0.000253`。

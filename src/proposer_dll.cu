@@ -133,27 +133,28 @@ __device__ inline double pair_co2(
 }
 
 struct ProposerStateDev {
-    int* d_acc_N;
-    double* d_acc_U;
-    double* d_acc_cx;
-    double* d_acc_cy;
-    double* d_acc_cz;
-    double* d_acc_ux;
-    double* d_acc_uy;
-    double* d_acc_uz;
+    int* d_acc_N = nullptr;
+    double* d_acc_U = nullptr;
+    double* d_acc_cx = nullptr;
+    double* d_acc_cy = nullptr;
+    double* d_acc_cz = nullptr;
+    double* d_acc_ux = nullptr;
+    double* d_acc_uy = nullptr;
+    double* d_acc_uz = nullptr;
 
-    int* d_tri_N;
-    double* d_tri_U;
-    double* d_tri_dU;
-    int* d_tri_acc;
-    double* d_tri_cx;
-    double* d_tri_cy;
-    double* d_tri_cz;
-    double* d_tri_ux;
-    double* d_tri_uy;
-    double* d_tri_uz;
+    int* d_tri_N = nullptr;
+    double* d_tri_U = nullptr;
+    double* d_tri_dU = nullptr;
+    int* d_tri_acc = nullptr;
+    double* d_tri_cx = nullptr;
+    double* d_tri_cy = nullptr;
+    double* d_tri_cz = nullptr;
+    double* d_tri_ux = nullptr;
+    double* d_tri_uy = nullptr;
+    double* d_tri_uz = nullptr;
 
-    uint64_t* d_rng;
+    int* d_commit_mask = nullptr;
+    uint64_t* d_rng = nullptr;
 };
 
 struct PropMove {
@@ -545,6 +546,8 @@ struct ProposerContext {
     Cell cell{};
     MixGrid3DView d_grid{};
     SpeciesDef sp{};
+    std::vector<double> unit_frac; // size 3 * n_unit (sa, sb, sc)
+    std::vector<int> unit_Z;       // size n_unit (atomic numbers)
     double fw_mass_super = 0.0;
     double T_K = 298.0;
     double pressure_bar = 0.15;
@@ -588,6 +591,34 @@ void* proposer_create(
         delete ctx;
         return nullptr;
     }
+
+    if (ff_mode == 1) {
+        bool valid_mercado = (info.count_mg > 0);
+        for (const auto& fa : unit_atoms) {
+            if (fa.atom_type_id < 0 || fa.atom_type_id >= 9) {
+                valid_mercado = false;
+                break;
+            }
+        }
+        if (!valid_mercado) {
+            std::fprintf(stderr,
+                         "Error: ff_mode=1 (Mercado 2016) only supports Mg-MOF-74 atom types (Mg1, O1-O3, C1-C4, H1); "
+                         "cannot use it with '%s'. Use ff_mode=0 (UFF) instead.\n",
+                         cif_path ? cif_path : "<null>");
+            delete ctx;
+            return nullptr;
+        }
+    }
+
+    ctx->unit_frac.reserve(unit_atoms.size() * 3);
+    ctx->unit_Z.reserve(unit_atoms.size());
+    for (const auto& fa : unit_atoms) {
+        ctx->unit_frac.push_back((double)fa.sa);
+        ctx->unit_frac.push_back((double)fa.sb);
+        ctx->unit_frac.push_back((double)fa.sc);
+        ctx->unit_Z.push_back(get_atomic_number(fa.elem));
+    }
+
     ctx->fw_mass_super = info.unit_mass_g_mol * (double)(sc_a * sc_b * sc_c);
     ctx->sp = (ff_mode == 1) ? make_species_co2_epm2() : make_species_co2();
 
@@ -602,39 +633,52 @@ void* proposer_create(
     UnifiedGridStats stats{};
     build_unified_grids_gpu(ctx->cell, unit_atoms, nx, ny, nz, 11.0, 0.30, ff_mode, ctx->d_grid, stats);
 
+#define CUDA_CHECK_FAIL(call)                                                   \
+    do {                                                                        \
+        cudaError_t err = (call);                                               \
+        if (err != cudaSuccess) {                                               \
+            std::fprintf(stderr, "CUDA Error at %s:%d: %s\n",                   \
+                         __FILE__, __LINE__, cudaGetErrorString(err));          \
+            proposer_destroy(ctx);                                              \
+            return nullptr;                                                     \
+        }                                                                       \
+    } while (0)
+
     size_t n_b = (size_t)ctx->n_boxes;
     size_t n_m = n_b * (size_t)ctx->max_mol;
-    cudaMalloc(&ctx->dev.d_acc_N, n_b * sizeof(int));
-    cudaMalloc(&ctx->dev.d_acc_U, n_b * sizeof(double));
-    cudaMalloc(&ctx->dev.d_acc_cx, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_acc_cy, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_acc_cz, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_acc_ux, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_acc_uy, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_acc_uz, n_m * sizeof(double));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_N, n_b * sizeof(int)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_U, n_b * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_cx, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_cy, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_cz, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_ux, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_uy, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_uz, n_m * sizeof(double)));
 
-    cudaMalloc(&ctx->dev.d_tri_N, n_b * sizeof(int));
-    cudaMalloc(&ctx->dev.d_tri_U, n_b * sizeof(double));
-    cudaMalloc(&ctx->dev.d_tri_dU, n_b * sizeof(double));
-    cudaMalloc(&ctx->dev.d_tri_acc, n_b * sizeof(int));
-    cudaMalloc(&ctx->dev.d_tri_cx, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_tri_cy, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_tri_cz, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_tri_ux, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_tri_uy, n_m * sizeof(double));
-    cudaMalloc(&ctx->dev.d_tri_uz, n_m * sizeof(double));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_N, n_b * sizeof(int)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_U, n_b * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_dU, n_b * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_acc, n_b * sizeof(int)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_cx, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_cy, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_cz, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_ux, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_uy, n_m * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_uz, n_m * sizeof(double)));
 
-    cudaMalloc(&ctx->dev.d_rng, n_b * sizeof(uint64_t));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_commit_mask, n_b * sizeof(int)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_rng, n_b * sizeof(uint64_t)));
 
-    cudaMemset(ctx->dev.d_acc_N, 0, n_b * sizeof(int));
-    cudaMemset(ctx->dev.d_acc_U, 0, n_b * sizeof(double));
+    CUDA_CHECK_FAIL(cudaMemset(ctx->dev.d_acc_N, 0, n_b * sizeof(int)));
+    CUDA_CHECK_FAIL(cudaMemset(ctx->dev.d_acc_U, 0, n_b * sizeof(double)));
     std::vector<uint64_t> seeds(n_b);
     for (int b = 0; b < ctx->n_boxes; ++b) {
         uint64_t s = seed + (uint64_t)b * 1000003ULL + 0x9e3779b97f4a7c15ULL;
         for (int k = 0; k < 8; ++k) { s ^= s >> 12; s ^= s << 25; s ^= s >> 27; s *= 2685821657736338717ULL; }
         seeds[b] = s;
     }
-    cudaMemcpy(ctx->dev.d_rng, seeds.data(), n_b * sizeof(uint64_t), cudaMemcpyHostToDevice);
+    CUDA_CHECK_FAIL(cudaMemcpy(ctx->dev.d_rng, seeds.data(), n_b * sizeof(uint64_t), cudaMemcpyHostToDevice));
+#undef CUDA_CHECK_FAIL
     return ctx;
 }
 
@@ -642,14 +686,26 @@ void proposer_destroy(void* handle) {
     if (!handle) return;
     auto* ctx = static_cast<ProposerContext*>(handle);
     free_unified_grids_gpu(ctx->d_grid);
-    cudaFree(ctx->dev.d_acc_N); cudaFree(ctx->dev.d_acc_U);
-    cudaFree(ctx->dev.d_acc_cx); cudaFree(ctx->dev.d_acc_cy); cudaFree(ctx->dev.d_acc_cz);
-    cudaFree(ctx->dev.d_acc_ux); cudaFree(ctx->dev.d_acc_uy); cudaFree(ctx->dev.d_acc_uz);
-    cudaFree(ctx->dev.d_tri_N); cudaFree(ctx->dev.d_tri_U);
-    cudaFree(ctx->dev.d_tri_dU); cudaFree(ctx->dev.d_tri_acc);
-    cudaFree(ctx->dev.d_tri_cx); cudaFree(ctx->dev.d_tri_cy); cudaFree(ctx->dev.d_tri_cz);
-    cudaFree(ctx->dev.d_tri_ux); cudaFree(ctx->dev.d_tri_uy); cudaFree(ctx->dev.d_tri_uz);
-    cudaFree(ctx->dev.d_rng);
+    if (ctx->dev.d_acc_N) cudaFree(ctx->dev.d_acc_N);
+    if (ctx->dev.d_acc_U) cudaFree(ctx->dev.d_acc_U);
+    if (ctx->dev.d_acc_cx) cudaFree(ctx->dev.d_acc_cx);
+    if (ctx->dev.d_acc_cy) cudaFree(ctx->dev.d_acc_cy);
+    if (ctx->dev.d_acc_cz) cudaFree(ctx->dev.d_acc_cz);
+    if (ctx->dev.d_acc_ux) cudaFree(ctx->dev.d_acc_ux);
+    if (ctx->dev.d_acc_uy) cudaFree(ctx->dev.d_acc_uy);
+    if (ctx->dev.d_acc_uz) cudaFree(ctx->dev.d_acc_uz);
+    if (ctx->dev.d_tri_N) cudaFree(ctx->dev.d_tri_N);
+    if (ctx->dev.d_tri_U) cudaFree(ctx->dev.d_tri_U);
+    if (ctx->dev.d_tri_dU) cudaFree(ctx->dev.d_tri_dU);
+    if (ctx->dev.d_tri_acc) cudaFree(ctx->dev.d_tri_acc);
+    if (ctx->dev.d_tri_cx) cudaFree(ctx->dev.d_tri_cx);
+    if (ctx->dev.d_tri_cy) cudaFree(ctx->dev.d_tri_cy);
+    if (ctx->dev.d_tri_cz) cudaFree(ctx->dev.d_tri_cz);
+    if (ctx->dev.d_tri_ux) cudaFree(ctx->dev.d_tri_ux);
+    if (ctx->dev.d_tri_uy) cudaFree(ctx->dev.d_tri_uy);
+    if (ctx->dev.d_tri_uz) cudaFree(ctx->dev.d_tri_uz);
+    if (ctx->dev.d_commit_mask) cudaFree(ctx->dev.d_commit_mask);
+    if (ctx->dev.d_rng) cudaFree(ctx->dev.d_rng);
     delete ctx;
 }
 
@@ -671,6 +727,26 @@ void proposer_get_cell_H(void* handle, double out_H9[9]) {
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
             out_H9[r * 3 + c] = ctx->cell.H[r][c];
+}
+
+int proposer_get_num_unit_atoms(void* handle) {
+    return handle ? (int)static_cast<ProposerContext*>(handle)->unit_Z.size() : 0;
+}
+
+int proposer_get_unit_atoms(void* handle, double* out_frac_3n, int* out_Z_n) {
+    if (!handle || !out_frac_3n || !out_Z_n) return -1;
+    auto* ctx = static_cast<ProposerContext*>(handle);
+    if (!ctx->unit_frac.empty()) {
+        std::memcpy(out_frac_3n, ctx->unit_frac.data(), ctx->unit_frac.size() * sizeof(double));
+    }
+    if (!ctx->unit_Z.empty()) {
+        std::memcpy(out_Z_n, ctx->unit_Z.data(), ctx->unit_Z.size() * sizeof(int));
+    }
+    return (int)ctx->unit_Z.size();
+}
+
+double proposer_get_min_perp_width(void* handle) {
+    return handle ? static_cast<ProposerContext*>(handle)->cell.min_perp_width_super : 0.0;
 }
 
 int proposer_set_chem_pot_shift(void* handle, double delta_eps_K) {
@@ -727,13 +803,10 @@ int proposer_propose_k(
 int proposer_commit(void* handle, const int* accept_mask) {
     if (!handle || !accept_mask) return -1;
     auto* ctx = static_cast<ProposerContext*>(handle);
-    int* d_mask = nullptr;
-    CUDA_CHECK_RET(cudaMalloc(&d_mask, (size_t)ctx->n_boxes * sizeof(int)), -1);
-    CUDA_CHECK_RET(cudaMemcpy(d_mask, accept_mask, (size_t)ctx->n_boxes * sizeof(int), cudaMemcpyHostToDevice), -1);
-    commit_mask_kernel<<<ctx->n_boxes, PROP_THREADS>>>(ctx->n_boxes, ctx->max_mol, d_mask, ctx->dev);
+    CUDA_CHECK_RET(cudaMemcpy(ctx->dev.d_commit_mask, accept_mask, (size_t)ctx->n_boxes * sizeof(int), cudaMemcpyHostToDevice), -1);
+    commit_mask_kernel<<<ctx->n_boxes, PROP_THREADS>>>(ctx->n_boxes, ctx->max_mol, ctx->dev.d_commit_mask, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
-    cudaFree(d_mask);
     return 0;
 }
 
@@ -776,26 +849,57 @@ double proposer_eval_energy(
     size_t sz = (size_t)N * sizeof(double);
     double *d_cx = nullptr, *d_cy = nullptr, *d_cz = nullptr, *d_ux = nullptr, *d_uy = nullptr, *d_uz = nullptr, *d_U = nullptr;
     int *d_ov = nullptr;
-    cudaMalloc(&d_cx, sz); cudaMalloc(&d_cy, sz); cudaMalloc(&d_cz, sz);
-    cudaMalloc(&d_ux, sz); cudaMalloc(&d_uy, sz); cudaMalloc(&d_uz, sz);
-    cudaMalloc(&d_U, sizeof(double)); cudaMalloc(&d_ov, sizeof(int));
-    cudaMemcpy(d_cx, cx, sz, cudaMemcpyHostToDevice); cudaMemcpy(d_cy, cy, sz, cudaMemcpyHostToDevice); cudaMemcpy(d_cz, cz, sz, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_ux, ux, sz, cudaMemcpyHostToDevice); cudaMemcpy(d_uy, uy, sz, cudaMemcpyHostToDevice); cudaMemcpy(d_uz, uz, sz, cudaMemcpyHostToDevice);
+    auto cleanup = [&]() {
+        if (d_cx) cudaFree(d_cx);
+        if (d_cy) cudaFree(d_cy);
+        if (d_cz) cudaFree(d_cz);
+        if (d_ux) cudaFree(d_ux);
+        if (d_uy) cudaFree(d_uy);
+        if (d_uz) cudaFree(d_uz);
+        if (d_U) cudaFree(d_U);
+        if (d_ov) cudaFree(d_ov);
+    };
+#define EVAL_CUDA_CHECK(call)                                                   \
+    do {                                                                        \
+        cudaError_t err = (call);                                               \
+        if (err != cudaSuccess) {                                               \
+            std::fprintf(stderr, "CUDA Error at %s:%d: %s\n",                   \
+                         __FILE__, __LINE__, cudaGetErrorString(err));          \
+            cleanup();                                                          \
+            if (out_overlap) *out_overlap = 1;                                  \
+            return 1.0e9;                                                       \
+        }                                                                       \
+    } while (0)
+
+    EVAL_CUDA_CHECK(cudaMalloc(&d_cx, sz));
+    EVAL_CUDA_CHECK(cudaMalloc(&d_cy, sz));
+    EVAL_CUDA_CHECK(cudaMalloc(&d_cz, sz));
+    EVAL_CUDA_CHECK(cudaMalloc(&d_ux, sz));
+    EVAL_CUDA_CHECK(cudaMalloc(&d_uy, sz));
+    EVAL_CUDA_CHECK(cudaMalloc(&d_uz, sz));
+    EVAL_CUDA_CHECK(cudaMalloc(&d_U, sizeof(double)));
+    EVAL_CUDA_CHECK(cudaMalloc(&d_ov, sizeof(int)));
+    EVAL_CUDA_CHECK(cudaMemcpy(d_cx, cx, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(d_cy, cy, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(d_cz, cz, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(d_ux, ux, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(d_uy, uy, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(d_uz, uz, sz, cudaMemcpyHostToDevice));
 
     eval_single_state_kernel<<<1, PROP_THREADS>>>(
         ctx->cell, ctx->d_grid, ctx->sp,
         ctx->r_cut_gg, ctx->dsf_alpha, ctx->ff_mode, ctx->pol_mode, N,
         d_cx, d_cy, d_cz, d_ux, d_uy, d_uz, d_U, d_ov);
-    cudaDeviceSynchronize();
+    EVAL_CUDA_CHECK(cudaGetLastError());
+    EVAL_CUDA_CHECK(cudaDeviceSynchronize());
 
     double h_U = 0.0;
     int h_ov = 0;
-    cudaMemcpy(&h_U, d_U, sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_ov, d_ov, sizeof(int), cudaMemcpyDeviceToHost);
+    EVAL_CUDA_CHECK(cudaMemcpy(&h_U, d_U, sizeof(double), cudaMemcpyDeviceToHost));
+    EVAL_CUDA_CHECK(cudaMemcpy(&h_ov, d_ov, sizeof(int), cudaMemcpyDeviceToHost));
+#undef EVAL_CUDA_CHECK
 
-    cudaFree(d_cx); cudaFree(d_cy); cudaFree(d_cz);
-    cudaFree(d_ux); cudaFree(d_uy); cudaFree(d_uz);
-    cudaFree(d_U); cudaFree(d_ov);
+    cleanup();
     if (out_overlap) *out_overlap = h_ov;
     return h_U;
 }

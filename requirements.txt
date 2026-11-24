@@ -1,0 +1,14 @@
+# Python dependencies for MLIP Nested Monte Carlo & verification scripts.
+# Install CUDA-enabled PyTorch first matching your local CUDA driver/toolkit, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Tested on Windows 11 + RTX 5070 (sm_120) with:
+#   torch==2.12.0.dev20260408+cu128
+
+numpy==2.5.5
+scipy==1.18.1
+ase==3.29.0
+mace-torch==0.3.17
+torch-dftd==0.5.3
+e3nn==0.4.4
+matscipy==1.3.1
+matplotlib==3.11.2

@@ -28,6 +28,9 @@ PROPOSER_API double proposer_get_framework_mass(void* handle);
 PROPOSER_API double proposer_get_fugacity_Pa(void* handle);
 PROPOSER_API double proposer_get_rcut_gg(void* handle);
 PROPOSER_API void proposer_get_cell_H(void* handle, double out_H9[9]);
+PROPOSER_API int proposer_get_num_unit_atoms(void* handle);
+PROPOSER_API int proposer_get_unit_atoms(void* handle, double* out_frac_3n, int* out_Z_n);
+PROPOSER_API double proposer_get_min_perp_width(void* handle);
 
 // Set chemical-potential shift for inner proposer sampling:
 // f_ref = f_tgt * exp(-delta_eps_K / T_K), where delta_eps_K = <(U_tgt - U_ref) / N> in Kelvin

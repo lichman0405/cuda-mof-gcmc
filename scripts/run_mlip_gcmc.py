@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import numpy as np
 
@@ -21,6 +22,7 @@ from nested_mc_engine import (
     FastMaceD3Target,
     K_TO_KJMOL,
     run_nested_mc,
+    verify_proposer_target_consistency,
 )
 
 PROPOSER_MAP = {
@@ -51,9 +53,83 @@ def parse_args():
     p.add_argument("--shift-override", type=float, default=None, help="Optional fixed chem-pot shift (kJ/mol) overriding auto calibration")
     p.add_argument("--seed", type=int, default=20261400, help="Base PRNG seed")
     p.add_argument("--shift-mode", choices=["auto", "none"], default="auto", help="Multi-stage self-consistent chem-pot shift")
+    p.add_argument("--resume", action="store_true", help="Resume from existing --out-json, skipping completed pressures")
     p.add_argument("--out-json", required=True, help="Output JSON path")
     p.add_argument("--out-csv", default="", help="Optional summary CSV path")
     return p.parse_args()
+
+
+def evaluate_convergence_diagnostics(res: dict) -> dict:
+    uptake = float(res["uptake_mmol_g"])
+    sem = float(res["uptake_sem_mmol_g"])
+    drift = float(res["stationarity_drift_mmol_g"])
+    ins_acc = int(res["prod_ins_acc"])
+    del_acc = int(res["prod_del_acc"])
+    outer_acc = float(res["prod_outer_acc_rate"])
+
+    ins_acc_ok = (ins_acc >= 5) if uptake >= 1e-4 else True
+    del_acc_ok = (del_acc >= 5) if uptake >= 1e-4 else True
+    drift_limit = max(0.25, 3.0 * sem)
+    drift_ok = bool(drift <= drift_limit)
+    outer_acc_ok = bool(outer_acc >= 0.05)
+
+    warnings = []
+    if not ins_acc_ok:
+        warnings.append(f"Low production insertions accepted ({ins_acc} < 5 at uptake {uptake:.3f} mmol/g)")
+    if not del_acc_ok:
+        warnings.append(f"Low production deletions accepted ({del_acc} < 5 at uptake {uptake:.3f} mmol/g)")
+    if not drift_ok:
+        warnings.append(f"High half-split drift ({drift:.3f} > max(0.25, 3*SEM)={drift_limit:.3f} mmol/g)")
+    if not outer_acc_ok:
+        warnings.append(f"Low production outer acceptance rate ({outer_acc*100:.1f}% < 5.0%)")
+
+    return {
+        "converged": bool(ins_acc_ok and del_acc_ok and drift_ok and outer_acc_ok),
+        "ins_acc_ok": ins_acc_ok,
+        "del_acc_ok": del_acc_ok,
+        "drift_ok": drift_ok,
+        "outer_acc_ok": outer_acc_ok,
+        "warnings": warnings,
+    }
+
+
+def save_outputs(out_json: Path, out_csv: Path | None, payload: dict):
+    payload["points"] = sorted(payload["points"], key=lambda pt: float(pt["P_bar"]))
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    tmp_json = out_json.with_suffix(out_json.suffix + ".tmp")
+    tmp_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp_json, out_json)
+
+    if out_csv is not None:
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        tmp_csv = out_csv.with_suffix(out_csv.suffix + ".tmp")
+        with tmp_csv.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow([
+                "P_bar", "uptake_mmol_g", "uptake_sem_mmol_g", "Qst_kJ_mol", "Qst_sem_kJ_mol",
+                "delta_eps_kJ_mol", "outer_acc_rate", "prod_ins_acc", "prod_ins_att",
+                "prod_del_acc", "prod_del_att", "stationarity_drift_mmol_g", "elapsed_s", "converged"
+            ])
+            for pt in payload["points"]:
+                conv = pt.get("diagnostics", {}).get("converged", True)
+                w.writerow([
+                    pt["P_bar"], pt["uptake_mmol_g"], pt["uptake_sem_mmol_g"],
+                    pt["Qst_kJ_mol"], pt["Qst_sem_kJ_mol"], pt["delta_eps_kJ_mol"],
+                    pt["outer_acc_rate"], pt["prod_ins_acc"], pt["prod_ins_att"],
+                    pt["prod_del_acc"], pt["prod_del_att"], pt["stationarity_drift_mmol_g"],
+                    pt["elapsed_s"], conv,
+                ])
+        os.replace(tmp_csv, out_csv)
+
+
+def _cif_matches(old_cif: str, new_cif: str) -> bool:
+    p_old, p_new = Path(old_cif), Path(new_cif)
+    try:
+        if p_old.resolve() == p_new.resolve():
+            return True
+    except OSError:
+        pass
+    return p_old.name == p_new.name
 
 
 def run_pressure_point(
@@ -74,6 +150,7 @@ def run_pressure_point(
     target: FastMaceD3Target,
     pilot_cycles: int = 60,
     shift_override=None,
+    verify_consistency: bool = False,
 ):
     prop = CudaGcmcProposer(
         cif_path=cif_path,
@@ -87,6 +164,13 @@ def run_pressure_point(
         max_mol=max_mol,
         seed=seed,
     )
+    if verify_consistency:
+        cons = verify_proposer_target_consistency(prop, target)
+        print(
+            f"  [Consistency OK] unit={cons['n_unit_atoms']} super={cons['n_super_atoms']} "
+            f"max_cell_err={cons['max_cell_err_A']:.2e} A max_pos_err={cons['max_pos_err_A']:.2e} A "
+            f"min_perp={cons['min_perp_width_A']:.2f} A"
+        )
     conv_mmol_g = 1000.0 / prop.fw_mass_gmol
 
     if shift_override is not None:
@@ -171,10 +255,19 @@ def run_pressure_point(
 
     hist = np.array(res["box_N_history"], dtype=np.float64) * conv_mmol_g
     prod_hist = hist[eq_cycles:]
-    half = prod_hist.shape[0] // 2
-    mean_h1 = float(np.mean(prod_hist[:half]))
-    mean_h2 = float(np.mean(prod_hist[half:]))
-    drift = abs(mean_h2 - mean_h1)
+    if prod_hist.shape[0] >= 2:
+        half = prod_hist.shape[0] // 2
+        mean_h1 = float(np.mean(prod_hist[:half]))
+        mean_h2 = float(np.mean(prod_hist[half:]))
+        drift = abs(mean_h2 - mean_h1)
+    elif prod_hist.shape[0] == 1:
+        mean_h1 = float(np.mean(prod_hist))
+        mean_h2 = mean_h1
+        drift = 0.0
+    else:
+        mean_h1 = 0.0
+        mean_h2 = 0.0
+        drift = 0.0
 
     res["P_bar"] = float(P_bar)
     res["T_K"] = float(T_K)
@@ -184,16 +277,20 @@ def run_pressure_point(
     res["stationarity_drift_mmol_g"] = drift
     res["mlip_evals"] = int(target.n_evals)
     res["total_inner_steps"] = int(n_boxes * k_steps * (eq_cycles + prod_cycles))
+    diag = evaluate_convergence_diagnostics(res)
+    res["diagnostics"] = diag
 
     print(
         f"  [P={P_bar:.4g} bar DONE] Uptake={res['uptake_mmol_g']:.4f} +- {res['uptake_sem_mmol_g']:.4f} mmol/g | "
         f"Fluc Qst={res['Qst_kJ_mol']:.2f} +- {res['Qst_sem_kJ_mol']:.2f} | "
         f"Molar Qst={res['mean_molar_qst_kJ_mol']:.2f} +- {res['mean_molar_qst_sem_kJ_mol']:.2f} kJ/mol | "
         f"Ins={res['prod_ins_acc']}/{res['prod_ins_att']} Del={res['prod_del_acc']}/{res['prod_del_att']} | "
-        f"Acc={res['outer_acc_rate']*100:.1f}% | |drift|={drift:.3f} | {res['elapsed_s']:.1f}s"
+        f"Acc={res['outer_acc_rate']*100:.1f}% | |drift|={drift:.3f} | conv={diag['converged']} | {res['elapsed_s']:.1f}s"
     )
+    if not diag["converged"]:
+        for msg in diag["warnings"]:
+            print(f"  [DIAG WARNING] P={P_bar:.4g} bar: {msg}")
     prop.close()
-    # Strip full per-cycle history before saving compact summary? Keep compact box_N_history for plotting.
     return res
 
 
@@ -201,79 +298,104 @@ def main():
     args = parse_args()
     ff_mode, pol_mode = PROPOSER_MAP[args.proposer]
     use_disp = args.dispersion == "on"
+    out_json = Path(args.out_json)
+    out_csv = Path(args.out_csv) if args.out_csv else None
+
     print(
         f"=== Hybrid GPU-GCMC + MLIP Engine ===\n"
         f"  CIF={args.cif} supercell={args.supercell} T={args.temp} K Pressures={args.pressures}\n"
         f"  Proposer={args.proposer} (ff={ff_mode}, pol={pol_mode}) | MLIP={args.model} (dispersion={use_disp}, xc={args.xc})"
     )
 
-    target = FastMaceD3Target(
-        cif_path=args.cif,
-        supercell=tuple(args.supercell),
-        model=args.model,
-        device=args.device,
-        dispersion=use_disp,
-        dispersion_xc=args.xc,
-    )
-
-    points = []
-    for i, p_bar in enumerate(args.pressures):
-        print(f"\n--- Pressure Point {i+1}/{len(args.pressures)}: {p_bar} bar ---")
-        pt = run_pressure_point(
-            cif_path=args.cif,
-            supercell=args.supercell,
-            T_K=args.temp,
-            P_bar=p_bar,
-            ff_mode=ff_mode,
-            pol_mode=pol_mode,
-            grid_dims=args.grid_dims,
-            n_boxes=args.boxes,
-            max_mol=args.max_mol,
-            k_steps=args.k_steps,
-            eq_cycles=args.eq_cycles,
-            prod_cycles=args.prod_cycles,
-            seed=args.seed + i * 100,
-            shift_mode=args.shift_mode,
-            target=target,
-            pilot_cycles=args.pilot_cycles,
-            shift_override=args.shift_override,
-        )
-        points.append(pt)
-
-    out_json = Path(args.out_json)
-    out_json.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "cif": str(args.cif),
-        "supercell": args.supercell,
-        "T_K": args.temp,
+        "supercell": list(args.supercell),
+        "T_K": float(args.temp),
         "proposer": args.proposer,
         "model": args.model,
         "dispersion": use_disp,
         "dispersion_xc": args.xc,
-        "points": points,
+        "points": [],
     }
-    out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"\nSaved JSON: {out_json}")
 
-    if args.out_csv:
-        out_csv = Path(args.out_csv)
-        out_csv.parent.mkdir(parents=True, exist_ok=True)
-        with out_csv.open("w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow([
-                "P_bar", "uptake_mmol_g", "uptake_sem_mmol_g", "Qst_kJ_mol", "Qst_sem_kJ_mol",
-                "delta_eps_kJ_mol", "outer_acc_rate", "prod_ins_acc", "prod_ins_att",
-                "prod_del_acc", "prod_del_att", "stationarity_drift_mmol_g", "elapsed_s"
-            ])
-            for pt in points:
-                w.writerow([
-                    pt["P_bar"], pt["uptake_mmol_g"], pt["uptake_sem_mmol_g"],
-                    pt["Qst_kJ_mol"], pt["Qst_sem_kJ_mol"], pt["delta_eps_kJ_mol"],
-                    pt["outer_acc_rate"], pt["prod_ins_acc"], pt["prod_ins_att"],
-                    pt["prod_del_acc"], pt["prod_del_att"], pt["stationarity_drift_mmol_g"],
-                    pt["elapsed_s"],
-                ])
-        print(f"Saved CSV: {out_csv}")
+    if args.resume and out_json.exists():
+        existing = json.loads(out_json.read_text(encoding="utf-8"))
+        mismatches = []
+        if not _cif_matches(str(existing.get("cif", "")), str(args.cif)):
+            mismatches.append(f"cif: {existing.get('cif')} != {args.cif}")
+        if list(existing.get("supercell", [])) != list(args.supercell):
+            mismatches.append(f"supercell: {existing.get('supercell')} != {list(args.supercell)}")
+        if not math.isclose(float(existing.get("T_K", -1.0)), float(args.temp), rel_tol=1e-6, abs_tol=1e-6):
+            mismatches.append(f"T_K: {existing.get('T_K')} != {args.temp}")
+        if existing.get("proposer") != args.proposer:
+            mismatches.append(f"proposer: {existing.get('proposer')} != {args.proposer}")
+        if existing.get("model") != args.model:
+            mismatches.append(f"model: {existing.get('model')} != {args.model}")
+        if bool(existing.get("dispersion")) != bool(use_disp):
+            mismatches.append(f"dispersion: {existing.get('dispersion')} != {use_disp}")
+        if existing.get("dispersion_xc") != args.xc:
+            mismatches.append(f"dispersion_xc: {existing.get('dispersion_xc')} != {args.xc}")
+        if mismatches:
+            raise ValueError(
+                f"Cannot --resume '{out_json}' due to configuration mismatch: " + "; ".join(mismatches)
+            )
+        payload["points"] = list(existing.get("points", []))
+        print(f"  [RESUME] Loaded {len(payload['points'])} existing pressure point(s) from {out_json}")
+
+    pending = []
+    for i, p_bar in enumerate(args.pressures):
+        if args.resume and any(
+            math.isclose(float(pt["P_bar"]), float(p_bar), rel_tol=1e-6, abs_tol=1e-9)
+            for pt in payload["points"]
+        ):
+            print(f"  [RESUME] Skipping completed P={p_bar} bar")
+            continue
+        pending.append((i, p_bar))
+
+    if pending:
+        target = FastMaceD3Target(
+            cif_path=args.cif,
+            supercell=tuple(args.supercell),
+            model=args.model,
+            device=args.device,
+            dispersion=use_disp,
+            dispersion_xc=args.xc,
+        )
+
+        consistency_checked = False
+        for i, p_bar in pending:
+            print(f"\n--- Pressure Point {i+1}/{len(args.pressures)}: {p_bar} bar ---")
+            pt = run_pressure_point(
+                cif_path=args.cif,
+                supercell=args.supercell,
+                T_K=args.temp,
+                P_bar=p_bar,
+                ff_mode=ff_mode,
+                pol_mode=pol_mode,
+                grid_dims=args.grid_dims,
+                n_boxes=args.boxes,
+                max_mol=args.max_mol,
+                k_steps=args.k_steps,
+                eq_cycles=args.eq_cycles,
+                prod_cycles=args.prod_cycles,
+                seed=args.seed + i * 100,
+                shift_mode=args.shift_mode,
+                target=target,
+                pilot_cycles=args.pilot_cycles,
+                shift_override=args.shift_override,
+                verify_consistency=(not consistency_checked),
+            )
+            consistency_checked = True
+            payload["points"].append(pt)
+            save_outputs(out_json, out_csv, payload)
+            print(f"  [Saved checkpoint] {out_json} ({len(payload['points'])} points)")
+    else:
+        save_outputs(out_json, out_csv, payload)
+        print("  [RESUME] All requested pressures already completed.")
+
+    print(f"\nFinal JSON: {out_json}")
+    if out_csv is not None:
+        print(f"Final CSV:  {out_csv}")
 
 
 if __name__ == "__main__":

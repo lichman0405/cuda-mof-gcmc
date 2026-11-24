@@ -76,7 +76,7 @@ Detailed benchmark tables, Ewald/interpolation diagnostics, native `RASPA3 (3.0.
 
 ![Step 4 Validation: 0.10 A Tricubic Grid, RASPA3 & Mercado 2016 DFT-FF](../assets/step4_validated_mercado_raspa3.png)
 
-### 1. `O(h⁴)` 3D Tricubic Interpolation & Zero-Drift Sampling ([`src/main_v2.cu`](../src/main_v2.cu))
+### 1. `O(h⁴)` 3D Tricubic Interpolation & Zero-Drift Sampling ([`src/legacy/main_v2.cu`](../src/legacy/main_v2.cu))
 - **Grid & Interpolation Refinement (`128×128×36` Trilinear → `256×256×72` Trilinear → `256×256×72` 4-pt Lagrange Tricubic)**:
   - Grid build time = **`3.03 s`** (UFF, 6 grids = `113 MB` VRAM) — **`38.9×`** faster than single-core CPU RASPA3's `117.98 s` (`151×151×46`).
   - Near-field `Mg–O` radial MAE (`2.3–3.8 Å`) drops **`290.3×`**: **`190.46 K`** (`128`-Trilin) → **`12.53 K`** (`256`-Trilin) → **`0.656 K`** (`256`-Tricubic); Mercado 2016 drops `4.99 K → 0.092 K`.

@@ -112,6 +112,31 @@ inline int element_from_symbol(const std::string& sym) {
     return -1;
 }
 
+inline int get_atomic_number(int elem) {
+    switch (elem) {
+        case ELEM_MG: return 12;
+        case ELEM_O:  return 8;
+        case ELEM_C:  return 6;
+        case ELEM_H:  return 1;
+        case ELEM_N:  return 7;
+        case ELEM_S:  return 16;
+        case ELEM_F:  return 9;
+        case ELEM_CL: return 17;
+        case ELEM_ZN: return 30;
+        case ELEM_CU: return 29;
+        case ELEM_FE: return 26;
+        case ELEM_CO: return 27;
+        case ELEM_NI: return 28;
+        case ELEM_MN: return 25;
+        case ELEM_AL: return 13;
+        case ELEM_CR: return 24;
+        case ELEM_ZR: return 40;
+        case ELEM_TI: return 22;
+        case ELEM_V:  return 23;
+        default:      return 0;
+    }
+}
+
 // REPEAT partial atomic charges for Mg-MOF-74 (exact sum = 0.000000 e)
 inline double get_repeat_charge(const std::string& label) {
     if (label == "Mg1") return +1.566;

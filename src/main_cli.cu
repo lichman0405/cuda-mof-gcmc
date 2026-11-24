@@ -160,6 +160,23 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (ff_mode == 1) {
+        bool valid_mercado = (info.count_mg > 0);
+        for (const auto& fa : unit_atoms) {
+            if (fa.atom_type_id < 0 || fa.atom_type_id >= 9) {
+                valid_mercado = false;
+                break;
+            }
+        }
+        if (!valid_mercado) {
+            std::fprintf(stderr,
+                         "Error: forcefield 'mercado2016' (ff_mode=1) only supports Mg-MOF-74 atom types (Mg1, O1-O3, C1-C4, H1); "
+                         "cannot use it with '%s'. Use forcefield='uff' instead.\n",
+                         cif_path.c_str());
+            return 1;
+        }
+    }
+
     int nx = 0, ny = 0, nz = 0;
     if (root.has("grid_dims") && root.at("grid_dims").is_array() && root.at("grid_dims").arr.size() >= 3) {
         nx = (int)std::llround(root.at("grid_dims").arr[0].dval);

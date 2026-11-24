@@ -54,6 +54,7 @@ class CudaGcmcProposer:
         self.lib = ctypes.CDLL(str(dll_path))
         self._bind()
 
+        self.supercell = tuple(int(x) for x in supercell)
         self.n_boxes = int(n_boxes)
         self.max_mol = int(min(256, max(16, max_mol)))
         self.T_K = float(T_K)
@@ -72,6 +73,7 @@ class CudaGcmcProposer:
         self.fw_mass_gmol = float(self.lib.proposer_get_framework_mass(self.handle))
         self.f_Pa = float(self.lib.proposer_get_fugacity_Pa(self.handle))
         self.r_cut_gg = float(self.lib.proposer_get_rcut_gg(self.handle))
+        self.min_perp_width_A = float(self.lib.proposer_get_min_perp_width(self.handle))
         h9 = (ctypes.c_double * 9)()
         self.lib.proposer_get_cell_H(self.handle, h9)
         self.H_cols = np.array(list(h9), dtype=np.float64).reshape(3, 3)
@@ -108,6 +110,14 @@ class CudaGcmcProposer:
         L.proposer_get_rcut_gg.restype = ctypes.c_double
         L.proposer_get_cell_H.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
         L.proposer_get_cell_H.restype = None
+        L.proposer_get_num_unit_atoms.argtypes = [ctypes.c_void_p]
+        L.proposer_get_num_unit_atoms.restype = ctypes.c_int
+        L.proposer_get_unit_atoms.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int)
+        ]
+        L.proposer_get_unit_atoms.restype = ctypes.c_int
+        L.proposer_get_min_perp_width.argtypes = [ctypes.c_void_p]
+        L.proposer_get_min_perp_width.restype = ctypes.c_double
         L.proposer_set_chem_pot_shift.argtypes = [ctypes.c_void_p, ctypes.c_double]
         L.proposer_set_chem_pot_shift.restype = ctypes.c_int
         L.proposer_equilibrate.argtypes = [ctypes.c_void_p, ctypes.c_int]
@@ -183,6 +193,21 @@ class CudaGcmcProposer:
                 "uz": self._buf_uz[s:e].copy(),
             })
         return boxes
+
+    def get_unit_atoms(self):
+        n_unit = int(self.lib.proposer_get_num_unit_atoms(self.handle))
+        if n_unit <= 0:
+            return np.zeros((0, 3), dtype=np.float64), np.zeros((0,), dtype=np.int32)
+        frac = np.zeros((n_unit, 3), dtype=np.float64)
+        z_arr = np.zeros(n_unit, dtype=np.int32)
+        rc = self.lib.proposer_get_unit_atoms(
+            self.handle,
+            frac.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            z_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        )
+        if rc < 0:
+            raise RuntimeError(f"proposer_get_unit_atoms failed with code {rc}")
+        return frac, z_arr
 
     def get_accepted(self):
         rc = self.lib.proposer_get_accepted(
@@ -271,6 +296,7 @@ class MaceD3Target:
 
         self.Atoms = Atoms
         uc = ase_read(str(cif_path))
+        self.uc = uc
         self.fw = uc.repeat(tuple(supercell))
         self.calc = mace_mp(model=model, dispersion=True, default_dtype="float32", device=device)
 
@@ -329,6 +355,7 @@ class FastMaceD3Target:
         self.dispersion_xc = str(dispersion_xc)
 
         uc = ase_read(str(cif_path))
+        self.uc = uc
         self.fw = uc.repeat(tuple(supercell))
         self.n_fw = len(self.fw)
         calc = mace_mp(
@@ -526,6 +553,129 @@ class FastMaceD3Target:
         return self.eval_batch([state])[0]
 
 
+def verify_proposer_target_consistency(
+    proposer: CudaGcmcProposer,
+    target,
+    pos_tol_A: float = 0.05,
+    cell_tol_A: float = 1e-2,
+):
+    """Verify C++ CIF loader and ASE target see identical unit-cell geometry, atoms, and supercell."""
+    H_rows = proposer.H_cols.T
+    ase_cell = np.array(target.fw.get_cell(), dtype=np.float64)
+    max_cell_err = float(np.max(np.abs(H_rows - ase_cell)))
+    if max_cell_err > cell_tol_A:
+        raise RuntimeError(
+            f"C++/ASE supercell lattice mismatch: max|H_cpp - H_ase|={max_cell_err:.4e} A > {cell_tol_A} A"
+        )
+
+    cpp_frac, cpp_Z = proposer.get_unit_atoms()
+    n_unit_cpp = int(len(cpp_Z))
+    sc_mult = int(proposer.supercell[0] * proposer.supercell[1] * proposer.supercell[2])
+    n_super_cpp = n_unit_cpp * sc_mult
+    n_super_ase = int(len(target.fw))
+    if n_super_cpp != n_super_ase:
+        raise RuntimeError(
+            f"C++/ASE supercell atom count mismatch: cpp={n_super_cpp} ({n_unit_cpp}*{sc_mult}) vs ase={n_super_ase}"
+        )
+
+    uc = getattr(target, "uc", None)
+    if uc is None:
+        raise RuntimeError("Target evaluator is missing unit-cell `uc` Atoms for consistency check")
+    ase_Z = np.array(uc.get_atomic_numbers(), dtype=np.int32)
+    ase_frac = np.array(uc.get_scaled_positions(), dtype=np.float64)
+    if len(cpp_Z) != len(ase_Z) or not np.array_equal(np.sort(cpp_Z), np.sort(ase_Z)):
+        raise RuntimeError(
+            f"C++/ASE unit-cell composition mismatch: cpp_len={len(cpp_Z)}, ase_len={len(ase_Z)}"
+        )
+
+    uc_cell_rows = np.array(uc.get_cell(), dtype=np.float64)
+    from scipy.optimize import linear_sum_assignment
+
+    max_pos_err = 0.0
+    for z_val in np.unique(cpp_Z):
+        f_c = cpp_frac[cpp_Z == z_val]
+        f_a = ase_frac[ase_Z == z_val]
+        df = f_c[:, None, :] - f_a[None, :, :]
+        df -= np.round(df)
+        dr = df @ uc_cell_rows
+        dist = np.linalg.norm(dr, axis=-1)
+        row_ind, col_ind = linear_sum_assignment(dist)
+        z_max = float(np.max(dist[row_ind, col_ind])) if len(row_ind) > 0 else 0.0
+        if z_max > max_pos_err:
+            max_pos_err = z_max
+
+    if max_pos_err > pos_tol_A:
+        raise RuntimeError(
+            f"C++/ASE unit-cell atomic coordinate mismatch: max periodic distance={max_pos_err:.4e} A > {pos_tol_A} A"
+        )
+
+    r_max = float(getattr(getattr(target, "mace_calc", None), "r_max", 6.0))
+    if proposer.min_perp_width_A < 2.0 * r_max - 1e-6:
+        print(
+            f"  [WARNING] Supercell min perpendicular width ({proposer.min_perp_width_A:.2f} A) "
+            f"< 2 * MACE r_max ({2.0 * r_max:.2f} A); periodic minimum-image graph may include self-image edges."
+        )
+
+    return {
+        "n_unit_atoms": n_unit_cpp,
+        "n_super_atoms": n_super_ase,
+        "max_cell_err_A": max_cell_err,
+        "max_pos_err_A": max_pos_err,
+        "min_perp_width_A": float(proposer.min_perp_width_A),
+    }
+
+
+def _qst_from_sums(n_samples: int, sN: float, sN2: float, sU: float, sUN: float, T_K: float) -> float:
+    if n_samples <= 0:
+        return 0.0
+    inv_m = 1.0 / float(n_samples)
+    mN = sN * inv_m
+    mN2 = sN2 * inv_m
+    mU = sU * inv_m
+    mUN = sUN * inv_m
+    varN = mN2 - mN * mN
+    if varN > 1e-12:
+        return float((T_K - (mUN - mU * mN) / varN) * K_TO_KJMOL)
+    if mN > 1e-12:
+        return float((T_K - mU / mN) * K_TO_KJMOL)
+    return 0.0
+
+
+def compute_pooled_jackknife_qst(box_moments, T_K: float) -> dict:
+    """Compute pooled fluctuation Qst and leave-one-box-out Jackknife SEM from per-box raw moments."""
+    n_b = len(box_moments)
+    if n_b == 0:
+        return {"Qst_kJ_mol": 0.0, "Qst_sem_kJ_mol": 0.0, "Qst_loo_kJ_mol": []}
+
+    tot_m = sum(int(m["n_samples"]) for m in box_moments)
+    tot_sN = sum(float(m["sum_N"]) for m in box_moments)
+    tot_sN2 = sum(float(m["sum_N2"]) for m in box_moments)
+    tot_sU = sum(float(m["sum_U"]) for m in box_moments)
+    tot_sUN = sum(float(m["sum_UN"]) for m in box_moments)
+
+    q_pooled = _qst_from_sums(tot_m, tot_sN, tot_sN2, tot_sU, tot_sUN, float(T_K))
+    if n_b <= 1:
+        return {"Qst_kJ_mol": q_pooled, "Qst_sem_kJ_mol": 0.0, "Qst_loo_kJ_mol": [q_pooled] if n_b == 1 else []}
+
+    q_loo = []
+    for m in box_moments:
+        q_loo.append(
+            _qst_from_sums(
+                tot_m - int(m["n_samples"]),
+                tot_sN - float(m["sum_N"]),
+                tot_sN2 - float(m["sum_N2"]),
+                tot_sU - float(m["sum_U"]),
+                tot_sUN - float(m["sum_UN"]),
+                float(T_K),
+            )
+        )
+    q_arr = np.asarray(q_loo, dtype=np.float64)
+    mean_loo = float(np.mean(q_arr))
+    var_jack = ((n_b - 1.0) / n_b) * float(np.sum((q_arr - mean_loo) ** 2))
+    sem_jack = math.sqrt(max(0.0, var_jack))
+    return {"Qst_kJ_mol": q_pooled, "Qst_sem_kJ_mol": sem_jack, "Qst_loo_kJ_mol": q_loo}
+
+
 def run_nested_mc(
     proposer: CudaGcmcProposer,
     target_fn,
@@ -675,11 +825,39 @@ def run_nested_mc(
 
     mean_up = float(np.mean(box_uptakes))
     sem_up = float(np.std(box_uptakes, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
-    mean_qst = float(np.mean(box_qst))
-    sem_qst = float(np.std(box_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
+    per_box_mean_qst = float(np.mean(box_qst))
+    per_box_sem_qst = float(np.std(box_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
+    box_moments = [
+        {
+            "n_samples": int(prod_cycles),
+            "sum_N": float(sum_N[b]),
+            "sum_N2": float(sum_N2[b]),
+            "sum_U": float(sum_U[b]),
+            "sum_UN": float(sum_UN[b]),
+        }
+        for b in range(n_b)
+    ]
+    jack = compute_pooled_jackknife_qst(box_moments, T_K)
+    mean_qst = float(jack["Qst_kJ_mol"])
+    sem_qst = float(jack["Qst_sem_kJ_mol"])
     mean_mb = float(np.mean(box_molar_bind))
     mean_mq = float(np.mean(box_molar_qst))
     sem_mq = float(np.std(box_molar_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
+
+    final_acc = proposer.get_accepted()
+    final_states = [
+        {
+            "N": int(st["N"]),
+            "U_ref_K": float(st["U_ref_K"]),
+            "cx": st["cx"].tolist(),
+            "cy": st["cy"].tolist(),
+            "cz": st["cz"].tolist(),
+            "ux": st["ux"].tolist(),
+            "uy": st["uy"].tolist(),
+            "uz": st["uz"].tolist(),
+        }
+        for st in final_acc
+    ]
 
     return {
         "n_boxes": n_b,
@@ -691,9 +869,13 @@ def run_nested_mc(
         "uptake_mmol_g": mean_up,
         "uptake_sem_mmol_g": sem_up,
         "box_uptakes_mmol_g": box_uptakes.tolist(),
+        "Qst_estimator": "pooled_jackknife",
         "Qst_kJ_mol": mean_qst,
         "Qst_sem_kJ_mol": sem_qst,
+        "Qst_per_box_mean_kJ_mol": per_box_mean_qst,
+        "Qst_per_box_sem_kJ_mol": per_box_sem_qst,
         "box_qst_kJ_mol": box_qst,
+        "box_moments": box_moments,
         "mean_molar_binding_kJ_mol": mean_mb,
         "mean_molar_qst_kJ_mol": mean_mq,
         "mean_molar_qst_sem_kJ_mol": sem_mq,
@@ -707,4 +889,5 @@ def run_nested_mc(
         "effective_mc_steps_per_target_eval": float(k_steps * np.mean(acc_outer) / tot_denom),
         "box_N_history": box_N_history,
         "trajectory": trajectory,
+        "final_states": final_states,
     }

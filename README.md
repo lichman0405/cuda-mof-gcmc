@@ -77,13 +77,13 @@ Evaluating an MLIP on every trial MC insertion wastes ~95% of neural-network cal
 
 ### Prerequisites
 - Windows 10/11 + NVIDIA CUDA Toolkit (`sm_120`, RTX 5070) + MSVC (`Visual Studio 2022` Build Tools)
-- Optional (for MLIP Nested MC): Python 3.11+ with PyTorch CUDA, `mace-torch`, `torch-dftd`, `ase`, `numpy`, `matplotlib`
+- Optional (for MLIP Nested MC): Python 3.11+ (`pip install -r requirements.txt` after CUDA PyTorch; see [requirements.txt](requirements.txt))
 
 ### Build & Run
 
 ```powershell
-# Compile all 5 targets (mof_gcmc, mof_gcmc_mix, mof_gcmc_v2, mof_gcmc_cli, mof_gcmc_proposer.dll)
-cmd /c build.bat all
+# Default core targets (mof_gcmc_cli.exe + mof_gcmc_proposer.dll); use `build.bat all` for archived legacy binaries
+cmd /c build.bat
 
 # Classical / Polarizable unified CLI presets
 .\build\mof_gcmc_cli.exe --test-scf
@@ -114,7 +114,7 @@ cuda-mof-gcmc/
 ├── data/      # Crystal CIFs (Mg-MOF-74, Ni-MOF-74, Cu-BTC, IRMOF-1), Mercado FF & NIST ISODB tables
 ├── docs/      # Detailed validation benchmarks, equations & WIP research notes (EN / ZH)
 ├── include/   # C++17 / CUDA headers: MIC geometry, force fields, 3D grids, CIF loader & proposer C ABI
-├── src/       # CUDA kernels & C++ drivers (mof_gcmc, mix, v2, cli, mof_gcmc_proposer.dll)
+├── src/       # Active CUDA kernels & drivers (mof_gcmc_cli, mof_gcmc_proposer.dll) + src/legacy/ (v1–v3)
 ├── scripts/   # Python verification suites, RASPA3 wrappers & MLIP Nested MC engine
 └── assets/    # Benchmark & verification plots (300 DPI)
 ```

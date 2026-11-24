@@ -76,13 +76,13 @@
 
 ### 环境要求
 - Windows 10/11 + NVIDIA CUDA Toolkit（`sm_120`, RTX 5070）+ MSVC（Visual Studio 2022 生成工具）
-- 可选（用于 MLIP Nested MC）：Python 3.11+（PyTorch CUDA、`mace-torch`、`torch-dftd`、`ase`、`numpy`、`matplotlib`）
+- 可选（用于 MLIP Nested MC）：Python 3.11+（先按本地 CUDA 版本安装 PyTorch，再执行 `pip install -r requirements.txt`，详见 [requirements.txt](requirements.txt)）
 
 ### 编译与运行
 
 ```powershell
-# 编译全部 5 个目标（mof_gcmc, mof_gcmc_mix, mof_gcmc_v2, mof_gcmc_cli, mof_gcmc_proposer.dll）
-cmd /c build.bat all
+# 默认编译核心目标（mof_gcmc_cli.exe + mof_gcmc_proposer.dll）；若需归档的旧版可执行文件可执行 `build.bat all`
+cmd /c build.bat
 
 # 经典与极化统一 CLI 预设
 .\build\mof_gcmc_cli.exe --test-scf
@@ -113,7 +113,7 @@ cuda-mof-gcmc/
 ├── data/      # 晶体 CIF（Mg-MOF-74、Ni-MOF-74、Cu-BTC、IRMOF-1）、Mercado 力场与 NIST ISODB 实验表
 ├── docs/      # 详细基准测试文档、公式推导与科研进展/待办记录（中/英文）
 ├── include/   # C++17 / CUDA 头文件：最小镜像、力场参数、三维网格、CIF 解析与提议器 C ABI
-├── src/       # CUDA 内核与驱动源码（mof_gcmc、mix、v2、cli、mof_gcmc_proposer.dll）
+├── src/       # 现役 CUDA 核与驱动源码（mof_gcmc_cli、mof_gcmc_proposer.dll）+ src/legacy/（v1–v3 归档）
 ├── scripts/   # Python 自动校验套件、RASPA3 对标脚本与 MLIP Nested MC 引擎
 └── assets/    # 基准对标与验证图（300 DPI）
 ```
