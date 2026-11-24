@@ -78,11 +78,11 @@
 
 ---
 
-## 快速开始（Windows 单卡使用指南）
+## 快速开始（Windows 与 Linux 单卡使用指南）
 
-### 一键检测、缺啥装啥与编译自检（`fast_start.bat`）
+### 一键检测、缺啥装啥与编译自检（`fast_start.bat` / `fast_start.sh`）
 
-在仓库根目录直接执行 [`fast_start.bat`](fast_start.bat)（内部调用 [`scripts/fast_start_win.ps1`](scripts/fast_start_win.ps1)）。脚本会自动检测你的 NVIDIA 显卡架构（`sm_XX`）、CUDA Toolkit（`nvcc`）、MSVC 编译环境（VS 2022 或 VS 2019）、Python 3.10+、带 CUDA 的 PyTorch 及依赖库——**缺什么装什么**（已装好的直接跳过），随后自动编译 [`build.bat`](build.bat) 并跑完快速自检：
+- **Windows**：在仓库根目录执行 [`fast_start.bat`](fast_start.bat)（内部调用 [`scripts/fast_start_win.ps1`](scripts/fast_start_win.ps1)），自动检测 NVIDIA 显卡架构（`sm_XX`）、CUDA Toolkit（`nvcc`）、MSVC 编译环境（VS 2022/2019）、Python 3.10+、带 CUDA 的 PyTorch 及依赖库——**缺什么装什么**，随后编译 [`build.bat`](build.bat) 并跑自检：
 
 ```powershell
 # 仅检查当前电脑缺哪些依赖，不执行安装和编译
@@ -95,15 +95,31 @@ cmd /c fast_start.bat
 cmd /c fast_start.bat -Rebuild -SmokeMlip
 ```
 
+- **Linux**：在仓库根目录执行 [`fast_start.sh`](fast_start.sh)（优先使用 `uv`，未装时自动回退 `python3 -m venv`；多卡共享服务器可用 `--gpu <id>` 指定空闲卡）：
+
+```bash
+# 仅检查环境与依赖状态
+./fast_start.sh --check-only
+
+# 自动创建 .venv-mlip（按驱动上限选 cu124/cu128）、编译核心目标并运行自检
+./fast_start.sh --gpu 0 --smoke-mlip
+```
+
 ### 手动准备与编译说明
-- Windows 10/11 + NVIDIA 显卡驱动 + CUDA Toolkit（[`build.bat`](build.bat) 会通过 `nvidia-smi` 自动识别 `CUDA_ARCH`，也可用 `set CUDA_ARCH=sm_89` 手动指定）+ MSVC（Visual Studio **2022** 或 **2019** 生成工具，自动探测）
-- MLIP 与 `pytest`：Python 3.10+（需先装带 CUDA 的 PyTorch，再执行 `pip install -r requirements.txt`，详见 [requirements.txt](requirements.txt) 与 [pyproject.toml](pyproject.toml)）
+- **Windows**：Windows 10/11 + NVIDIA 驱动 + CUDA Toolkit（[`build.bat`](build.bat) 自动识别 `CUDA_ARCH`，或 `set CUDA_ARCH=sm_89` 覆盖）+ MSVC（VS **2022** / **2019** 生成工具）
+- **Linux**：Ubuntu/Linux + NVIDIA 驱动 + CUDA Toolkit（自动检索 `PATH`、`/usr/local/cuda` 与 NVHPC；[`build.sh`](build.sh) 自动识别 `CUDA_ARCH`，或 `CUDA_ARCH=sm_86 ./build.sh`）+ `g++`
+- **Python / MLIP**：Python 3.10+（需先装带 CUDA 的 PyTorch，再执行 `pip install -r requirements.txt`，详见 [requirements.txt](requirements.txt) 与 [pyproject.toml](pyproject.toml)）
 
 ```powershell
-# 编译核心目标（mof_gcmc_cli.exe + mof_gcmc_proposer.dll）；若需归档旧版可执行文件可执行 `build.bat all`
+# Windows 编译核心目标（mof_gcmc_cli.exe + mof_gcmc_proposer.dll）；`build.bat all` 可一并编译归档版本
 cmd /c build.bat
 
-# 经典与极化统一 CLI 预设及回归校验
+# Linux 编译核心目标（mof_gcmc_cli + libmof_gcmc_proposer.so）；`./build.sh all` 可一并编译归档版本
+./build.sh
+```
+
+```powershell
+# 经典与极化统一 CLI 预设及回归校验（Linux 下把 `.\build\mof_gcmc_cli.exe` 替换为 `./build/mof_gcmc_cli`）
 .\build\mof_gcmc_cli.exe --test-scf
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_uff.json
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_fluegas_298K_pol3site.json
@@ -175,7 +191,9 @@ cmd /c build.bat
 ```text
 cuda-mof-gcmc/
 ├── fast_start.bat  # Windows 一键检测、补齐依赖、编译与自检入口
-├── build.bat       # MSVC + CUDA 编译脚本（自动探测 VS2022/2019 与显卡 sm_XX）
+├── fast_start.sh   # Linux 一键检测（uv/venv）、补齐依赖、编译与自检入口
+├── build.bat       # Windows MSVC + CUDA 编译脚本（VS2022/2019 与显卡 sm_XX）
+├── build.sh        # Linux nvcc + g++ 编译脚本（自动识别 CUDA 与显卡 sm_XX）
 ├── pyproject.toml  # 项目打包配置与 pytest 标记（mlip, slow）
 ├── configs/        # mof_gcmc_cli.exe 预设配置（UFF、Mercado 2016、313K PSA、烟道气、Pol-SCF）
 ├── data/           # 晶体 CIF（Mg-MOF-74、Ni-MOF-74、Cu-BTC、IRMOF-1）、Mercado 力场与 NIST ISODB 实验表

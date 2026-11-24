@@ -41,8 +41,26 @@ def quat_rotate_batch(qw, qx, qy, qz, local_xyz: np.ndarray) -> np.ndarray:
     return v + np.asarray(qw, dtype=np.float64)[:, None, None] * t + np.cross(qxyz, t)
 
 
+def _find_proposer_lib() -> Path:
+    if os.name == "nt":
+        lib_path = BUILD / "mof_gcmc_proposer.dll"
+        if not lib_path.exists():
+            raise FileNotFoundError(f"Missing {lib_path}. Run `cmd /c build.bat proposer` first.")
+        return lib_path
+    for cand in (
+        BUILD / "libmof_gcmc_proposer.so",
+        BUILD / "mof_gcmc_proposer.so",
+        BUILD / "libmof_gcmc_proposer.dylib",
+    ):
+        if cand.exists():
+            return cand
+    raise FileNotFoundError(
+        f"Missing proposer shared library in {BUILD}. Run `./build.sh proposer` first."
+    )
+
+
 class CudaGcmcProposer:
-    """Zero-I/O ctypes wrapper around build/mof_gcmc_proposer.dll."""
+    """Zero-I/O ctypes wrapper around mof_gcmc_proposer (.dll / .so)."""
 
     def __init__(
         self,
@@ -58,9 +76,7 @@ class CudaGcmcProposer:
         seed: int = 20261123,
     ):
         _register_dll_dirs()
-        dll_path = BUILD / "mof_gcmc_proposer.dll"
-        if not dll_path.exists():
-            raise FileNotFoundError(f"Missing {dll_path}. Run `cmd /c build.bat proposer` first.")
+        dll_path = _find_proposer_lib()
         self.lib = ctypes.CDLL(str(dll_path))
         self._bind()
 
@@ -99,9 +115,7 @@ class CudaGcmcProposer:
     ):
         obj = cls.__new__(cls)
         _register_dll_dirs()
-        dll_path = BUILD / "mof_gcmc_proposer.dll"
-        if not dll_path.exists():
-            raise FileNotFoundError(f"Missing {dll_path}. Run `cmd /c build.bat proposer` first.")
+        dll_path = _find_proposer_lib()
         obj.lib = ctypes.CDLL(str(dll_path))
         obj._bind()
         rc = obj.lib.proposer_set_device(int(device_id))

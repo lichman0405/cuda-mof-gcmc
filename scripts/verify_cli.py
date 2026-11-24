@@ -1,13 +1,14 @@
 """End-to-end verification of the unified JSON/CLI GPU GCMC engine (mof_gcmc_cli.exe)."""
 
 import math
+import os
 import subprocess
 import time
 from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-EXE = ROOT / "build" / "mof_gcmc_cli.exe"
+EXE = ROOT / "build" / ("mof_gcmc_cli.exe" if os.name == "nt" else "mof_gcmc_cli")
 BUILD = ROOT / "build"
 
 

@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-EXE = ROOT / "build" / "mof_gcmc_cli.exe"
+EXE = ROOT / "build" / ("mof_gcmc_cli.exe" if os.name == "nt" else "mof_gcmc_cli")
 BUILD = ROOT / "build"
 
 KE_K = 167100.9558738398

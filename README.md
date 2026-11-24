@@ -78,11 +78,11 @@ Evaluated on the **same NVIDIA RTX 5070** starting from identical equilibrated M
 
 ---
 
-## Quickstart (Windows Single-GPU)
+## Quickstart (Windows & Linux Single-GPU)
 
-### One-Click Setup & Self-Check (`fast_start.bat`)
+### One-Click Setup & Self-Check (`fast_start.bat` / `fast_start.sh`)
 
-Run [`fast_start.bat`](fast_start.bat) (wraps [`scripts/fast_start_win.ps1`](scripts/fast_start_win.ps1)) from the repo root. It detects your NVIDIA GPU compute capability (`sm_XX`), CUDA Toolkit (`nvcc`), MSVC Build Tools (VS 2022 or VS 2019), Python 3.10+, CUDA PyTorch, and required packages—installing only what is missing (`winget` / `pip`), compiling [`build.bat`](build.bat), and running quick self-checks:
+- **Windows** — Run [`fast_start.bat`](fast_start.bat) (wraps [`scripts/fast_start_win.ps1`](scripts/fast_start_win.ps1)) from the repo root. It detects your NVIDIA GPU compute capability (`sm_XX`), CUDA Toolkit (`nvcc`), MSVC Build Tools (VS 2022 or VS 2019), Python 3.10+, CUDA PyTorch, and required packages—installing only what is missing (`winget` / `pip`), compiling [`build.bat`](build.bat), and running quick self-checks:
 
 ```powershell
 # Inspect environment only (no installs or builds)
@@ -91,19 +91,35 @@ cmd /c fast_start.bat -CheckOnly
 # Auto-install any missing prerequisites, build core DLL/EXE, and run Pol-SCF + pytest
 cmd /c fast_start.bat
 
-# Optional flags: force clean CUDA rebuild, non-interactive install, or include live MACE smoke test
+# Optional flags: force clean CUDA rebuild or include live MACE smoke test
 cmd /c fast_start.bat -Rebuild -SmokeMlip
 ```
 
+- **Linux** — Run [`fast_start.sh`](fast_start.sh) from the repo root (`uv` is used automatically when available, falling back to `python3 -m venv`; `--gpu <id>` pins `CUDA_VISIBLE_DEVICES` on shared multi-GPU servers):
+
+```bash
+# Inspect GPU, CUDA, uv/Python, packages, and binaries without making changes
+./fast_start.sh --check-only
+
+# Create .venv-mlip (cu124/cu128 auto-selected from driver), compile core binaries via ./build.sh, and verify
+./fast_start.sh --gpu 0 --smoke-mlip
+```
+
 ### Manual Prerequisites & Build
-- Windows 10/11 + NVIDIA Driver + CUDA Toolkit (`CUDA_ARCH` is auto-detected via `nvidia-smi`, or override with `set CUDA_ARCH=sm_89`) + MSVC (Visual Studio **2022** or **2019** Build Tools; [`build.bat`](build.bat) probes both)
-- Optional (for MLIP Nested MC & pytest): Python 3.10+ (install CUDA PyTorch first, then `pip install -r requirements.txt`; see [requirements.txt](requirements.txt) and [pyproject.toml](pyproject.toml))
+- **Windows**: Windows 10/11 + NVIDIA Driver + CUDA Toolkit (`CUDA_ARCH` auto-detected via `nvidia-smi`, or override `set CUDA_ARCH=sm_89`) + MSVC (VS **2022** or **2019** Build Tools; [`build.bat`](build.bat) probes both)
+- **Linux**: Ubuntu/Linux + NVIDIA Driver + CUDA Toolkit (`nvcc` in `PATH`, `/usr/local/cuda`, or NVHPC; [`build.sh`](build.sh) auto-detects `CUDA_ARCH`, or override `CUDA_ARCH=sm_86 ./build.sh`) + `g++`
+- **Python / MLIP**: Python 3.10+ (install CUDA PyTorch first, then `pip install -r requirements.txt`; see [requirements.txt](requirements.txt) and [pyproject.toml](pyproject.toml))
 
 ```powershell
-# Core targets (mof_gcmc_cli.exe + mof_gcmc_proposer.dll); `build.bat all` builds archived legacy binaries too
+# Windows: build core targets (mof_gcmc_cli.exe + mof_gcmc_proposer.dll); `build.bat all` builds legacy binaries too
 cmd /c build.bat
 
-# Classical / Polarizable CLI presets & verification
+# Linux: build core targets (mof_gcmc_cli + libmof_gcmc_proposer.so); `./build.sh all` builds legacy binaries too
+./build.sh
+```
+
+```powershell
+# Classical / Polarizable CLI presets & verification (replace `.\build\mof_gcmc_cli.exe` with `./build/mof_gcmc_cli` on Linux)
 .\build\mof_gcmc_cli.exe --test-scf
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_uff.json
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_fluegas_298K_pol3site.json
@@ -175,7 +191,9 @@ Key columns in `--out-csv`: `uptake_mmol_g` ± `uptake_sem_mmol_g`, Pooled-Jackk
 ```text
 cuda-mof-gcmc/
 ├── fast_start.bat  # Windows one-click setup, auto-build & self-check launcher
-├── build.bat       # MSVC + CUDA compiler wrapper (auto-detects VS2022/2019 & GPU sm_XX)
+├── fast_start.sh   # Linux one-click setup (uv/venv), auto-build & self-check launcher
+├── build.bat       # Windows MSVC + CUDA compiler wrapper (VS2022/2019 & GPU sm_XX)
+├── build.sh        # Linux nvcc + g++ compiler wrapper (auto-detects CUDA & GPU sm_XX)
 ├── pyproject.toml  # Package metadata & pytest markers (mlip, slow)
 ├── configs/        # JSON presets for mof_gcmc_cli.exe (UFF, Mercado 2016, 313K PSA, Flue Gas, Pol-SCF)
 ├── data/           # Crystal CIFs (Mg-MOF-74, Ni-MOF-74, Cu-BTC, IRMOF-1), Mercado FF & NIST ISODB tables
