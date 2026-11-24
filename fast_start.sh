@@ -273,10 +273,13 @@ PY
         else
             echo "  Installing CUDA PyTorch from ${TORCH_INDEX_URL} ..."
             if [[ -n "$UV_BIN" ]]; then
-                "$UV_BIN" pip install --python "$VENV_PY" torch --index-url "${TORCH_INDEX_URL}"
+                "$UV_BIN" pip uninstall --python "$VENV_PY" torch >/dev/null 2>&1 || true
+                env -u UV_DEFAULT_INDEX "$UV_BIN" pip install --python "$VENV_PY" --default-index "${TORCH_INDEX_URL}" torch
             else
-                "$VENV_PY" -m pip install torch --index-url "${TORCH_INDEX_URL}"
+                "$VENV_PY" -m pip uninstall -y torch >/dev/null 2>&1 || true
+                "$VENV_PY" -m pip install --index-url "${TORCH_INDEX_URL}" torch
             fi
+            "$VENV_PY" -c "import torch; assert torch.cuda.is_available(), f'Installed torch {torch.__version__} (cuda={torch.version.cuda}) cannot initialize CUDA on this driver'"
             ok "Installed CUDA PyTorch (${CUDA_INDEX})"
         fi
     fi
