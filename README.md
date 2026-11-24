@@ -3,12 +3,12 @@
 # `cuda-mof-gcmc`
 
 ![CUDA C++](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?style=flat-square&logo=nvidia)
-![Target GPU](https://img.shields.io/badge/RTX%205070-sm__120-2563EB?style=flat-square)
+![Multi-GPU Verified](https://img.shields.io/badge/Multi--GPU-sm__86%20%2F%20sm__120-2563EB?style=flat-square)
 ![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
-![Pytest](https://img.shields.io/badge/pytest-14%20passed-059669?style=flat-square)
+![Pytest](https://img.shields.io/badge/pytest-18%20passed-059669?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
 
-A GPU-native simulation engine for gas adsorption in **arbitrary rigid Metal–Organic Frameworks (MOFs)** on **NVIDIA RTX 5070** (`sm_120`). It combines **(1) a verified CUDA classical and many-body self-consistent polarizable (`Pol-SCF`) GCMC solver** with **(2) a zero-I/O CUDA-to-PyTorch Nested Monte Carlo (Nested MC) engine** that uses a general 3D quaternion GPU proposer (`103`-element UFF + periodic QEq, or `Mercado 2016` DFT-FF) as an inner Markov chain for Machine-Learning Interatomic Potentials (`MACE + TorchDFTD3`).
+A cross-platform GPU-native simulation engine for gas adsorption in **arbitrary rigid Metal–Organic Frameworks (MOFs)** (verified on **Windows RTX 5070** `sm_120` and **4× Linux RTX 3090** `sm_86`). It combines **(1) a verified CUDA classical and many-body self-consistent polarizable (`Pol-SCF`) GCMC solver** with **(2) a zero-I/O CUDA-to-PyTorch Nested Monte Carlo (Nested MC) engine** that uses a general 3D quaternion GPU proposer (`103`-element UFF + periodic QEq, or `Mercado 2016` DFT-FF) as an inner Markov chain for Machine-Learning Interatomic Potentials (`MACE + TorchDFTD3`), with multi-GPU `pressure` & `replica` parallelization (`--gpus`).
 
 ---
 
@@ -50,7 +50,7 @@ Evaluated on the **same NVIDIA RTX 5070** starting from identical equilibrated M
 | **Primary Role** | Full-featured classical GCMC ecosystem (broad force fields, flexible CBMC molecules, high-throughput screening) | **GPU-native many-body polarization (`Pol-SCF`)** + **zero-I/O Nested MLIP-GCMC proposer architecture** |
 | **Polarization** | Standard fixed point charges (LJ + Ewald) | 3D tricubic framework E-fields (`Pol-3Site`) + block-collective FP64 Applequist–Thole **many-body `Pol-SCF`** |
 | **MLIP Sampling** | No built-in zero-I/O CUDA proposer DLL for PyTorch MLIP reweighting | Native C ABI ([`proposer_api.h`](include/proposer_api.h)) coupled in memory with `FastMaceD3Target`, 3-stage $\Delta\mu_{\text{ref}}$, Pooled-Jackknife $Q_{\text{st}}$, and `ESS` diagnostics |
-| **Benchmark Scope** | Benchmarked directly against CPU **`RASPA3 3.0.29`** (not same-GPU vs. `gRASPA`); for standard classical screening, use `gRASPA` | Tuned on single RTX 5070 for arbitrary rigid MOFs + rigid small guests (`CO₂`, `CH₄`, `N₂`, `H₂`, `Ar`, `H₂O`, `NH₃`) |
+| **Benchmark Scope** | Benchmarked directly against CPU **`RASPA3 3.0.29`** (not same-GPU vs. `gRASPA`); for standard classical screening, use `gRASPA` | Verified on **RTX 5070** & **4× RTX 3090** (`--gpus`) for arbitrary rigid MOFs + rigid small guests (`CO₂`, `CH₄`, `N₂`, `H₂`, `Ar`, `H₂O`, `NH₃`) |
 
 ---
 
@@ -60,8 +60,8 @@ Evaluated on the **same NVIDIA RTX 5070** starting from identical equilibrated M
 | :--- | :--- | :---: |
 | **Tricubic Classical CUDA GCMC** ([`src/main_cli.cu`](src/main_cli.cu)) | `0.10 Å` $O(h^4)$ 3D tricubic grids, `UFF` (`103` elements) / `Mercado 2016`, arbitrary triclinic MIC, `Identity Swap`, PR EOS | **Verified** (vs. `RASPA3 3.0.29` `≤ 0.54σ`) |
 | **Polarizable & `Pol-SCF` Solvers** | Framework `Pol-COM` / `Pol-3Site` + block-collective FP64 many-body Thole `Pol-SCF` | **Verified** (`1.83e-08 K` vs. `36×36` exact inversion) |
-| **Universal Nested MLIP-GCMC Engine** ([`src/proposer_dll.cu`](src/proposer_dll.cu), [`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py)) | 3D quaternion GPU proposer + `qeq_charges.py` + `guests.py` + batched `FastMaceD3Target` + VRAM guard | **Verified** (`pytest` `14 passed`; `Pol3->Merc` `z = 1.15`, `0.000 K` quat parity) |
-| **Direct Baselines & Multi-MLIP Roadmap** ([`scripts/benchmark_speedup.py`](scripts/benchmark_speedup.py)) | Same-GPU `ESS / GPU-s` & `SJD_N / GPU-s` benchmarks vs. Direct MLIP-GCMC (`Mg-MOF-74`, `IRMOF-1`) | **Active** (multi-MLIP plugins & Linux 8-GPU queued next) |
+| **Universal Nested MLIP-GCMC Engine** ([`src/proposer_dll.cu`](src/proposer_dll.cu), [`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py)) | 3D quaternion GPU proposer + `qeq_charges.py` + `guests.py` + batched `FastMaceD3Target` + VRAM guard | **Verified** (`pytest` **`18 passed`**; `Pol3->Merc` `z = 1.15`, `0.000 K` quat parity) |
+| **Direct Baselines & Multi-GPU Engine** ([`scripts/benchmark_speedup.py`](scripts/benchmark_speedup.py), [`scripts/multi_gpu.py`](scripts/multi_gpu.py)) | Same-GPU `ESS / GPU-s` & `SJD_N / GPU-s` vs. Direct MLIP-GCMC + `pressure`/`replica` scaling (`3.26–3.44×` on `4× RTX 3090`) | **Verified** (next: soft-core OMS proposer, multi-MLIP plugins, periodic DFT + Δ-learning) |
 
 ---
 
@@ -200,20 +200,32 @@ Pass `--gpus 0 1 2 3` (via [`scripts/multi_gpu.py`](scripts/multi_gpu.py)) to sc
   --gpus 0 1 2 3 --parallel-mode replica --out-json build/irmof1_replica_4gpu.json
 ```
 
-Measured apples-to-apples (`--worker-threads 4` on both single- and multi-GPU runs to avoid OpenMP oversubscription on dual-socket EPYC) on **`IRMOF-1 + CH₄`** (`MACE-MP0 medium + D3(pbe)`, `298 K`, `40 eq + 80 prod` cycles, **4× NVIDIA RTX 3090**):
+Measured apples-to-apples (`--worker-threads 4` on both single- and multi-GPU runs to avoid OpenMP oversubscription on dual-socket EPYC) across **`1×` vs. `4× NVIDIA RTX 3090` (`GPUs 0–3`)**:
 
 | Workload | `1× RTX 3090` Wall (`MC Loop`) | `4× RTX 3090` Wall (`MC Loop`) | End-to-End Speedup (`MC Loop`) | `ESS_N / wall-s` (`1 GPU -> 4 GPUs`) |
 | :--- | :---: | :---: | :---: | :---: |
-| **`pressure` mode** (`0.5, 1.0, 2.5, 5.0 bar`, `4 boxes/pt`) | `270.55 s` (`78.81 s`) | **`78.66 s`** (`21.55 s` max) | **`3.44×`** (`3.66×`) | `0.34 -> 1.59` (`4.7×`) |
-| **`replica` mode** (`5.0 bar`, `16 boxes`) | `125.52 s` (`69.24 s`) | **`79.76 s`** (`22.33 s`) | **`1.57×`** (**`3.10×`**) | `0.74 -> 1.07` (`1.4×`) |
+| **`IRMOF-1 + CH₄`** (`0.5–5.0 bar`, `MACE-MP0`, `120 cyc`, `pressure`) | `270.55 s` (`78.81 s`) | **`78.66 s`** (`21.55 s` max) | **`3.44×`** (`3.66×`) | `0.34 -> 1.59` (`4.7×`) |
+| **`IRMOF-1 + CH₄`** (`5.0 bar`, `16 boxes`, `120 cyc`, `replica`) | `125.52 s` (`69.24 s`) | **`79.76 s`** (`22.33 s`) | **`1.57×`** (**`3.10×`**) | `0.74 -> 1.07` (`1.4×`) |
+| **`Mg-MOF-74 + CO₂` E2E** (`0.003–0.15 bar`, `r2SCAN+D3`, `320 cyc`, `Mercado`, `pressure`) | `335.32 s` (`243.98 s`) | **`102.85 s`** (`68.7 s` max) | **`3.26×`** (**`3.55×`**) | `0.27 -> 0.68` (`2.49×`, parity `≤ 2.50σ`) |
+| **`Mg-MOF-74 + CO₂` E2E** (`0.003–0.15 bar`, `r2SCAN+D3`, `320 cyc`, `UFF+QEq`, `pressure`) | `—` | **`96.34 s`** (`64.0 s` max) | **`3.48×`** (vs. `1-GPU`) | **`0.98`** |
 
-> **Why `pressure` scales higher than short `replica` runs**: Each `run_pressure_point` call builds the `240³` (`13.8M`-point) tricubic grid (`~34.2 s` on `IRMOF-1`) + warms up MACE (`~4.7 s`) once per GPU. In `pressure` mode all `4` GPUs overlap grid builds across pressures (`3.44×` already on `120` cycles), whereas in short `120`-cycle `replica` runs that fixed `~55 s` per-point grid/calibration setup stays unsharded (larger `--eq-cycles` / `--prod-cycles` amortizes it toward `~2.3–3.0×`).
+![Mg-MOF-74 4-GPU Scaling & Parity](assets/e2e_mgmof74_multigpu_scaling.png)
+
+> **Why `pressure` scales higher than short `replica` runs**: Each `run_pressure_point` call builds the `240³` (`13.8M`-point) tricubic grid (`~34.2 s` on `IRMOF-1`) + warms up MACE (`~4.7 s`) once per GPU. In `pressure` mode all `4` GPUs overlap grid builds across pressures (`3.26–3.44×`), whereas in short `120`-cycle `replica` runs that fixed `~55 s` per-point grid/calibration setup stays unsharded (larger `--eq-cycles` / `--prod-cycles` amortizes it toward `~2.3–3.0×`).
+
+#### End-to-End `Mg-MOF-74 + CO₂` Open-Metal-Site (OMS) Audit (`298 K`, `0.003–0.15 bar`)
+
+![Mg-MOF-74 OMS Physics & Microscopic Coordination](assets/e2e_mgmof74_oms_physics.png)
+
+- **Sampling & Microscopic OMS Coordination Solved**: Classical `UFF+REPEAT` leaves **`0.0%`** of adsorbed $\text{CO}_2$ inside `< 2.60 Å` of open $\text{Mg}^{2+}$ at `0.05 bar` (`Qst = 26.6 kJ/mol`, `0.464 mmol/g`), whereas `MLIP r2SCAN+D3` (`Mercado prop.`) resolves genuine bent end-on `Mg²⁺···O=C=O` coordination (`d_min = 2.10–2.16 Å`, median `∠Mg–O–C = 134°–136°`, **`61.8%`** $\text{Mg}^{2+}$ occupancy at `0.05 bar`, `MolQst = 43–46 kJ/mol`).
+- **Generic `UFF+QEq` Hard-Core Proposal Barrier**: Even without custom parameters, generic `UFF+QEq` proposals + $\Delta\mu_{\text{ref}}$ (`-8.87` to `-6.31 kJ/mol`) capture bent `∠Mg–O–C = 131°–134°` OMS coordination (`75.0% < 2.60 Å` at `0.003 bar`), yet steep `12-6` UFF repulsion near `2.2–2.3 Å` limits `0.05 bar` $\text{Mg}^{2+}$ occupancy to `22.2%` vs. `61.8%` with softer-core `Mercado`.
+- **Foundation-Model Overbinding vs. NIST ISODB**: Because Nested MC samples the exact target MLIP ensemble, off-the-shelf `MACE-MatPES-r2SCAN-0 + D3(r2scan)` overpredicts NIST ISODB `Mg-MOF-74` curves by `2–4×` (`+4–5 kJ/mol` intrinsic overbinding also observed on non-OMS `IRMOF-1`), underscoring the need for periodic DFT calibration / Δ-learning alongside soft-core OMS proposals.
 
 ---
 
 ## Documentation & Repository Layout
 
-- [**Technical Report (Preprint Draft)**](docs/TECHNICAL_REPORT.md) — Unified methods, `RASPA3` / `Pol-SCF` / Nested MC verification, foundation-model diagnostics & 4-MOF NIST ISODB benchmarks.
+- [**Technical Report (Preprint Draft)**](docs/TECHNICAL_REPORT.md) — Unified methods, `RASPA3` / `Pol-SCF` / Nested MC verification, `4× RTX 3090` scaling, foundation-model diagnostics, `Mg-MOF-74` OMS microscopic audit & 4-MOF NIST ISODB benchmarks.
 - [**Classical & Polarizable Validation (Steps 1–5)**](docs/CLASSICAL_VALIDATION.md) — Crystal geometry, tricubic MAE, RASPA3 parity tables, co-adsorption selectivity & `Pol-SCF` checks.
 - [**MLIP Nested MC: Verified Mechanics & WIP Notes**](docs/MLIP_NESTED_MC_NOTES.md) — Reweighting null-bias proofs, $\Delta\mu_{\text{ref}}$ calibration, batched MACE speedup, foundation-model diagnostics & open scientific issues.
 
@@ -224,11 +236,11 @@ cuda-mof-gcmc/
 ├── build.bat       # Windows MSVC + CUDA compiler wrapper (VS2022/2019 & GPU sm_XX)
 ├── build.sh        # Linux nvcc + g++ compiler wrapper (auto-detects CUDA & GPU sm_XX)
 ├── pyproject.toml  # Package metadata & pytest markers (mlip, slow)
-├── configs/        # JSON presets for mof_gcmc_cli.exe (UFF, Mercado 2016, 313K PSA, Flue Gas, Pol-SCF)
+├── configs/        # JSON presets for mof_gcmc_cli (UFF, Mercado 2016, 313K PSA, Flue Gas, Pol-SCF)
 ├── data/           # Crystal CIFs (Mg-MOF-74, Ni-MOF-74, Cu-BTC, IRMOF-1), Mercado FF & NIST ISODB tables
 ├── docs/           # Detailed validation benchmarks, equations & WIP research notes (EN / ZH)
 ├── include/        # C++17 / CUDA headers: triclinic MIC geometry, 103-elem UFF + PR, 3D grids & proposer C ABI
-├── src/            # Active CUDA kernels & drivers (mof_gcmc_cli, mof_gcmc_proposer.dll) + src/legacy/ (v1–v3)
+├── src/            # Active CUDA kernels & drivers (mof_gcmc_cli, mof_gcmc_proposer.dll / .so) + src/legacy/
 ├── scripts/        # Core engine (run_mlip_gcmc, nested_mc_engine, multi_gpu, qeq_charges, guests) + experiments/ & legacy/
 ├── tests/          # Automated pytest suite (18 tests: 103-elem, QEq, quaternion guests, multi-GPU merge, Direct parity)
 └── assets/         # Architecture diagrams & benchmark/verification plots (300 DPI)

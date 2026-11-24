@@ -3,12 +3,12 @@
 # `cuda-mof-gcmc`
 
 ![CUDA C++](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?style=flat-square&logo=nvidia)
-![Target GPU](https://img.shields.io/badge/RTX%205070-sm__120-2563EB?style=flat-square)
+![Multi-GPU Verified](https://img.shields.io/badge/Multi--GPU-sm__86%20%2F%20sm__120-2563EB?style=flat-square)
 ![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
-![Pytest](https://img.shields.io/badge/pytest-14%20passed-059669?style=flat-square)
+![Pytest](https://img.shields.io/badge/pytest-18%20passed-059669?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
 
-面向 **NVIDIA RTX 5070**（`sm_120`）的纯 CUDA/C++17 **任意刚性 MOF** 气体吸附 GCMC 引擎。项目包含两部分能力：**（1）经过 `RASPA3` 对标验证的 GPU 经典及多体全自洽极化（`Pol-SCF`）求解器**；**（2）将通用 3D 四元数 CUDA 内核（103 号元素 UFF + 周期性 QEq，或 `Mercado 2016`）封装为零磁盘 I/O 动态库、通过化学势偏置与批处理机器学习势（`MACE + TorchDFTD3`）直连的嵌套蒙特卡洛（Nested MC）引擎**。
+面向 **Windows（RTX 5070 `sm_120`）与多卡 Linux（4× RTX 3090 `sm_86`）** 的纯 CUDA/C++17 **任意刚性 MOF** 气体吸附 GCMC 引擎。项目包含两部分能力：**（1）经过 `RASPA3` 对标验证的 GPU 经典及多体全自洽极化（`Pol-SCF`）求解器**；**（2）将通用 3D 四元数 CUDA 内核（103 号元素 UFF + 周期性 QEq，或 `Mercado 2016`）封装为零磁盘 I/O 动态库、通过化学势偏置与批处理机器学习势（`MACE + TorchDFTD3`）直连并支持多卡 `pressure` / `replica` 并行（`--gpus`）的嵌套蒙特卡洛（Nested MC）引擎**。
 
 ---
 
@@ -50,7 +50,7 @@
 | **核心定位** | 面向成熟经典力场的完整模拟生态（力场最全、支持柔性长链 CBMC 与大规模高通量筛选） | **GPU 原生多体全自洽极化（`Pol-SCF`）** + **耦合机器学习势的零 I/O Nested MC 架构** |
 | **极化物理** | 主打固定点电荷模型（LJ + 静电） | 支持三维 Tricubic 电场骨架极化（`Pol-3Site`）及每步 Block 级 FP64 Applequist-Thole **多体自洽 `Pol-SCF`** |
 | **MLIP 嵌套支持** | 无针对 PyTorch MLIP 重加权的零 I/O CUDA 提议器动态库 | 原生 C ABI（[`proposer_api.h`](include/proposer_api.h)）直连 `FastMaceD3Target`、3 阶段 $\Delta\mu_{\text{ref}}$、Pooled-Jackknife $Q_{\text{st}}$ 与 `ESS` 诊断 |
-| **对标与选型边界** | 实测对标对象为 **CPU 版 `RASPA3 3.0.29`**（未同卡对比 `gRASPA`）；若仅做标准经典力场筛选建议直接用 `gRASPA` | 聚焦单张 RTX 5070 下的任意刚性 MOF 与刚性小分子（`CO₂`、`CH₄`、`N₂`、`H₂`、`Ar`、`H₂O`、`NH₃`） |
+| **对标与选型边界** | 实测对标对象为 **CPU 版 `RASPA3 3.0.29`**（未同卡对比 `gRASPA`）；若仅做标准经典力场筛选建议直接用 `gRASPA` | 已在 **RTX 5070** 与 **4× RTX 3090**（`--gpus`）实测验证，聚焦任意刚性 MOF 与刚性小分子（`CO₂`、`CH₄`、`N₂`、`H₂`、`Ar`、`H₂O`、`NH₃`） |
 
 ---
 
@@ -60,8 +60,8 @@
 | :--- | :--- | :---: |
 | **Tricubic 经典 CUDA GCMC**（[`src/main_cli.cu`](src/main_cli.cu)） | `0.10 Å` $O(h^4)$ 三维 Tricubic 网格、`UFF`（103 元素）/ `Mercado 2016`、任意三斜 MIC、`Identity Swap`、PR 逸度 | **Verified**（对标 `RASPA3 3.0.29 <= 0.54σ`） |
 | **各向异性与全自洽多体极化** | 骨架电场 `Pol-COM` / `Pol-3Site` + Block 级共享内存 FP64 `Pol-SCF` | **Verified**（`--test-scf` 对齐 `36×36` 逆矩阵至 `1.83e-08 K`） |
-| **通用 Nested MLIP-GCMC 引擎**（[`src/proposer_dll.cu`](src/proposer_dll.cu), [`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py)） | 3D 四元数 CUDA 提议器 + `qeq_charges.py` + `guests.py` + 批处理 `FastMaceD3Target` + 显存防碎片 | **Verified**（`pytest 14 passed`；`Pol3->Merc` `z=1.15`；四元数 `0.000 K`） |
-| **对照基准与后续扩展**（[`scripts/benchmark_speedup.py`](scripts/benchmark_speedup.py)） | 同卡对比 `ESS / GPU-s` 与 `SJD_N / GPU-s`（`Mg-MOF-74`、`IRMOF-1`） | **持续推进**（下一步接入多 MLIP 后端与 8 卡 Linux 调度） |
+| **通用 Nested MLIP-GCMC 引擎**（[`src/proposer_dll.cu`](src/proposer_dll.cu), [`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py)） | 3D 四元数 CUDA 提议器 + `qeq_charges.py` + `guests.py` + 批处理 `FastMaceD3Target` + 显存防碎片 | **Verified**（`pytest` **`18 passed`**；`Pol3->Merc` `z=1.15`；四元数 `0.000 K`） |
+| **对照基准与多卡并行引擎**（[`scripts/benchmark_speedup.py`](scripts/benchmark_speedup.py), [`scripts/multi_gpu.py`](scripts/multi_gpu.py)） | 同卡对比 `ESS / GPU-s`、`SJD_N / GPU-s` + `4× RTX 3090` 并行加速（`3.26–3.44×`） | **Verified**（下一步：软核 OMS 提议器、多 MLIP 后端、周期性 DFT + Δ-learning） |
 
 ---
 
@@ -200,20 +200,32 @@ cmd /c build.bat
   --gpus 0 1 2 3 --parallel-mode replica --out-json build/irmof1_replica_4gpu.json
 ```
 
-在 `g0048`（4 张空闲 **NVIDIA RTX 3090**，双路 AMD EPYC，单卡与多卡均统一设定 `--worker-threads 4` 同口径对比）上实测 **`IRMOF-1 + CH₄`**（`MACE-MP0 medium + D3(pbe)`，`298 K`，`40 eq + 80 prod` 轮）：
+在 `g0048`（4 张空闲 **NVIDIA RTX 3090**，双路 AMD EPYC，单卡与多卡均统一设定 `--worker-threads 4` 同口径对比）上实测 **`1×` vs. `4× RTX 3090`（`GPUs 0–3`）**：
 
 | 测试场景 | `1× RTX 3090` 总耗时 (`MC 主循环`) | `4× RTX 3090` 总耗时 (`MC 主循环`) | 端到端加速比 (`MC 主循环`) | `ESS_N / wall-s` (`1 卡 -> 4 卡`) |
 | :--- | :---: | :---: | :---: | :---: |
-| **`pressure` 模式**（`0.5, 1.0, 2.5, 5.0 bar`，`4 boxes/pt`） | `270.55 s` (`78.81 s`) | **`78.66 s`** (`21.55 s` max) | **`3.44×`** (`3.66×`) | `0.34 -> 1.59` (`4.7×`) |
-| **`replica` 模式**（`5.0 bar`，`16 boxes`） | `125.52 s` (`69.24 s`) | **`79.76 s`** (`22.33 s`) | **`1.57×`** (**`3.10×`**) | `0.74 -> 1.07` (`1.4×`) |
+| **`IRMOF-1 + CH₄`**（`0.5–5.0 bar`, `MACE-MP0`, `120 cyc`, `pressure`） | `270.55 s` (`78.81 s`) | **`78.66 s`** (`21.55 s` max) | **`3.44×`** (`3.66×`) | `0.34 -> 1.59` (`4.7×`) |
+| **`IRMOF-1 + CH₄`**（`5.0 bar`, `16 boxes`, `120 cyc`, `replica`） | `125.52 s` (`69.24 s`) | **`79.76 s`** (`22.33 s`) | **`1.57×`** (**`3.10×`**) | `0.74 -> 1.07` (`1.4×`) |
+| **`Mg-MOF-74 + CO₂` 端到端**（`0.003–0.15 bar`, `r2SCAN+D3`, `320 cyc`, `Mercado`, `pressure`） | `335.32 s` (`243.98 s`) | **`102.85 s`** (`68.7 s` max) | **`3.26×`** (**`3.55×`**) | `0.27 -> 0.68` (`2.49×`, 对拍 `≤ 2.50σ`) |
+| **`Mg-MOF-74 + CO₂` 端到端**（`0.003–0.15 bar`, `r2SCAN+D3`, `320 cyc`, `UFF+QEq`, `pressure`） | `—` | **`96.34 s`** (`64.0 s` max) | **`3.48×`**（对比单卡） | **`0.98`** |
 
-> **工程解释**：每个压强点初始化时需要在单卡构建 `240³`（1382 万格点）的三次插值网格（`~34.2 s`）并完成预平衡（累计约 `~55 s` 固定开销）。`pressure` 模式下这批网格与模拟完全跨卡重叠，因此短轮数下即有 **`3.44×`**；`replica` 模式下 `MC 主循环` 同样获得 **`3.10×`** 加速，短轮数总墙时被单点 `55 s` 建网开销限制在 `1.57×`，加大生产步数（如 `120+320` 轮）后总加速比可进一步抬升至 `~2.3–3.0×`。此外，单卡默认开启 `--worker-threads 4` 后也消除了 256 核 CPU OpenMP 锁争抢（同场景单卡从 `429.59 s` / `316.74 s` 降至 `270.55 s` / `125.52 s`）。
+![Mg-MOF-74 4卡加速与一致性](assets/e2e_mgmof74_multigpu_scaling.png)
+
+> **工程解释**：每个压强点初始化时需要在单卡构建 `240³`（1382 万格点）的三次插值网格（`~34.2 s`）并完成预平衡（累计约 `~55 s` 固定开销）。`pressure` 模式下这批网格与模拟完全跨卡重叠，因此短轮数下即有 **`3.26–3.44×`**；`replica` 模式下 `MC 主循环` 同样获得 **`3.10×`** 加速，短轮数总墙时被单点 `55 s` 建网开销限制在 `1.57×`，加大生产步数后可抬升至 `~2.3–3.0×`。此外，单卡默认开启 `--worker-threads 4` 后也消除了 256 核 CPU OpenMP 锁争抢（同场景单卡从 `429.59 s` / `316.74 s` 降至 `270.55 s` / `125.52 s`）。
+
+#### `Mg-MOF-74 + CO₂` 开放金属位点（OMS）端到端审计（`298 K`, `0.003–0.15 bar`）
+
+![Mg-MOF-74 OMS 物理机理与微观配位](assets/e2e_mgmof74_oms_physics.png)
+
+- **微观配位机理已准确捕获得出**：经典 `UFF+REPEAT` 在 `0.05 bar` 下落入 `< 2.60 Å` 开放位点配位区的分子为 **`0.0%`**（`Qst = 26.6 kJ/mol`）；而 `MLIP r2SCAN+D3`（配 `Mercado` 提议器）稳定抓出弯折端基 `Mg²⁺···O=C=O` 配位（`d_min = 2.10–2.16 Å`、配位角中位数 `134°–136°`、`0.05 bar` 下 **`61.8%`** `Mg²⁺` 位点占据率、`MolQst = 43–46 kJ/mol`）。
+- **通用 `UFF+QEq` 提议器的硬核壁垒**：零特化力场的通用 `UFF+QEq` 提议器配合偏置同样能抓到弯折配位（`0.003 bar` 时 `75.0%` 分子处于 `< 2.60 Å`、`∠Mg–O–C ≈ 131°–134°`），但受 `12-6` UFF 在 `2.2–2.3 Å` 极陡排斥壁垒限制，`0.05 bar` `Mg²⁺` 占据率只有 `22.2%`（vs. `Mercado` 的 `61.8%`）。
+- **与 NIST 实验的定量偏差来自基础模型本身**：`MACE-MatPES-r2SCAN-0 + D3` 在 `Mg-MOF-74` 上较 NIST 实验偏高 `2–4×`（无开放位点的 `IRMOF-1` 上亦偏高 `2.5–2.9×`），根源在于开箱即用基础模型的 `+4–5 kJ/mol` 过结合误差，后续需结合周期性 DFT 单点拆解 / $\Delta$-learning 与软核 OMS 提议器继续压低。
 
 ---
 
 ## 详细文档与目录结构
 
-- [**项目技术报告（预印本风格）**](docs/TECHNICAL_REPORT.zh-CN.md) — 统一汇总理论方法、`RASPA3` / `Pol-SCF` / Nested MC 校验、基础模型短程诊断及四类 MOF NIST ISODB 基准评测。
+- [**项目技术报告（预印本风格）**](docs/TECHNICAL_REPORT.zh-CN.md) — 统一汇总理论方法、`RASPA3` / `Pol-SCF` / Nested MC 校验、`4× RTX 3090` 多卡扩展、基础模型短程诊断、`Mg-MOF-74` OMS 微观审计与四类 MOF NIST ISODB 基准评测。
 - [**经典与极化 CUDA 引擎基准校验（第一至五步）**](docs/CLASSICAL_VALIDATION.zh-CN.md) — 晶体几何校验、Tricubic 精度、RASPA3 对标表、共吸附选择性与 `Pol-SCF` 核验。
 - [**MLIP 嵌套蒙特卡洛：已验证机制与 WIP 研究记录**](docs/MLIP_NESTED_MC_NOTES.zh-CN.md) — 零偏差重加权证明、$\Delta\mu_{\text{ref}}$ 标定、MACE 批处理加速、基础模型诊断与待解决物理问题。
 
@@ -224,11 +236,11 @@ cuda-mof-gcmc/
 ├── build.bat       # Windows MSVC + CUDA 编译脚本（VS2022/2019 与显卡 sm_XX）
 ├── build.sh        # Linux nvcc + g++ 编译脚本（自动识别 CUDA 与显卡 sm_XX）
 ├── pyproject.toml  # 项目打包配置与 pytest 标记（mlip, slow）
-├── configs/        # mof_gcmc_cli.exe 预设配置（UFF、Mercado 2016、313K PSA、烟道气、Pol-SCF）
+├── configs/        # mof_gcmc_cli 预设配置（UFF、Mercado 2016、313K PSA、烟道气、Pol-SCF）
 ├── data/           # 晶体 CIF（Mg-MOF-74、Ni-MOF-74、Cu-BTC、IRMOF-1）、Mercado 力场与 NIST ISODB 实验表
 ├── docs/           # 详细基准测试文档、公式推导与科研进展/待办记录（中/英文）
 ├── include/        # C++17 / CUDA 头文件：三斜最小镜像、103 元素 UFF + PR、三维网格与提议器 C ABI
-├── src/            # 现役 CUDA 核与驱动源码（mof_gcmc_cli、mof_gcmc_proposer.dll）+ src/legacy/（v1–v3 归档）
+├── src/            # 现役 CUDA 核与驱动源码（mof_gcmc_cli、mof_gcmc_proposer.dll / .so）+ src/legacy/
 ├── scripts/        # 核心引擎（run_mlip_gcmc、nested_mc_engine、multi_gpu、qeq_charges、guests）+ experiments/ & legacy/
 ├── tests/          # Pytest 回归测试（18 项：103 元素、QEq、四元数客体、多卡合并、Direct 零偏置）
 └── assets/         # 中/英文系统架构图与基准对标图（300 DPI）
