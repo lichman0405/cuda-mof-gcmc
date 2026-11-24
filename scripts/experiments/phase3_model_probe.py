@@ -6,13 +6,15 @@ on 1-CO2 OMS radial/pore binding, loaded-state energy vs Mercado 2016, and 4-box
 import json
 import math
 import time
+import sys
 from pathlib import Path
 import numpy as np
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nested_mc_engine import CudaGcmcProposer, FastMaceD3Target, K_TO_KJMOL
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build"
 BUILD.mkdir(parents=True, exist_ok=True)
 

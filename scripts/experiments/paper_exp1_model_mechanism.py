@@ -12,7 +12,7 @@ from ase import Atoms
 from ase.io import read as ase_read
 from mace.calculators import mace_mp
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build"
 BUILD.mkdir(parents=True, exist_ok=True)
 

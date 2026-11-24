@@ -7,6 +7,7 @@ MACE + TorchDFTD3 calculations.
 """
 
 import json
+import sys
 from pathlib import Path
 import numpy as np
 import torch
@@ -14,9 +15,10 @@ from ase import Atoms
 from ase.io import read as ase_read
 from mace.calculators import mace_mp
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nested_mc_engine import CudaGcmcProposer, FastMaceD3Target, K_TO_KJMOL
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build"
 BUILD.mkdir(parents=True, exist_ok=True)
 KB_T_KJMOL = 298.0 * K_TO_KJMOL  # ~2.4777 kJ/mol at 298 K

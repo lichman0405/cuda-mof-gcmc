@@ -130,7 +130,7 @@ cuda-mof-gcmc/
 ├── docs/           # 详细基准测试文档、公式推导与科研进展/待办记录（中/英文）
 ├── include/        # C++17 / CUDA 头文件：三斜最小镜像、103 元素 UFF + PR、三维网格与提议器 C ABI
 ├── src/            # 现役 CUDA 核与驱动源码（mof_gcmc_cli、mof_gcmc_proposer.dll）+ src/legacy/（v1–v3 归档）
-├── scripts/        # MLIP Nested MC 引擎、QEq、刚体客体定义、Direct 基线及基准评测/绘图脚本
+├── scripts/        # 核心引擎、QEq、刚体客体与基准脚本 + scripts/experiments/（论文复现）& scripts/legacy/（归档）
 ├── tests/          # Pytest 回归测试（103 元素斜晶胞、QEq、四元数多客体、Jackknife/ESS、Direct 零偏置）
 └── assets/         # 中/英文系统架构图与基准对标图（300 DPI）
 ```

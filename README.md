@@ -130,7 +130,7 @@ cuda-mof-gcmc/
 ├── docs/           # Detailed validation benchmarks, equations & WIP research notes (EN / ZH)
 ├── include/        # C++17 / CUDA headers: triclinic MIC geometry, 103-elem UFF + PR, 3D grids & proposer C ABI
 ├── src/            # Active CUDA kernels & drivers (mof_gcmc_cli, mof_gcmc_proposer.dll) + src/legacy/ (v1–v3)
-├── scripts/        # MLIP Nested MC engine, QEq, rigid guests, Direct MLIP baselines & benchmark/plot scripts
+├── scripts/        # Core engine & active benchmarks + scripts/experiments/ & scripts/legacy/
 ├── tests/          # Automated pytest suite (103-elem, QEq, quaternion guests, Jackknife/ESS, Direct parity)
 └── assets/         # Architecture diagrams & benchmark/verification plots (300 DPI)
 ```

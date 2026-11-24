@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 RASPA3_ENV = ROOT / "build" / "tools" / "raspa3_env"
 RASPA3_EXE = RASPA3_ENV / "bin" / "raspa3.exe"
 BENCH_DIR = ROOT / "build" / "raspa3_bench"

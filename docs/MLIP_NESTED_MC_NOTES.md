@@ -8,14 +8,14 @@
 
 ## 1. Verified Engine Mechanics & Numerical Proofs
 
-### Phase 1: Latency & Correlation Probe ([`scripts/phase1_mlip_probe.py`](../scripts/phase1_mlip_probe.py))
+### Phase 1: Latency & Correlation Probe ([`scripts/experiments/phase1_mlip_probe.py`](../scripts/experiments/phase1_mlip_probe.py))
 ![Phase 1 MLIP Nested MC Probe](../assets/phase1_mlip_nested_mc_probe.png)
 
 - On `Mg-MOF-74` (`1×1×2`, `324` framework atoms, $c = 13.884$ Å $> 2 \times 6.0$ Å MACE cutoff) on RTX 5070 (`PyTorch cu128` + `mace-torch 0.3.17` + `torch-dftd 0.5.3`):
   - Single-point `MACE-MP-0 (Medium) + D3` ASE latency: `107.72 ms/eval` (`1 CO₂`) and `129.89 ms/eval` (`16 CO₂`; `206.03 ms/eval` on `1×1×4`).
   - Across `60` non-overlapping pore poses vs. `MACE-MP-0 + D3`, **`Mercado 2016 DFT-FF`** achieves the highest inner-proposer correlation ($R^2 = 0.911$, $\sigma(\Delta\Delta E) = 3.42\ \text{kJ/mol}$, theoretical 1-molecule Nested MC acceptance `84.4%`) over `UFF + REPEAT` ($R^2 = 0.719$) and `UFF + Pol-3Site` ($R^2 = 0.755$).
 
-### Phase 2: Exact Reweighting & Zero-Bias Null Proof ([`src/proposer_dll.cu`](../src/proposer_dll.cu), [`scripts/verify_nested_mc.py`](../scripts/verify_nested_mc.py))
+### Phase 2: Exact Reweighting & Zero-Bias Null Proof ([`src/proposer_dll.cu`](../src/proposer_dll.cu), [`scripts/experiments/verify_nested_mc.py`](../scripts/experiments/verify_nested_mc.py))
 ![Phase 2 Nested MC Verification](../assets/phase2_nested_mc_verification.png)
 
 - Each outer cycle executes $K$ strictly reversible CUDA GCMC moves (`DELTA_TRANS = 1.0 Å`, `MAX_ANGLE = 0.55 rad`, full double-precision end-of-burst energy recomputation) and accepts/rejects $\mathbf{x}'$ under the target Hamiltonian via Metropolis reweighting on $\Delta U_{\text{tgt}} - \Delta U_{\text{ref}}$.
@@ -28,15 +28,15 @@
 ### Phase 2.5: Three-Stage $\Delta\mu_{\text{ref}}$ Calibration, `4.21×` Batched MACE, FP32 Parity & Supercell Check
 ![Phase 2.5 Shifted & Batched Nested MC](../assets/phase25_shifted_batched_mace.png)
 
-- **Exact Grand-Canonical Bias (`proposer_set_chem_pot_shift`)** ([`scripts/verify_phase25_shifted_nested.py`](../scripts/verify_phase25_shifted_nested.py), [`scripts/run_mlip_gcmc.py`](../scripts/run_mlip_gcmc.py)):
+- **Exact Grand-Canonical Bias (`proposer_set_chem_pot_shift`)** ([`scripts/experiments/verify_phase25_shifted_nested.py`](../scripts/experiments/verify_phase25_shifted_nested.py), [`scripts/run_mlip_gcmc.py`](../scripts/run_mlip_gcmc.py)):
   - Adjusts inner fugacity $f_{\text{ref}} = f_{\text{tgt}} \exp(-\Delta\varepsilon / k_B T)$ via three-stage pre-production calibration (two classical stages capped at `+2.0 kJ/mol` plus a `60–80`-cycle target-ensemble `PilotStage3` refinement) and fixes $\Delta\varepsilon$ during equilibration/production while cancelling it identically in $\exp[-\beta(\Delta U_{\text{tgt}} - \Delta U_{\text{ref}} - \Delta\varepsilon\,\Delta N)]$.
   - **Shifted Null Test (`Pol-3Site -> Mercado`, `Δε = -2.57 kJ/mol`, `2.82× f_ref`)**: `5.8723 ± 0.0526` vs. `6.0230 ± 0.0406 mmol/g` (`z = 2.27σ`, $Q_{\text{st}}^{\text{diff}} = 35.55 \pm 0.63$ vs. `36.28 ± 0.25 kJ/mol`) with symmetric sampling (`Ins = 1,288 / 4,274`, `Del = 1,262 / 3,511`, `57.5%` acceptance).
-- **`FastMaceD3Target` (`4.21×` Speedup) & FP32 vs. FP64 Parity** ([`scripts/verify_fp32_parity.py`](../scripts/verify_fp32_parity.py)):
+- **`FastMaceD3Target` (`4.21×` Speedup) & FP32 vs. FP64 Parity** ([`scripts/experiments/verify_fp32_parity.py`](../scripts/experiments/verify_fp32_parity.py)):
   - Micro-batched `no_grad` MACE (`compute_force=False`, `mace_chunk=2` for `<550` atoms, `1` for `>=550` atoms) + cached static-framework GPU edge lists for `TorchDFTD3Calculator`: cuts 4-box inference from `157.7 ms/box` (ASE) to **`37.5 ms/box`** (`149.9 ms/batch`), matching ASE within `0.0025–0.0082 kJ/mol/CO2`.
   - Across `15` `Mg-MOF-74 1×1×2` snapshots (`N = 1, 13–16, 33–37 CO₂`), live FP32 `FastMaceD3Target` matches full FP64 `MACE + TorchDFTD3`:
     - `MACE-MatPES-r2SCAN-0 + D3(r2scan)`: max total `|ΔU| = 0.2058 kJ/mol` (`RMS = 0.0951`), max per-molecule `|ΔU/N| = 0.0940 kJ/mol/CO2`, max pairwise transition error `0.3500 kJ/mol` (`0.141 kB*T @ 298 K`).
     - `MACE-MP-0 (Medium) + D3(pbe)`: max total `|ΔU| = 0.4650 kJ/mol`, max per-molecule `0.3130 kJ/mol/CO2`, max pairwise transition error `0.4712 kJ/mol` (`0.190 kB*T @ 298 K`).
-- **Supercell Finite-Size Convergence (`1×1×2` vs. `1×1×4`, `298 K, 0.01 bar`, [`scripts/paper_exp4_finite_size.py`](../scripts/paper_exp4_finite_size.py))**:
+- **Supercell Finite-Size Convergence (`1×1×2` vs. `1×1×4`, `298 K, 0.01 bar`, [`scripts/experiments/paper_exp4_finite_size.py`](../scripts/experiments/paper_exp4_finite_size.py))**:
   - Direct `Mercado`: `0.8018 ± 0.0115` (`324` atoms, $r_{\text{cut}} = 6.66$ Å) vs. `0.8030 ± 0.0337 mmol/g` (`648` atoms, $r_{\text{cut}} = 10.86$ Å), **`z = 0.04σ`**.
   - Live `MACE-MP-0 + D3`: `9.3398 ± 0.3610` vs. `9.0615 ± 0.2539 mmol/g`, **`z = 0.63σ`** (`Molar enthalpy -<U>/<N>+RT = 44.99` vs. `45.01 kJ/mol`).
 
@@ -46,7 +46,7 @@
 
 ![MLIP Mechanism & Overbinding Audit](../assets/paper_fig3_mlip_mechanism_audit.png)
 
-Tested across 4 MACE generations in [`scripts/phase3_model_probe.py`](../scripts/phase3_model_probe.py) and [`scripts/paper_exp1_model_mechanism.py`](../scripts/paper_exp1_model_mechanism.py):
+Tested across 4 MACE generations in [`scripts/experiments/phase3_model_probe.py`](../scripts/experiments/phase3_model_probe.py) and [`scripts/experiments/paper_exp1_model_mechanism.py`](../scripts/experiments/paper_exp1_model_mechanism.py):
 
 - **Far-Field Zero-Offset Proof (`Mg-MOF-74` pore center**, $r_{\min} = 7.31$ Å $> 6.0$ Å MACE cutoff):
   - Raw MLIP without D3: `MP-0` (`+0.01`), `MPA-0` (`+0.00`), `MP-0b3` (`-0.21`), `MatPES-r2SCAN-0` (`-0.03 kJ/mol`); with D3 dispersion tail: `-2.38` to `-2.56 kJ/mol`. This confirms zero far-field baseline offset; differences arise from short-range interaction physics and D3 parameterizations.
@@ -66,7 +66,7 @@ Tested across 4 MACE generations in [`scripts/phase3_model_probe.py`](../scripts
 
 ![Stage-1 Four-MOF Benchmark vs. NIST ISODB](../assets/stage1_four_mof_nist_isodb.png)
 
-All experimental comparisons below use unmodified `298 K CO₂` gravimetric tables downloaded via [`scripts/fetch_nist_isodb.py`](../scripts/fetch_nist_isodb.py) into [`data/exp_isotherms/manifest.json`](../data/exp_isotherms/manifest.json):
+All experimental comparisons below use unmodified `298 K CO₂` gravimetric tables downloaded via [`scripts/experiments/fetch_nist_isodb.py`](../scripts/experiments/fetch_nist_isodb.py) into [`data/exp_isotherms/manifest.json`](../data/exp_isotherms/manifest.json):
 - `Mg-MOF-74`: DOI `10.1021/acs.jpcc.7b08239` (`n=16`, `1e-6–9.995 bar`) & `10.1039/c5dt03137k` (`n=24`)
 - `Ni-MOF-74`: DOI `10.1021/acs.jpcc.5b03700` (`n=18`, `0.0101–1.01 bar`) & `10.1080/15422119.2014.884507` (`n=9`)
 - `HKUST-1`: DOI `10.1002/aic.15837` (`n=79`, `0.0137–1.05 bar`)

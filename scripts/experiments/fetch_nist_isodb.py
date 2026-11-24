@@ -17,7 +17,7 @@ import shutil
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = ROOT / "data" / "exp_isotherms"
 
 MATDB_URL = "https://adsorption.nist.gov/matdb/api/materials.json"

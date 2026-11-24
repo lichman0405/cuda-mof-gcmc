@@ -7,12 +7,14 @@ Test C: Converged Shifted 4-Box MACE-MP-0(Medium)+D3 Nested MC on Mg-MOF-74 (298
 import json
 import math
 import time
+import sys
 from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nested_mc_engine import (
     CudaGcmcProposer,
     MaceD3Target,
@@ -21,7 +23,7 @@ from nested_mc_engine import (
     run_nested_mc,
 )
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build"
 ASSETS = ROOT / "assets"
 BUILD.mkdir(parents=True, exist_ok=True)

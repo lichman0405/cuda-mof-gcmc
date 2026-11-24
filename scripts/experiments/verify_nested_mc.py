@@ -5,15 +5,17 @@ Test 2: Live End-to-End Hybrid GPU-GCMC (Mercado 2016) + MLIP (MACE-MP-0 Medium 
 
 import json
 import math
+import sys
 from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nested_mc_engine import CudaGcmcProposer, MaceD3Target, run_nested_mc
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build"
 ASSETS = ROOT / "assets"
 BUILD.mkdir(parents=True, exist_ok=True)
