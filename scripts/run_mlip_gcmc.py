@@ -15,8 +15,15 @@ import json
 import math
 import os
 from pathlib import Path
+import time
 import numpy as np
 
+from multi_gpu import (
+    parse_gpu_ids,
+    resolve_worker_cuda_visible_devices,
+    run_pressures_parallel,
+    run_replicas_parallel,
+)
 from nested_mc_engine import (
     CudaGcmcProposer,
     FastMaceD3Target,
@@ -60,6 +67,9 @@ def parse_args():
     p.add_argument("--shift-override", type=float, default=None, help="Optional fixed chem-pot shift (kJ/mol) overriding auto calibration")
     p.add_argument("--seed", type=int, default=20261400, help="Base PRNG seed")
     p.add_argument("--shift-mode", choices=["auto", "none"], default="auto", help="Multi-stage self-consistent chem-pot shift")
+    p.add_argument("--gpus", nargs="+", default=None, help="GPU IDs for multi-GPU execution (e.g. --gpus 0 1 2 3 or 0,1,2,3)")
+    p.add_argument("--parallel-mode", choices=["auto", "pressure", "replica"], default="auto", help="Multi-GPU parallel strategy")
+    p.add_argument("--worker-threads", type=int, default=4, help="CPU threads per multi-GPU worker process")
     p.add_argument("--resume", action="store_true", help="Resume from existing --out-json, skipping completed pressures")
     p.add_argument("--out-json", required=True, help="Output JSON path")
     p.add_argument("--out-csv", default="", help="Optional summary CSV path")
@@ -330,6 +340,7 @@ def run_pressure_point(
     res["P_bar"] = float(P_bar)
     res["T_K"] = float(T_K)
     res["fugacity_Pa"] = float(prop.f_Pa)
+    res["fw_mass_gmol"] = float(prop.fw_mass_gmol)
     res["first_half_uptake_mmol_g"] = mean_h1
     res["second_half_uptake_mmol_g"] = mean_h2
     res["stationarity_drift_mmol_g"] = drift
@@ -356,11 +367,22 @@ def run_pressure_point(
 
 
 def main():
+    t_start_all = time.perf_counter()
     args = parse_args()
     ff_mode, pol_mode = PROPOSER_MAP[args.proposer]
     use_disp = args.dispersion == "on"
     out_json = Path(args.out_json)
     out_csv = Path(args.out_csv) if args.out_csv else None
+
+    gpu_ids = parse_gpu_ids(args.gpus) if args.gpus else []
+    if len(gpu_ids) == 1:
+        os.environ["CUDA_VISIBLE_DEVICES"] = resolve_worker_cuda_visible_devices(
+            gpu_ids[0], os.environ.get("CUDA_VISIBLE_DEVICES")
+        )
+        args.device = "cuda:0"
+        device_id = 0
+    else:
+        device_id = parse_cuda_device_id(args.device)
 
     guest = load_guest(name=args.guest, guest_json=args.guest_json, proposer=args.proposer)
     guest_label = Path(args.guest_json).stem if args.guest_json else args.guest.strip().lower()
@@ -369,13 +391,20 @@ def main():
 
     fw_data = extract_framework_for_proposer(args.cif, charge_mode=args.charge_mode)
     grid_dims = tuple(args.grid_dims) if args.grid_dims is not None else compute_grid_dims(fw_data["uc"], args.grid_spacing)
-    device_id = parse_cuda_device_id(args.device)
+
+    eff_mode = "single"
+    if len(gpu_ids) > 1:
+        if args.parallel_mode == "auto":
+            eff_mode = "pressure" if len(args.pressures) >= 2 else ("replica" if args.boxes >= 2 else "pressure")
+        else:
+            eff_mode = args.parallel_mode
 
     print(
         f"=== Hybrid GPU-GCMC + MLIP Engine ===\n"
         f"  CIF={args.cif} supercell={args.supercell} T={args.temp} K Pressures={args.pressures}\n"
         f"  Guest={guest.name} ({guest.formula}, {len(guest.sites)} sites) | Grid={grid_dims} | Charges={fw_data['charge_source']}\n"
-        f"  Proposer={args.proposer} (ff={ff_mode}, pol={pol_mode}) | MLIP={args.model} (dispersion={use_disp}, xc={args.xc})"
+        f"  Proposer={args.proposer} (ff={ff_mode}, pol={pol_mode}) | MLIP={args.model} (dispersion={use_disp}, xc={args.xc})\n"
+        f"  GPUs={gpu_ids if gpu_ids else [device_id]} | ParallelMode={eff_mode}"
     )
 
     payload = {
@@ -389,6 +418,8 @@ def main():
         "model": args.model,
         "dispersion": use_disp,
         "dispersion_xc": args.xc,
+        "gpus": gpu_ids if gpu_ids else [device_id],
+        "parallel_mode": eff_mode,
         "points": [],
     }
 
@@ -428,53 +459,101 @@ def main():
             continue
         pending.append((i, p_bar))
 
-    if pending:
-        target = FastMaceD3Target(
-            cif_path=args.cif,
-            supercell=tuple(args.supercell),
-            model=args.model,
-            device=args.device,
-            dispersion=use_disp,
-            dispersion_xc=args.xc,
-            guest=guest,
-            mace_chunk=args.mace_chunk,
-            uc_atoms=fw_data["uc"],
-        )
+    if len(gpu_ids) > 1 and args.parallel_mode == "auto":
+        eff_mode = "pressure" if len(pending) >= 2 else ("replica" if args.boxes >= 2 else "pressure")
+        payload["parallel_mode"] = eff_mode
 
-        consistency_checked = False
-        for i, p_bar in pending:
-            print(f"\n--- Pressure Point {i+1}/{len(args.pressures)}: {p_bar} bar ---")
-            pt = run_pressure_point(
-                fw_data=fw_data,
+    if pending:
+        if len(gpu_ids) > 1:
+            run_cfg = {
+                "cif_path": str(args.cif),
+                "fw_data": fw_data,
+                "guest": guest,
+                "supercell": tuple(args.supercell),
+                "T_K": float(args.temp),
+                "ff_mode": ff_mode,
+                "pol_mode": pol_mode,
+                "grid_dims": grid_dims,
+                "n_boxes": int(args.boxes),
+                "max_mol": int(args.max_mol),
+                "k_steps": int(args.k_steps),
+                "eq_cycles": int(args.eq_cycles),
+                "prod_cycles": int(args.prod_cycles),
+                "base_seed": int(args.seed),
+                "shift_mode": args.shift_mode,
+                "pilot_cycles": int(args.pilot_cycles),
+                "shift_override": args.shift_override,
+                "model": args.model,
+                "dispersion": use_disp,
+                "dispersion_xc": args.xc,
+                "mace_chunk": args.mace_chunk,
+                "worker_threads": int(args.worker_threads),
+            }
+
+            def _on_point(pt: dict):
+                payload["points"].append(pt)
+                payload["total_wall_s"] = float(time.perf_counter() - t_start_all)
+                save_outputs(out_json, out_csv, payload)
+                print(f"  [Saved checkpoint] {out_json} ({len(payload['points'])} points)")
+
+            if eff_mode == "pressure":
+                run_pressures_parallel(pending, gpu_ids, run_cfg, on_point_done=_on_point)
+            else:
+                run_replicas_parallel(pending, gpu_ids, run_cfg, on_point_done=_on_point)
+        else:
+            target = FastMaceD3Target(
+                cif_path=args.cif,
+                supercell=tuple(args.supercell),
+                model=args.model,
+                device=args.device,
+                dispersion=use_disp,
+                dispersion_xc=args.xc,
                 guest=guest,
-                supercell=args.supercell,
-                T_K=args.temp,
-                P_bar=p_bar,
-                ff_mode=ff_mode,
-                pol_mode=pol_mode,
-                grid_dims=grid_dims,
-                n_boxes=args.boxes,
-                max_mol=args.max_mol,
-                k_steps=args.k_steps,
-                eq_cycles=args.eq_cycles,
-                prod_cycles=args.prod_cycles,
-                seed=args.seed + i * 100,
-                shift_mode=args.shift_mode,
-                target=target,
-                pilot_cycles=args.pilot_cycles,
-                shift_override=args.shift_override,
-                verify_consistency=(not consistency_checked),
-                device_id=device_id,
+                mace_chunk=args.mace_chunk,
+                uc_atoms=fw_data["uc"],
             )
-            consistency_checked = True
-            payload["points"].append(pt)
-            save_outputs(out_json, out_csv, payload)
-            print(f"  [Saved checkpoint] {out_json} ({len(payload['points'])} points)")
+
+            consistency_checked = False
+            for i, p_bar in pending:
+                print(f"\n--- Pressure Point {i+1}/{len(args.pressures)}: {p_bar} bar ---")
+                t_pt = time.perf_counter()
+                pt = run_pressure_point(
+                    fw_data=fw_data,
+                    guest=guest,
+                    supercell=args.supercell,
+                    T_K=args.temp,
+                    P_bar=p_bar,
+                    ff_mode=ff_mode,
+                    pol_mode=pol_mode,
+                    grid_dims=grid_dims,
+                    n_boxes=args.boxes,
+                    max_mol=args.max_mol,
+                    k_steps=args.k_steps,
+                    eq_cycles=args.eq_cycles,
+                    prod_cycles=args.prod_cycles,
+                    seed=args.seed + i * 100,
+                    shift_mode=args.shift_mode,
+                    target=target,
+                    pilot_cycles=args.pilot_cycles,
+                    shift_override=args.shift_override,
+                    verify_consistency=(not consistency_checked),
+                    device_id=device_id,
+                )
+                pt["point_wall_s"] = float(time.perf_counter() - t_pt)
+                consistency_checked = True
+                payload["points"].append(pt)
+                payload["total_wall_s"] = float(time.perf_counter() - t_start_all)
+                save_outputs(out_json, out_csv, payload)
+                print(f"  [Saved checkpoint] {out_json} ({len(payload['points'])} points)")
     else:
+        payload["total_wall_s"] = float(time.perf_counter() - t_start_all)
         save_outputs(out_json, out_csv, payload)
         print("  [RESUME] All requested pressures already completed.")
 
-    print(f"\nFinal JSON: {out_json}")
+    payload["total_wall_s"] = float(time.perf_counter() - t_start_all)
+    save_outputs(out_json, out_csv, payload)
+    print(f"\nTotal Wall Time: {payload['total_wall_s']:.2f} s")
+    print(f"Final JSON: {out_json}")
     if out_csv is not None:
         print(f"Final CSV:  {out_csv}")
 
