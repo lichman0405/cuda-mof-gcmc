@@ -1000,11 +1000,12 @@ def _integrated_autocorr_time(series_list) -> float:
 
 
 def compute_ess_stats(prod_N_history, prod_U_history, elapsed_s: float) -> dict:
-    """Compute integrated autocorrelation time, ESS, and ESS/GPU-s from production traces."""
+    """Compute integrated autocorrelation time, ESS, ESS/GPU-s, and jump-rate stats from production traces."""
     if not prod_N_history:
         return {
             "tau_int_N": 1.0, "ess_N": 0.0, "ess_N_per_s": 0.0,
             "tau_int_U": 1.0, "ess_U": 0.0, "ess_U_per_s": 0.0,
+            "esjd_N": 0.0, "sjd_N_per_s": 0.0, "dN_moves_per_s": 0.0,
         }
     n_arr = np.asarray(prod_N_history, dtype=np.float64)  # (prod_cycles, n_boxes)
     u_arr = np.asarray(prod_U_history, dtype=np.float64)
@@ -1016,6 +1017,15 @@ def compute_ess_stats(prod_N_history, prod_U_history, elapsed_s: float) -> dict:
     tau_u = _integrated_autocorr_time([u_arr[:, b] for b in range(n_b)])
     ess_n = max(1.0, min(n_tot, n_tot / tau_n))
     ess_u = max(1.0, min(n_tot, n_tot / tau_u))
+    if n_cyc >= 2:
+        diffs = np.diff(n_arr, axis=0)
+        esjd_n = float(np.mean(diffs * diffs))
+        sjd_n_per_s = float(np.sum(diffs * diffs)) / dt
+        dn_moves_per_s = float(np.sum(diffs != 0)) / dt
+    else:
+        esjd_n = 0.0
+        sjd_n_per_s = 0.0
+        dn_moves_per_s = 0.0
     return {
         "tau_int_N": float(tau_n),
         "ess_N": float(ess_n),
@@ -1023,6 +1033,9 @@ def compute_ess_stats(prod_N_history, prod_U_history, elapsed_s: float) -> dict:
         "tau_int_U": float(tau_u),
         "ess_U": float(ess_u),
         "ess_U_per_s": float(ess_u / dt),
+        "esjd_N": float(esjd_n),
+        "sjd_N_per_s": float(sjd_n_per_s),
+        "dN_moves_per_s": float(dn_moves_per_s),
     }
 
 
@@ -1247,6 +1260,9 @@ def run_nested_mc(
         "tau_int_U": ess_stats["tau_int_U"],
         "ess_U": ess_stats["ess_U"],
         "ess_U_per_s": ess_stats["ess_U_per_s"],
+        "esjd_N": ess_stats["esjd_N"],
+        "sjd_N_per_s": ess_stats["sjd_N_per_s"],
+        "dN_moves_per_s": ess_stats["dN_moves_per_s"],
         "outer_acc_rate": float(np.mean(acc_outer) / tot_denom),
         "prod_outer_acc_rate": float(np.mean(prod_acc_outer) / prod_denom) if prod_cycles > 0 else 0.0,
         "prod_ins_att": int(prod_ins_att),
