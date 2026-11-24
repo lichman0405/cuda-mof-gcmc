@@ -11,6 +11,7 @@ SKIP_TEST=0
 SMOKE_MLIP=0
 ARCH_OVERRIDE=""
 CUDA_INDEX=""
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-}"
 VENV_DIR=".venv-mlip"
 PY_VER="3.12"
 GPU_ID=""
@@ -24,7 +25,8 @@ Usage: ./fast_start.sh [options]
   --skip-test         Skip post-setup verification tests
   --smoke-mlip        Also run a short live MACE-MP0 smoke simulation after pytest
   --arch sm_XX        Override CUDA compute capability (default: auto-detect via nvidia-smi)
-  --cuda-index cuXXX  Override PyTorch wheel index (e.g. cu124, cu128; default: auto from driver)
+  --cuda-index cuXXX  Override PyTorch wheel tag (e.g. cu124, cu128; default: auto from driver)
+  --torch-index-url U Override full PyTorch wheel index URL (e.g. https://mirror.nju.edu.cn/pytorch/whl/cu124)
   --venv DIR          Virtual environment directory (default: .venv-mlip)
   --python VER        Python version for uv venv (default: 3.12)
   --gpu ID            Pin CUDA_VISIBLE_DEVICES to GPU index ID (default: GPU with lowest memory.used)
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --smoke-mlip) SMOKE_MLIP=1; shift ;;
         --arch) ARCH_OVERRIDE="${2:?--arch requires a value}"; shift 2 ;;
         --cuda-index) CUDA_INDEX="${2:?--cuda-index requires a value}"; shift 2 ;;
+        --torch-index-url) TORCH_INDEX_URL="${2:?--torch-index-url requires a value}"; shift 2 ;;
         --venv) VENV_DIR="${2:?--venv requires a value}"; shift 2 ;;
         --python) PY_VER="${2:?--python requires a value}"; shift 2 ;;
         --gpu) GPU_ID="${2:?--gpu requires a value}"; shift 2 ;;
@@ -117,8 +120,12 @@ if [[ -z "$CUDA_INDEX" ]]; then
     fi
 fi
 
+if [[ -z "$TORCH_INDEX_URL" ]]; then
+    TORCH_INDEX_URL="https://download.pytorch.org/whl/${CUDA_INDEX}"
+fi
+
 ok "Detected ${GPU_COUNT} GPU(s); using CUDA_VISIBLE_DEVICES=${SEL_GPU} (${GPU_NAME}, ${GPU_MEM_MIB} MiB, compute ${CC_RAW}, target ${CUDA_ARCH})"
-ok "Driver max CUDA ${DRIVER_CUDA} -> PyTorch index ${CUDA_INDEX}"
+ok "Driver max CUDA ${DRIVER_CUDA} -> PyTorch index ${CUDA_INDEX} (${TORCH_INDEX_URL})"
 
 # 2. CUDA Compiler & C++ Host Toolchain
 step "2/6 Checking CUDA Toolkit (nvcc) & g++"
@@ -165,6 +172,18 @@ if command -v uv >/dev/null 2>&1; then
     UV_BIN="$(command -v uv)"
     ok "uv: ${UV_BIN} ($("$UV_BIN" --version))"
     export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+    if [[ -z "${UV_DEFAULT_INDEX:-}" ]]; then
+        for cfg in "$HOME/.config/pip/pip.conf" "$HOME/.pip/pip.conf"; do
+            if [[ -f "$cfg" ]]; then
+                PIP_IDX="$(sed -n 's/^[[:space:]]*index-url[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$cfg" | head -n 1)"
+                if [[ -n "$PIP_IDX" ]]; then
+                    export UV_DEFAULT_INDEX="$PIP_IDX"
+                    ok "Inherited uv PyPI mirror from ${cfg}: ${UV_DEFAULT_INDEX}"
+                    break
+                fi
+            fi
+        done
+    fi
 else
     warn "uv not found; falling back to system python3 -m venv / pip."
 fi
@@ -252,11 +271,11 @@ PY
         if [[ "$CHECK_ONLY" -eq 1 ]]; then
             MISSING_ITEMS+=("CUDA PyTorch (${CUDA_INDEX}) in ${VENV_DIR}")
         else
-            echo "  Installing CUDA PyTorch from https://download.pytorch.org/whl/${CUDA_INDEX} ..."
+            echo "  Installing CUDA PyTorch from ${TORCH_INDEX_URL} ..."
             if [[ -n "$UV_BIN" ]]; then
-                "$UV_BIN" pip install --python "$VENV_PY" torch --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
+                "$UV_BIN" pip install --python "$VENV_PY" torch --index-url "${TORCH_INDEX_URL}"
             else
-                "$VENV_PY" -m pip install torch --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
+                "$VENV_PY" -m pip install torch --index-url "${TORCH_INDEX_URL}"
             fi
             ok "Installed CUDA PyTorch (${CUDA_INDEX})"
         fi
@@ -282,13 +301,13 @@ PY
             echo "  Installing missing packages (pinning torch==${INSTALLED_TORCH})..."
             if [[ -n "$UV_BIN" ]]; then
                 "$UV_BIN" pip install --python "$VENV_PY" \
-                    --extra-index-url "https://download.pytorch.org/whl/${CUDA_INDEX}" \
+                    --extra-index-url "${TORCH_INDEX_URL}" \
                     --index-strategy unsafe-best-match \
                     -c "$CONSTRAINT_FILE" \
                     "${CLEAN_MISSING[@]}"
             else
                 "$VENV_PY" -m pip install \
-                    --extra-index-url "https://download.pytorch.org/whl/${CUDA_INDEX}" \
+                    --extra-index-url "${TORCH_INDEX_URL}" \
                     -c "$CONSTRAINT_FILE" \
                     "${CLEAN_MISSING[@]}"
             fi
