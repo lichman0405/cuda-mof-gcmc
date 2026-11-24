@@ -501,6 +501,9 @@ def main():
             else:
                 run_replicas_parallel(pending, gpu_ids, run_cfg, on_point_done=_on_point)
         else:
+            t_str = str(max(1, int(args.worker_threads)))
+            for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+                os.environ.setdefault(var, t_str)
             target = FastMaceD3Target(
                 cif_path=args.cif,
                 supercell=tuple(args.supercell),
@@ -512,6 +515,7 @@ def main():
                 mace_chunk=args.mace_chunk,
                 uc_atoms=fw_data["uc"],
             )
+            target.torch.set_num_threads(max(1, int(args.worker_threads)))
 
             consistency_checked = False
             for i, p_bar in pending:

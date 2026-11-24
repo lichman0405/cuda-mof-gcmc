@@ -180,6 +180,35 @@ cmd /c build.bat
 .\.venv-mlip\Scripts\python.exe -u scripts\benchmark_speedup.py
 ```
 
+### 多卡并行调度与 4× RTX 3090 实测加速（`--gpus`）
+
+通过 `--gpus 0 1 2 3`（由 [`scripts/multi_gpu.py`](scripts/multi_gpu.py) 调度独立 CUDA 进程并限制每卡 `--worker-threads 4` 防多路 CPU 线程争抢）支持两种并行方式（默认 `--parallel-mode auto`：待测压强点 `>= 2` 时按压强并行，单压强多副本自动按 `--boxes` 分片并做严格 Pooled-Jackknife / ESS 无损合并）：
+
+```bash
+# 1) 多压强点队列并行（每卡处理一个压强点，整条等温线最推荐）
+.venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
+  --cif data/IRMOF-1.cif --supercell 1 1 1 --temp 298 --pressures 0.5 1.0 2.5 5.0 \
+  --guest ch4 --proposer uff --charge-mode auto --model medium --dispersion on --xc pbe \
+  --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 320 \
+  --gpus 0 1 2 3 --parallel-mode pressure --out-json build/irmof1_4gpu.json
+
+# 2) 单压强多副本分片（将 --boxes 均分到多张卡，统计量与单卡全合并完全等价）
+.venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
+  --cif data/IRMOF-1.cif --supercell 1 1 1 --temp 298 --pressures 5.0 \
+  --guest ch4 --proposer uff --charge-mode auto --model medium --dispersion on --xc pbe \
+  --boxes 16 --k-steps 25 --eq-cycles 40 --prod-cycles 80 \
+  --gpus 0 1 2 3 --parallel-mode replica --out-json build/irmof1_replica_4gpu.json
+```
+
+在 `g0048`（4 张空闲 **NVIDIA RTX 3090**，双路 AMD EPYC，单卡与多卡均统一设定 `--worker-threads 4` 同口径对比）上实测 **`IRMOF-1 + CH₄`**（`MACE-MP0 medium + D3(pbe)`，`298 K`，`40 eq + 80 prod` 轮）：
+
+| 测试场景 | `1× RTX 3090` 总耗时 (`MC 主循环`) | `4× RTX 3090` 总耗时 (`MC 主循环`) | 端到端加速比 (`MC 主循环`) | `ESS_N / wall-s` (`1 卡 -> 4 卡`) |
+| :--- | :---: | :---: | :---: | :---: |
+| **`pressure` 模式**（`0.5, 1.0, 2.5, 5.0 bar`，`4 boxes/pt`） | `270.55 s` (`78.81 s`) | **`78.66 s`** (`21.55 s` max) | **`3.44×`** (`3.66×`) | `0.34 -> 1.59` (`4.7×`) |
+| **`replica` 模式**（`5.0 bar`，`16 boxes`） | `125.52 s` (`69.24 s`) | **`79.76 s`** (`22.33 s`) | **`1.57×`** (**`3.10×`**) | `0.74 -> 1.07` (`1.4×`) |
+
+> **工程解释**：每个压强点初始化时需要在单卡构建 `240³`（1382 万格点）的三次插值网格（`~34.2 s`）并完成预平衡（累计约 `~55 s` 固定开销）。`pressure` 模式下这批网格与模拟完全跨卡重叠，因此短轮数下即有 **`3.44×`**；`replica` 模式下 `MC 主循环` 同样获得 **`3.10×`** 加速，短轮数总墙时被单点 `55 s` 建网开销限制在 `1.57×`，加大生产步数（如 `120+320` 轮）后总加速比可进一步抬升至 `~2.3–3.0×`。此外，单卡默认开启 `--worker-threads 4` 后也消除了 256 核 CPU OpenMP 锁争抢（同场景单卡从 `429.59 s` / `316.74 s` 降至 `270.55 s` / `125.52 s`）。
+
 ---
 
 ## 详细文档与目录结构
@@ -200,7 +229,7 @@ cuda-mof-gcmc/
 ├── docs/           # 详细基准测试文档、公式推导与科研进展/待办记录（中/英文）
 ├── include/        # C++17 / CUDA 头文件：三斜最小镜像、103 元素 UFF + PR、三维网格与提议器 C ABI
 ├── src/            # 现役 CUDA 核与驱动源码（mof_gcmc_cli、mof_gcmc_proposer.dll）+ src/legacy/（v1–v3 归档）
-├── scripts/        # 核心引擎、QEq、刚体客体与基准脚本 + scripts/experiments/（论文复现）& scripts/legacy/（归档）
-├── tests/          # Pytest 回归测试（103 元素斜晶胞、QEq、四元数多客体、Jackknife/ESS、Direct 零偏置）
+├── scripts/        # 核心引擎（run_mlip_gcmc、nested_mc_engine、multi_gpu、qeq_charges、guests）+ experiments/ & legacy/
+├── tests/          # Pytest 回归测试（18 项：103 元素、QEq、四元数客体、多卡合并、Direct 零偏置）
 └── assets/         # 中/英文系统架构图与基准对标图（300 DPI）
 ```

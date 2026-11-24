@@ -180,6 +180,35 @@ Key columns in `--out-csv`: `uptake_mmol_g` ± `uptake_sem_mmol_g`, Pooled-Jackk
 .\.venv-mlip\Scripts\python.exe -u scripts\benchmark_speedup.py
 ```
 
+### Multi-GPU Execution & 4× RTX 3090 Scaling (`--gpus`)
+
+Pass `--gpus 0 1 2 3` (via [`scripts/multi_gpu.py`](scripts/multi_gpu.py)) to scale across multiple GPUs in two modes (`--parallel-mode auto` selects `pressure` when `>= 2` pressures remain, or `replica` for single high-box-count runs):
+
+```bash
+# 1) Multi-pressure isotherm queue (1 worker per GPU; ideal for full isotherms)
+.venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
+  --cif data/IRMOF-1.cif --supercell 1 1 1 --temp 298 --pressures 0.5 1.0 2.5 5.0 \
+  --guest ch4 --proposer uff --charge-mode auto --model medium --dispersion on --xc pbe \
+  --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 320 \
+  --gpus 0 1 2 3 --parallel-mode pressure --out-json build/irmof1_4gpu.json
+
+# 2) Single-pressure replica sharding (splits --boxes evenly across GPUs with exact Jackknife/ESS merge)
+.venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
+  --cif data/IRMOF-1.cif --supercell 1 1 1 --temp 298 --pressures 5.0 \
+  --guest ch4 --proposer uff --charge-mode auto --model medium --dispersion on --xc pbe \
+  --boxes 16 --k-steps 25 --eq-cycles 40 --prod-cycles 80 \
+  --gpus 0 1 2 3 --parallel-mode replica --out-json build/irmof1_replica_4gpu.json
+```
+
+Measured apples-to-apples (`--worker-threads 4` on both single- and multi-GPU runs to avoid OpenMP oversubscription on dual-socket EPYC) on **`IRMOF-1 + CH₄`** (`MACE-MP0 medium + D3(pbe)`, `298 K`, `40 eq + 80 prod` cycles, **4× NVIDIA RTX 3090**):
+
+| Workload | `1× RTX 3090` Wall (`MC Loop`) | `4× RTX 3090` Wall (`MC Loop`) | End-to-End Speedup (`MC Loop`) | `ESS_N / wall-s` (`1 GPU -> 4 GPUs`) |
+| :--- | :---: | :---: | :---: | :---: |
+| **`pressure` mode** (`0.5, 1.0, 2.5, 5.0 bar`, `4 boxes/pt`) | `270.55 s` (`78.81 s`) | **`78.66 s`** (`21.55 s` max) | **`3.44×`** (`3.66×`) | `0.34 -> 1.59` (`4.7×`) |
+| **`replica` mode** (`5.0 bar`, `16 boxes`) | `125.52 s` (`69.24 s`) | **`79.76 s`** (`22.33 s`) | **`1.57×`** (**`3.10×`**) | `0.74 -> 1.07` (`1.4×`) |
+
+> **Why `pressure` scales higher than short `replica` runs**: Each `run_pressure_point` call builds the `240³` (`13.8M`-point) tricubic grid (`~34.2 s` on `IRMOF-1`) + warms up MACE (`~4.7 s`) once per GPU. In `pressure` mode all `4` GPUs overlap grid builds across pressures (`3.44×` already on `120` cycles), whereas in short `120`-cycle `replica` runs that fixed `~55 s` per-point grid/calibration setup stays unsharded (larger `--eq-cycles` / `--prod-cycles` amortizes it toward `~2.3–3.0×`).
+
 ---
 
 ## Documentation & Repository Layout
@@ -200,7 +229,7 @@ cuda-mof-gcmc/
 ├── docs/           # Detailed validation benchmarks, equations & WIP research notes (EN / ZH)
 ├── include/        # C++17 / CUDA headers: triclinic MIC geometry, 103-elem UFF + PR, 3D grids & proposer C ABI
 ├── src/            # Active CUDA kernels & drivers (mof_gcmc_cli, mof_gcmc_proposer.dll) + src/legacy/ (v1–v3)
-├── scripts/        # Core engine & active benchmarks + scripts/experiments/ & scripts/legacy/
-├── tests/          # Automated pytest suite (103-elem, QEq, quaternion guests, Jackknife/ESS, Direct parity)
+├── scripts/        # Core engine (run_mlip_gcmc, nested_mc_engine, multi_gpu, qeq_charges, guests) + experiments/ & legacy/
+├── tests/          # Automated pytest suite (18 tests: 103-elem, QEq, quaternion guests, multi-GPU merge, Direct parity)
 └── assets/         # Architecture diagrams & benchmark/verification plots (300 DPI)
 ```
