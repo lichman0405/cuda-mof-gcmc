@@ -298,9 +298,15 @@ def _eval_unit_basis_torch(
     inv_span = 1.0 / max(1e-6, float(r_cut - r_on))
     inv_2sig2 = 1.0 / (2.0 * float(sigma_rbf) * float(sigma_rbf))
 
+    sh_chunk = 3
+    sh_eff = min(sh_chunk, int(sh_t.shape[0]))
+    # Cap GPU intermediate (eff_chunk, sh_eff, n_fw, n_rad) tensor to ~96 MB (24M floats)
+    max_pts_mem = max(128, int(24_000_000 // max(1, int(fw_f_t.shape[0]) * sh_eff * n_rad)))
+    eff_chunk = min(int(chunk_pts), max_pts_mem)
+
     with torch.no_grad():
-        for s0 in range(0, M, chunk_pts):
-            s1 = min(M, s0 + chunk_pts)
+        for s0 in range(0, M, eff_chunk):
+            s1 = min(M, s0 + eff_chunk)
             m_b = s1 - s0
             p_c = torch.tensor(pts_cart[s0:s1], device=use_dev, dtype=torch.float32)
             p_f = torch.remainder(p_c @ inv_H_t, 1.0)
@@ -319,7 +325,6 @@ def _eval_unit_basis_torch(
             dmin_b = torch.full((m_b,), 1.0e6, device=use_dev, dtype=torch.float32)
 
             # Process shifts in batches to bound VRAM
-            sh_chunk = 27
             for k0 in range(0, sh_t.shape[0], sh_chunk):
                 k1 = min(sh_t.shape[0], k0 + sh_chunk)
                 dr = dr0.unsqueeze(1) + sh_t[k0:k1].view(1, -1, 1, 3)  # (m_b, S_c, N_fw, 3)
@@ -676,23 +681,25 @@ def _render_unit_cell_grids(
     f_pts = np.stack([kx.ravel(), ky.ravel(), kz.ravel()], axis=1)
     cart_pts = f_pts @ H_u
 
-    rad_pts, phi_pts, dmin_pts = _eval_unit_cell_pts(
-        cart_pts, env_info, mu_centers, sigma_rbf, r_cut, device=device
-    )
-
     total = nx * ny * nz
-    grids = np.empty((n_chan, nz, ny, nx), dtype=np.float32)
-    phi_term = phi_pts @ q_env  # (total,)
+    grids_flat = np.empty((n_chan, total), dtype=np.float32)
+    # Process unit-cell grid voxels in 500k slices to bound host RAM (<250 MB even on 600-atom cells)
+    slice_pts = 500_000
+    w_sr_flat = [w_sr[c].ravel().astype(np.float64) for c in range(n_chan)]
+    for g0 in range(0, total, slice_pts):
+        g1 = min(total, g0 + slice_pts)
+        rad_pts, phi_pts, dmin_pts = _eval_unit_cell_pts(
+            cart_pts[g0:g1], env_info, mu_centers, sigma_rbf, r_cut, device=device
+        )
+        phi_term = phi_pts.astype(np.float64) @ q_env  # (slice,)
+        rad_2d = rad_pts.reshape(g1 - g0, -1).astype(np.float64)
+        for c in range(n_chan):
+            val = rad_2d @ w_sr_flat[c] + chan_q[c] * phi_term
+            r_hard = 1.20 if chan_Z[c] == 1 else 1.48
+            ovl = (dmin_pts < r_hard) | (val > 1.0e5)
+            grids_flat[c, g0:g1] = np.where(ovl, 1.0e6, np.clip(val, -2.0e5, 1.0e5)).astype(np.float32)
 
-    for c in range(n_chan):
-        # V_c = sum_{e,b} w_sr[c,e,b] * rad[p,e,b] + chan_q[c] * phi_term[p]
-        val = np.einsum("peb,eb->p", rad_pts, w_sr[c], optimize=True) + chan_q[c] * phi_term
-        r_hard = 1.20 if chan_Z[c] == 1 else 1.48
-        ovl = (dmin_pts < r_hard) | (val > 1.0e5)
-        val = np.where(ovl, 1.0e6, np.clip(val, -2.0e5, 1.0e5))
-        grids[c] = val.astype(np.float32).reshape(nz, ny, nx)
-
-    return np.ascontiguousarray(grids, dtype=np.float32)
+    return np.ascontiguousarray(grids_flat.reshape(n_chan, nz, ny, nx), dtype=np.float32)
 
 
 def _eval_unit_cell_pts(
