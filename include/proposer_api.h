@@ -129,4 +129,31 @@ PROPOSER_API int proposer_run_direct_benchmark(
     double* out_Qst_kJ_mol, double* out_sem_Qst_kJ_mol,
     double* out_max_drift_K);
 
+// Upload externally distilled 3D unit-cell float32 grids in Kelvin.
+// Layout per slice: C-contiguous (nz, ny, nx), i.e., flat index = iz * (nx * ny) + iy * nx + ix.
+// Pass h_phi_elec = nullptr when electrostatics are already folded into h_u_lj_flat.
+PROPOSER_API int proposer_set_external_grids(
+    void* handle,
+    int nx, int ny, int nz,
+    int n_lj,
+    const float* h_u_lj_flat,
+    const float* h_phi_elec);
+
+// Configure effective guest-guest scaling and optional 1D COM-COM radial residual LUT (in Kelvin).
+// Pass n_bins <= 1 or h_gg_com_lut_K = nullptr to disable the radial LUT.
+PROPOSER_API int proposer_set_gg_lut(
+    void* handle,
+    double gg_q_scale,
+    double gg_lj_scale,
+    double r_min_A,
+    double r_max_A,
+    int n_bins,
+    const float* h_gg_com_lut_K);
+
+// Configure inner block-parallel CBMC trial count (1..128) and total ins+del move probability (0.10..0.96).
+PROPOSER_API int proposer_set_mc_params(
+    void* handle,
+    int cbmc_k,
+    double p_ins_del_total);
+
 } // extern "C"

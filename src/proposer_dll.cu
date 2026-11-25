@@ -52,6 +52,13 @@ struct RigidGuestDef {
     double Tc_K;
     double Pc_bar;
     double omega;
+    double gg_q_scale;
+    double gg_lj_scale;
+    int gg_lut_n;
+    double gg_lut_rmin;
+    double gg_lut_rmax;
+    double gg_lut_inv_dr;
+    float gg_lut_K[128];
 };
 
 struct ProposerGridView {
@@ -125,6 +132,34 @@ __device__ inline uint64_t xs64(uint64_t& s) {
 
 __device__ inline double u01(uint64_t& s) {
     return (double)(xs64(s) >> 11) * (1.0 / 9007199254740992.0);
+}
+
+__device__ inline uint64_t splitmix64_next(uint64_t& x) {
+    uint64_t z = (x += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+__device__ inline double sm_u01(uint64_t& s) {
+    return (double)(splitmix64_next(s) >> 11) * (1.0 / 9007199254740992.0);
+}
+
+__device__ inline void rand_uniform_quat_sm(
+    uint64_t& rng, double& qw, double& qx, double& qy, double& qz) {
+    constexpr double TWO_PI = 6.28318530717958647692;
+    double u1 = sm_u01(rng);
+    double u2 = TWO_PI * sm_u01(rng);
+    double u3 = TWO_PI * sm_u01(rng);
+    double s1 = sqrt(1.0 - u1);
+    double s2 = sqrt(u1);
+    double su2, cu2, su3, cu3;
+    sincos(u2, &su2, &cu2);
+    sincos(u3, &su3, &cu3);
+    qw = s2 * cu3;
+    qx = s1 * su2;
+    qy = s1 * cu2;
+    qz = s2 * su3;
 }
 
 __device__ inline void rand_unit_vec(uint64_t& rng, double& ux, double& uy, double& uz) {
@@ -307,13 +342,35 @@ __device__ inline double pair_rigid_guest(
                     double sc6 = sc2 * sc2 * sc2;
                     ulj -= 4.0 * eps * (sc6 * sc6 - sc6);
                 }
-                e += ulj;
+                e += g.gg_lj_scale * ulj;
             }
             if (has_q) {
                 double r = sqrt(r2);
                 double uq = KE_K * g.q[a] * g.q[b] *
                             (erfc(dsf_alpha * r) / r - dsf_shift + dsf_deriv * (r - r_cut));
-                e += uq;
+                e += (g.gg_q_scale * g.gg_q_scale) * uq;
+            }
+        }
+    }
+
+    if (g.gg_lut_n >= 2 && r2c < r_cut2) {
+        double rc_com = sqrt(r2c);
+        if (rc_com < g.gg_lut_rmax) {
+            double u_pos = (rc_com - g.gg_lut_rmin) * g.gg_lut_inv_dr;
+            if (u_pos <= 0.0) {
+                double slope = (double)g.gg_lut_K[1] - (double)g.gg_lut_K[0];
+                if (slope > 0.0) slope = 0.0;
+                e += (double)g.gg_lut_K[0] + slope * u_pos;
+            } else {
+                int idx0 = (int)floor(u_pos);
+                if (idx0 >= g.gg_lut_n - 1) {
+                    e += (double)g.gg_lut_K[g.gg_lut_n - 1];
+                } else {
+                    double frac = u_pos - (double)idx0;
+                    double v0 = (double)g.gg_lut_K[idx0];
+                    double v1 = (double)g.gg_lut_K[idx0 + 1];
+                    e += v0 + frac * (v1 - v0);
+                }
             }
         }
     }
@@ -652,6 +709,17 @@ struct ProposerStateDev {
 
     int* d_commit_mask = nullptr;
     uint64_t* d_rng = nullptr;
+
+    // Pre-allocated single-state evaluation buffers (avoids dynamic cudaMalloc/Free per call)
+    double* d_eval_cx = nullptr;
+    double* d_eval_cy = nullptr;
+    double* d_eval_cz = nullptr;
+    double* d_eval_qw = nullptr;
+    double* d_eval_qx = nullptr;
+    double* d_eval_qy = nullptr;
+    double* d_eval_qz = nullptr;
+    double* d_eval_U = nullptr;
+    int* d_eval_ov = nullptr;
 };
 
 struct PropMove {
@@ -670,11 +738,13 @@ __global__ void propose_burst_kernel(
     double T_K, double beta_f_V, double r_cut_gg, double dsf_alpha,
     int ff_mode, int pol_mode, int max_mol,
     int k_steps, int commit_to_acc,
+    int cbmc_k, double p_ins_del_total,
     ProposerStateDev st) {
 
     int b = blockIdx.x;
     int tid = threadIdx.x;
     int off = b * max_mol;
+    int k_cbmc = (cbmc_k < 1) ? 1 : ((cbmc_k > PROP_THREADS) ? PROP_THREADS : cbmc_k);
 
     __shared__ double s_cx[PROP_SMEM_MAX], s_cy[PROP_SMEM_MAX], s_cz[PROP_SMEM_MAX];
     __shared__ double s_qw[PROP_SMEM_MAX], s_qx[PROP_SMEM_MAX], s_qy[PROP_SMEM_MAX], s_qz[PROP_SMEM_MAX];
@@ -684,6 +754,10 @@ __global__ void propose_burst_kernel(
     __shared__ double warp_u[4];
     __shared__ int warp_ovl[4];
     __shared__ double s_u_recomp;
+    __shared__ int s_cbmc_valid[PROP_THREADS];
+    __shared__ double s_cbmc_logw[PROP_THREADS];
+    __shared__ int s_cbmc_chosen;
+    __shared__ uint64_t s_step_seed;
 
     int init_N = st.d_acc_N[b];
     if (init_N > max_mol) init_N = max_mol;
@@ -709,12 +783,18 @@ __global__ void propose_burst_kernel(
     // Strictly fixed proposal step widths for exact detailed balance in Nested MC
     constexpr double DELTA_TRANS = 1.0;
     constexpr double MAX_ANGLE = 0.55;
-    int shifted_lj = (ff_mode == 1) ? 1 : 0;
+    int shifted_lj = (ff_mode == 1 || ff_mode == 2) ? 1 : 0;
     double rc = r_cut_gg, rc2 = rc * rc;
     constexpr double INV_SQRT_PI = 0.56418958354775628695;
     double erfc_rc = erfc(dsf_alpha * rc), exp_rc = exp(-dsf_alpha * dsf_alpha * rc2);
     double dsf_shift = erfc_rc / rc;
     double dsf_deriv = erfc_rc / rc2 + (2.0 * dsf_alpha * INV_SQRT_PI) * exp_rc / rc;
+
+    double p_ins = 0.5 * p_ins_del_total;
+    if (p_ins < 0.05) p_ins = 0.05;
+    if (p_ins > 0.48) p_ins = 0.48;
+    double p_del = p_ins;
+    double p_exch = p_ins + p_del;
 
     if (tid == 0) prop.cur_N = cur_N;
     __syncthreads();
@@ -726,19 +806,26 @@ __global__ void propose_burst_kernel(
             prop.skip = 0;
             prop.u_fw_new = prop.u_fw_old = 0.0;
             prop.mux = prop.muy = prop.muz = 0.0;
+            s_cbmc_chosen = -1;
+            s_step_seed = xs64(rng);
 
+            double u_mv = u01(rng);
             int mv;
-            if (guest.is_isotropic) {
-                int r3 = (int)(u01(rng) * 3.0);
-                if (r3 > 2) r3 = 2;
-                mv = (r3 == 0) ? 0 : (r3 == 1 ? 2 : 3);
+            if (u_mv < p_ins) {
+                mv = 2;
+            } else if (u_mv < p_exch) {
+                mv = 3;
+            } else if (guest.is_isotropic) {
+                mv = 0;
             } else {
-                mv = (int)(u01(rng) * 4.0);
-                if (mv > 3) mv = 3;
+                double mid = p_exch + 0.5 * (1.0 - p_exch);
+                mv = (u_mv < mid) ? 0 : 1;
             }
             prop.mv = mv;
 
-            if (mv == 0 || mv == 1) {
+            if (grid.n_lj == 0 && grid.has_phi == 0) {
+                prop.skip = 1;
+            } else if (mv == 0 || mv == 1) {
                 if (cur_N == 0) {
                     prop.skip = 1;
                 } else {
@@ -768,141 +855,180 @@ __global__ void propose_burst_kernel(
                     if (ovl) { prop.fw_ovl = 1; prop.skip = 1; }
                 }
             } else if (mv == 2) {
-                if (cur_N >= max_mol || cur_N >= PROP_SMEM_MAX) {
+                if (cur_N >= max_mol || cur_N >= PROP_SMEM_MAX || beta_f_V <= 1.0e-300) {
                     prop.skip = 1;
                 } else {
                     prop.tgt = -1;
-                    double sa = u01(rng), sb = u01(rng), sc = u01(rng);
-                    cell.super_frac_to_cart(sa, sb, sc, prop.cx, prop.cy, prop.cz);
-                    if (guest.is_isotropic) {
-                        prop.qw = 1.0; prop.qx = 0.0; prop.qy = 0.0; prop.qz = 0.0;
-                    } else {
-                        rand_uniform_quat(rng, prop.qw, prop.qx, prop.qy, prop.qz);
-                    }
-                    double ulj = 0.0, uel = 0.0, up = 0.0;
-                    bool ovl = eval_rigid_guest_framework_grid(
-                        grid, cell, guest, pol_mode, KE_K,
-                        prop.cx, prop.cy, prop.cz, prop.qw, prop.qx, prop.qy, prop.qz,
-                        ulj, uel, up, prop.mux, prop.muy, prop.muz);
-                    prop.u_fw_new = ulj + uel + up;
-                    if (ovl) { prop.fw_ovl = 1; prop.skip = 1; }
                 }
             } else {
-                if (cur_N == 0) {
+                if (cur_N == 0 || beta_f_V <= 1.0e-300) {
                     prop.skip = 1;
                 } else {
                     int idx = (int)(u01(rng) * (double)cur_N);
                     if (idx >= cur_N) idx = cur_N - 1;
                     prop.tgt = idx;
-                    prop.u_fw_old = s_ufw[idx];
-                    prop.cx = s_cx[idx]; prop.cy = s_cy[idx]; prop.cz = s_cz[idx];
-                    prop.qw = s_qw[idx]; prop.qx = s_qx[idx]; prop.qy = s_qy[idx]; prop.qz = s_qz[idx];
-                    prop.mux = s_mux[idx]; prop.muy = s_muy[idx]; prop.muz = s_muz[idx];
                 }
             }
         }
         __syncthreads();
+
+        double tcx = 0.0, tcy = 0.0, tcz = 0.0;
+        double tqw = 1.0, tqx = 0.0, tqy = 0.0, tqz = 0.0;
+        double tmux = 0.0, tmuy = 0.0, tmuz = 0.0, tufw = 0.0, tdU = 0.0;
+
+        if (!prop.skip && (prop.mv == 2 || prop.mv == 3)) {
+            int N_now = prop.cur_N;
+            int idx_del = prop.tgt;
+            int tvalid = 0;
+            if (tid < k_cbmc) {
+                if (prop.mv == 3 && tid == 0) {
+                    tcx = s_cx[idx_del]; tcy = s_cy[idx_del]; tcz = s_cz[idx_del];
+                    tqw = s_qw[idx_del]; tqx = s_qx[idx_del]; tqy = s_qy[idx_del]; tqz = s_qz[idx_del];
+                } else {
+                    uint64_t trng = s_step_seed ^ ((uint64_t)(tid + 1) * 0x9e3779b97f4a7c15ULL);
+                    splitmix64_next(trng);
+                    double sa = sm_u01(trng), sb = sm_u01(trng), sc = sm_u01(trng);
+                    cell.super_frac_to_cart(sa, sb, sc, tcx, tcy, tcz);
+                    if (!guest.is_isotropic) {
+                        rand_uniform_quat_sm(trng, tqw, tqx, tqy, tqz);
+                    }
+                }
+                double ulj = 0.0, uel = 0.0, up = 0.0;
+                bool ov_fw = eval_rigid_guest_framework_grid(
+                    grid, cell, guest, pol_mode, KE_K,
+                    tcx, tcy, tcz, tqw, tqx, tqy, tqz,
+                    ulj, uel, up, tmux, tmuy, tmuz);
+                if (!ov_fw) {
+                    tufw = ulj + uel + up;
+                    double dugg = 0.0;
+                    int ov_gg = 0;
+                    for (int j = 0; j < N_now; ++j) {
+                        if (prop.mv == 3 && j == idx_del) continue;
+                        dugg += pair_rigid_guest(
+                            cell, guest,
+                            tcx, tcy, tcz, tqw, tqx, tqy, tqz, tmux, tmuy, tmuz,
+                            s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
+                            shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, ov_gg);
+                        if (ov_gg) break;
+                    }
+                    if (!ov_gg) {
+                        tdU = tufw + dugg;
+                        tvalid = 1;
+                    }
+                }
+                if (prop.mv == 3 && tid == 0) {
+                    prop.u_fw_old = tdU;
+                }
+            }
+            s_cbmc_valid[tid] = tvalid;
+            s_cbmc_logw[tid] = tvalid ? (-tdU / T_K) : -1.0e300;
+        }
 
         double loc_du = 0.0;
         int loc_ovl = 0;
-        if (!prop.skip && prop.cur_N > 0) {
-            int N = prop.cur_N, mv = prop.mv, tgt = prop.tgt;
-            if (mv == 0 || mv == 1) {
-                double ox = s_cx[tgt], oy = s_cy[tgt], oz = s_cz[tgt];
-                double oqw = s_qw[tgt], oqx = s_qx[tgt], oqy = s_qy[tgt], oqz = s_qz[tgt];
-                double omx = s_mux[tgt], omy = s_muy[tgt], omz = s_muz[tgt];
-                for (int j = tid; j < N; j += PROP_THREADS) {
-                    if (j == tgt) continue;
-                    int o1 = 0, o2 = 0;
-                    double enew = pair_rigid_guest(
-                        cell, guest,
-                        prop.cx, prop.cy, prop.cz, prop.qw, prop.qx, prop.qy, prop.qz, prop.mux, prop.muy, prop.muz,
-                        s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
-                        shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, o1);
-                    if (o1) { loc_ovl = 1; break; }
-                    double eold = pair_rigid_guest(
-                        cell, guest,
-                        ox, oy, oz, oqw, oqx, oqy, oqz, omx, omy, omz,
-                        s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
-                        shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, o2);
-                    loc_du += (enew - eold);
-                }
-            } else if (mv == 2) {
-                for (int j = tid; j < N; j += PROP_THREADS) {
-                    int o1 = 0;
-                    double enew = pair_rigid_guest(
-                        cell, guest,
-                        prop.cx, prop.cy, prop.cz, prop.qw, prop.qx, prop.qy, prop.qz, prop.mux, prop.muy, prop.muz,
-                        s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
-                        shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, o1);
-                    if (o1) { loc_ovl = 1; break; }
-                    loc_du += enew;
-                }
-            } else {
-                for (int j = tid; j < N; j += PROP_THREADS) {
-                    if (j == tgt) continue;
-                    int o2 = 0;
-                    double eold = pair_rigid_guest(
-                        cell, guest,
-                        prop.cx, prop.cy, prop.cz, prop.qw, prop.qx, prop.qy, prop.qz, prop.mux, prop.muy, prop.muz,
-                        s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
-                        shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, o2);
-                    loc_du -= eold;
-                }
+        if (!prop.skip && (prop.mv == 0 || prop.mv == 1) && prop.cur_N > 0) {
+            int N = prop.cur_N, tgt = prop.tgt;
+            double ox = s_cx[tgt], oy = s_cy[tgt], oz = s_cz[tgt];
+            double oqw = s_qw[tgt], oqx = s_qx[tgt], oqy = s_qy[tgt], oqz = s_qz[tgt];
+            double omx = s_mux[tgt], omy = s_muy[tgt], omz = s_muz[tgt];
+            for (int j = tid; j < N; j += PROP_THREADS) {
+                if (j == tgt) continue;
+                int o1 = 0, o2 = 0;
+                double enew = pair_rigid_guest(
+                    cell, guest,
+                    prop.cx, prop.cy, prop.cz, prop.qw, prop.qx, prop.qy, prop.qz, prop.mux, prop.muy, prop.muz,
+                    s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
+                    shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, o1);
+                if (o1) { loc_ovl = 1; break; }
+                double eold = pair_rigid_guest(
+                    cell, guest,
+                    ox, oy, oz, oqw, oqx, oqy, oqz, omx, omy, omz,
+                    s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
+                    shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, o2);
+                loc_du += (enew - eold);
             }
+            int lane = tid & 31, wid = tid >> 5;
+            for (int s = 16; s > 0; s >>= 1) {
+                loc_du += __shfl_down_sync(0xFFFFFFFFU, loc_du, s);
+                loc_ovl |= __shfl_down_sync(0xFFFFFFFFU, loc_ovl, s);
+            }
+            if (lane == 0) { warp_u[wid] = loc_du; warp_ovl[wid] = loc_ovl; }
         }
-        int lane = tid & 31, wid = tid >> 5;
-        for (int s = 16; s > 0; s >>= 1) {
-            loc_du += __shfl_down_sync(0xFFFFFFFFU, loc_du, s);
-            loc_ovl |= __shfl_down_sync(0xFFFFFFFFU, loc_ovl, s);
-        }
-        if (lane == 0) { warp_u[wid] = loc_du; warp_ovl[wid] = loc_ovl; }
         __syncthreads();
 
         if (tid == 0) {
-            double dU_gg = warp_u[0] + warp_u[1] + warp_u[2] + warp_u[3];
-            int ovl = warp_ovl[0] | warp_ovl[1] | warp_ovl[2] | warp_ovl[3];
             int mv = prop.mv;
-            if (mv == 0 && cur_N > 0 && !prop.fw_ovl && !ovl) {
-                double dU = (prop.u_fw_new - prop.u_fw_old) + dU_gg;
-                double arg = -dU / T_K;
-                if ((dU <= 0.0) || (arg > -50.0 && u01(rng) < exp(arg))) {
-                    int t = prop.tgt;
-                    s_cx[t] = prop.cx; s_cy[t] = prop.cy; s_cz[t] = prop.cz;
-                    s_mux[t] = prop.mux; s_muy[t] = prop.muy; s_muz[t] = prop.muz;
-                    s_ufw[t] = prop.u_fw_new;
-                    U_total += dU;
-                    ++inner_acc;
+            if (!prop.skip && (mv == 0 || mv == 1) && cur_N > 0 && !prop.fw_ovl) {
+                double dU_gg = warp_u[0] + warp_u[1] + warp_u[2] + warp_u[3];
+                int ovl = warp_ovl[0] | warp_ovl[1] | warp_ovl[2] | warp_ovl[3];
+                if (!ovl) {
+                    double dU = (prop.u_fw_new - prop.u_fw_old) + dU_gg;
+                    double arg = -dU / T_K;
+                    if ((dU <= 0.0) || (arg > -50.0 && u01(rng) < exp(arg))) {
+                        int t = prop.tgt;
+                        if (mv == 0) {
+                            s_cx[t] = prop.cx; s_cy[t] = prop.cy; s_cz[t] = prop.cz;
+                        } else {
+                            s_qw[t] = prop.qw; s_qx[t] = prop.qx; s_qy[t] = prop.qy; s_qz[t] = prop.qz;
+                        }
+                        s_mux[t] = prop.mux; s_muy[t] = prop.muy; s_muz[t] = prop.muz;
+                        s_ufw[t] = prop.u_fw_new;
+                        U_total += dU;
+                        ++inner_acc;
+                    }
                 }
-            } else if (mv == 1 && cur_N > 0 && !prop.fw_ovl && !ovl) {
-                double dU = (prop.u_fw_new - prop.u_fw_old) + dU_gg;
-                double arg = -dU / T_K;
-                if ((dU <= 0.0) || (arg > -50.0 && u01(rng) < exp(arg))) {
-                    int t = prop.tgt;
-                    s_qw[t] = prop.qw; s_qx[t] = prop.qx; s_qy[t] = prop.qy; s_qz[t] = prop.qz;
-                    s_mux[t] = prop.mux; s_muy[t] = prop.muy; s_muz[t] = prop.muz;
-                    s_ufw[t] = prop.u_fw_new;
-                    U_total += dU;
-                    ++inner_acc;
+            } else if (!prop.skip && mv == 2 && cur_N < max_mol && cur_N < PROP_SMEM_MAX) {
+                double u_sel = u01(rng);
+                double u_acc = u01(rng);
+                double max_lw = -1.0e300;
+                int first_valid = -1;
+                for (int t = 0; t < k_cbmc; ++t) {
+                    if (s_cbmc_valid[t]) {
+                        if (first_valid < 0 || s_cbmc_logw[t] > max_lw) max_lw = s_cbmc_logw[t];
+                        if (first_valid < 0) first_valid = t;
+                    }
                 }
-            } else if (mv == 2 && cur_N < max_mol && cur_N < PROP_SMEM_MAX && !prop.fw_ovl && !ovl) {
-                double dU = prop.u_fw_new + dU_gg;
-                double arg = -dU / T_K;
-                double ratio = (beta_f_V / (double)(cur_N + 1)) * exp(arg > 50.0 ? 50.0 : arg);
-                if ((arg > -50.0) && (ratio >= 1.0 || u01(rng) < ratio)) {
-                    s_cx[cur_N] = prop.cx; s_cy[cur_N] = prop.cy; s_cz[cur_N] = prop.cz;
-                    s_qw[cur_N] = prop.qw; s_qx[cur_N] = prop.qx; s_qy[cur_N] = prop.qy; s_qz[cur_N] = prop.qz;
-                    s_mux[cur_N] = prop.mux; s_muy[cur_N] = prop.muy; s_muz[cur_N] = prop.muz;
-                    s_ufw[cur_N] = prop.u_fw_new;
-                    ++cur_N;
-                    U_total += dU;
-                    ++inner_acc;
+                if (first_valid >= 0) {
+                    double sum_w = 0.0;
+                    for (int t = 0; t < k_cbmc; ++t) {
+                        if (s_cbmc_valid[t]) sum_w += exp(s_cbmc_logw[t] - max_lw);
+                    }
+                    double log_W = max_lw + log(sum_w / (double)k_cbmc);
+                    double log_r = log(beta_f_V / (double)(cur_N + 1)) + log_W;
+                    if (log_r >= 0.0 || (log_r > -60.0 && u_acc < exp(log_r))) {
+                        double tgt_w = u_sel * sum_w;
+                        double run_w = 0.0;
+                        int chosen = first_valid;
+                        for (int t = 0; t < k_cbmc; ++t) {
+                            if (!s_cbmc_valid[t]) continue;
+                            chosen = t;
+                            run_w += exp(s_cbmc_logw[t] - max_lw);
+                            if (run_w >= tgt_w) break;
+                        }
+                        s_cbmc_chosen = chosen;
+                    }
                 }
-            } else if (mv == 3 && cur_N > 0 && !ovl) {
-                double dU = (-prop.u_fw_old) + dU_gg;
-                double arg = -dU / T_K;
-                double ratio = ((double)cur_N / beta_f_V) * exp(arg > 50.0 ? 50.0 : arg);
-                if ((arg > -50.0) && (ratio >= 1.0 || u01(rng) < ratio)) {
+            } else if (!prop.skip && mv == 3 && cur_N > 0) {
+                double u_acc = u01(rng);
+                bool del_ok = false;
+                if (!s_cbmc_valid[0]) {
+                    del_ok = true;
+                } else {
+                    double max_lw = s_cbmc_logw[0];
+                    for (int t = 1; t < k_cbmc; ++t) {
+                        if (s_cbmc_valid[t] && s_cbmc_logw[t] > max_lw) max_lw = s_cbmc_logw[t];
+                    }
+                    double sum_w = 0.0;
+                    for (int t = 0; t < k_cbmc; ++t) {
+                        if (s_cbmc_valid[t]) sum_w += exp(s_cbmc_logw[t] - max_lw);
+                    }
+                    double log_W = max_lw + log(sum_w / (double)k_cbmc);
+                    double log_r = log((double)cur_N / beta_f_V) - log_W;
+                    if (log_r >= 0.0 || (log_r > -60.0 && u_acc < exp(log_r))) {
+                        del_ok = true;
+                    }
+                }
+                if (del_ok) {
                     int t = prop.tgt, last = cur_N - 1;
                     if (t != last) {
                         s_cx[t] = s_cx[last]; s_cy[t] = s_cy[last]; s_cz[t] = s_cz[last];
@@ -911,11 +1037,28 @@ __global__ void propose_burst_kernel(
                         s_ufw[t] = s_ufw[last];
                     }
                     --cur_N;
-                    U_total += dU;
+                    prop.cur_N = cur_N;
+                    U_total -= prop.u_fw_old;
                     ++inner_acc;
                 }
             }
+        }
+        __syncthreads();
+
+        if (!prop.skip && prop.mv == 2 && s_cbmc_chosen >= 0 && tid == s_cbmc_chosen) {
+            int slot = prop.cur_N;
+            s_cx[slot] = tcx; s_cy[slot] = tcy; s_cz[slot] = tcz;
+            s_qw[slot] = tqw; s_qx[slot] = tqx; s_qy[slot] = tqy; s_qz[slot] = tqz;
+            s_mux[slot] = tmux; s_muy[slot] = tmuy; s_muz[slot] = tmuz;
+            s_ufw[slot] = tufw;
+            prop.u_fw_new = tdU;
+        }
+        __syncthreads();
+        if (!prop.skip && prop.mv == 2 && s_cbmc_chosen >= 0 && tid == 0) {
+            ++cur_N;
             prop.cur_N = cur_N;
+            U_total += prop.u_fw_new;
+            ++inner_acc;
         }
         __syncthreads();
     }
@@ -1026,7 +1169,7 @@ __global__ void eval_single_state_kernel(
     }
     __syncthreads();
 
-    int shifted_lj = (ff_mode == 1) ? 1 : 0;
+    int shifted_lj = (ff_mode == 1 || ff_mode == 2) ? 1 : 0;
     double rc = r_cut_gg, rc2 = rc * rc;
     constexpr double INV_SQRT_PI = 0.56418958354775628695;
     double erfc_rc = erfc(dsf_alpha * rc), exp_rc = exp(-dsf_alpha * dsf_alpha * rc2);
@@ -1080,6 +1223,8 @@ struct ProposerContext {
     int pol_mode = 0;
     int n_boxes = 1;
     int max_mol = 128;
+    int cbmc_k = 128;
+    double p_ins_del_total = 0.60;
     ProposerStateDev dev{};
 };
 
@@ -1109,6 +1254,12 @@ RigidGuestDef make_default_co2_guest(int ff_mode) {
     g.Tc_K = sp.Tc_K;
     g.Pc_bar = sp.Pc_bar;
     g.omega = sp.omega;
+    g.gg_q_scale = 1.0;
+    g.gg_lj_scale = 1.0;
+    g.gg_lut_n = 0;
+    g.gg_lut_rmin = 2.0;
+    g.gg_lut_rmax = 10.0;
+    g.gg_lut_inv_dr = 0.0;
     return g;
 }
 
@@ -1144,6 +1295,13 @@ void* finalize_proposer_context(
         ctx->grid.Ex = ctx->unified_grid.Ex;
         ctx->grid.Ey = ctx->unified_grid.Ey;
         ctx->grid.Ez = ctx->unified_grid.Ez;
+    } else if (ctx->ff_mode == 2) {
+        // External distilled grids will be uploaded via proposer_set_external_grids
+        ctx->owns_unified_grid = false;
+        ctx->grid = ProposerGridView{};
+        ctx->grid.nx = nx;
+        ctx->grid.ny = ny;
+        ctx->grid.nz = nz;
     } else {
         ctx->owns_unified_grid = false;
         if (build_proposer_uff_grids_gpu(
@@ -1166,6 +1324,7 @@ void* finalize_proposer_context(
 
     size_t n_b = (size_t)ctx->n_boxes;
     size_t n_m = n_b * (size_t)ctx->max_mol;
+    size_t eval_bytes = (size_t)PROP_SMEM_MAX * sizeof(double);
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_N, n_b * sizeof(int)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_U, n_b * sizeof(double)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_cx, n_m * sizeof(double)));
@@ -1190,6 +1349,16 @@ void* finalize_proposer_context(
 
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_commit_mask, n_b * sizeof(int)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_rng, n_b * sizeof(uint64_t)));
+
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_cx, eval_bytes));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_cy, eval_bytes));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_cz, eval_bytes));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_qw, eval_bytes));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_qx, eval_bytes));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_qy, eval_bytes));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_qz, eval_bytes));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_U, sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_ov, sizeof(int)));
 
     CUDA_CHECK_FAIL(cudaMemset(ctx->dev.d_acc_N, 0, n_b * sizeof(int)));
     CUDA_CHECK_FAIL(cudaMemset(ctx->dev.d_acc_U, 0, n_b * sizeof(double)));
@@ -1430,6 +1599,12 @@ void* proposer_create_from_data(
     g.Tc_K = guest_Tc;
     g.Pc_bar = guest_Pc;
     g.omega = guest_omega;
+    g.gg_q_scale = 1.0;
+    g.gg_lj_scale = 1.0;
+    g.gg_lut_n = 0;
+    g.gg_lut_rmin = 2.0;
+    g.gg_lut_rmax = 10.0;
+    g.gg_lut_inv_dr = 0.0;
     ctx->guest = g;
 
     return finalize_proposer_context(ctx, unit_atoms, nx, ny, nz, seed);
@@ -1465,6 +1640,15 @@ void proposer_destroy(void* handle) {
     if (ctx->dev.d_tri_qz) cudaFree(ctx->dev.d_tri_qz);
     if (ctx->dev.d_commit_mask) cudaFree(ctx->dev.d_commit_mask);
     if (ctx->dev.d_rng) cudaFree(ctx->dev.d_rng);
+    if (ctx->dev.d_eval_cx) cudaFree(ctx->dev.d_eval_cx);
+    if (ctx->dev.d_eval_cy) cudaFree(ctx->dev.d_eval_cy);
+    if (ctx->dev.d_eval_cz) cudaFree(ctx->dev.d_eval_cz);
+    if (ctx->dev.d_eval_qw) cudaFree(ctx->dev.d_eval_qw);
+    if (ctx->dev.d_eval_qx) cudaFree(ctx->dev.d_eval_qx);
+    if (ctx->dev.d_eval_qy) cudaFree(ctx->dev.d_eval_qy);
+    if (ctx->dev.d_eval_qz) cudaFree(ctx->dev.d_eval_qz);
+    if (ctx->dev.d_eval_U) cudaFree(ctx->dev.d_eval_U);
+    if (ctx->dev.d_eval_ov) cudaFree(ctx->dev.d_eval_ov);
     delete ctx;
 }
 
@@ -1533,7 +1717,8 @@ int proposer_equilibrate(void* handle, int n_steps) {
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
         ctx->cell, ctx->grid, ctx->guest,
         ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
-        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, n_steps, 1, ctx->dev);
+        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, n_steps, 1,
+        ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
     return 0;
@@ -1550,7 +1735,8 @@ int proposer_propose_k_quat(
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
         ctx->cell, ctx->grid, ctx->guest,
         ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
-        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, k_steps, 0, ctx->dev);
+        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, k_steps, 0,
+        ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
 
@@ -1678,7 +1864,8 @@ int proposer_set_accepted_quat(
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
         ctx->cell, ctx->grid, ctx->guest,
         ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
-        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1, ctx->dev);
+        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1,
+        ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
     return 0;
@@ -1714,63 +1901,40 @@ double proposer_eval_energy_quat(
     }
 
     size_t sz = (size_t)N * sizeof(double);
-    double *d_cx = nullptr, *d_cy = nullptr, *d_cz = nullptr;
-    double *d_qw = nullptr, *d_qx = nullptr, *d_qy = nullptr, *d_qz = nullptr, *d_U = nullptr;
-    int *d_ov = nullptr;
-    auto cleanup = [&]() {
-        if (d_cx) cudaFree(d_cx);
-        if (d_cy) cudaFree(d_cy);
-        if (d_cz) cudaFree(d_cz);
-        if (d_qw) cudaFree(d_qw);
-        if (d_qx) cudaFree(d_qx);
-        if (d_qy) cudaFree(d_qy);
-        if (d_qz) cudaFree(d_qz);
-        if (d_U) cudaFree(d_U);
-        if (d_ov) cudaFree(d_ov);
-    };
 #define EVAL_CUDA_CHECK(call)                                                   \
     do {                                                                        \
         cudaError_t err = (call);                                               \
         if (err != cudaSuccess) {                                               \
             std::fprintf(stderr, "CUDA Error at %s:%d: %s\n",                   \
                          __FILE__, __LINE__, cudaGetErrorString(err));          \
-            cleanup();                                                          \
             if (out_overlap) *out_overlap = 1;                                  \
             return 1.0e9;                                                       \
         }                                                                       \
     } while (0)
 
-    EVAL_CUDA_CHECK(cudaMalloc(&d_cx, sz));
-    EVAL_CUDA_CHECK(cudaMalloc(&d_cy, sz));
-    EVAL_CUDA_CHECK(cudaMalloc(&d_cz, sz));
-    EVAL_CUDA_CHECK(cudaMalloc(&d_qw, sz));
-    EVAL_CUDA_CHECK(cudaMalloc(&d_qx, sz));
-    EVAL_CUDA_CHECK(cudaMalloc(&d_qy, sz));
-    EVAL_CUDA_CHECK(cudaMalloc(&d_qz, sz));
-    EVAL_CUDA_CHECK(cudaMalloc(&d_U, sizeof(double)));
-    EVAL_CUDA_CHECK(cudaMalloc(&d_ov, sizeof(int)));
-    EVAL_CUDA_CHECK(cudaMemcpy(d_cx, cx, sz, cudaMemcpyHostToDevice));
-    EVAL_CUDA_CHECK(cudaMemcpy(d_cy, cy, sz, cudaMemcpyHostToDevice));
-    EVAL_CUDA_CHECK(cudaMemcpy(d_cz, cz, sz, cudaMemcpyHostToDevice));
-    EVAL_CUDA_CHECK(cudaMemcpy(d_qw, qw, sz, cudaMemcpyHostToDevice));
-    EVAL_CUDA_CHECK(cudaMemcpy(d_qx, qx, sz, cudaMemcpyHostToDevice));
-    EVAL_CUDA_CHECK(cudaMemcpy(d_qy, qy, sz, cudaMemcpyHostToDevice));
-    EVAL_CUDA_CHECK(cudaMemcpy(d_qz, qz, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(ctx->dev.d_eval_cx, cx, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(ctx->dev.d_eval_cy, cy, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(ctx->dev.d_eval_cz, cz, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(ctx->dev.d_eval_qw, qw, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(ctx->dev.d_eval_qx, qx, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(ctx->dev.d_eval_qy, qy, sz, cudaMemcpyHostToDevice));
+    EVAL_CUDA_CHECK(cudaMemcpy(ctx->dev.d_eval_qz, qz, sz, cudaMemcpyHostToDevice));
 
     eval_single_state_kernel<<<1, PROP_THREADS>>>(
         ctx->cell, ctx->grid, ctx->guest,
         ctx->r_cut_gg, ctx->dsf_alpha, ctx->ff_mode, ctx->pol_mode, N,
-        d_cx, d_cy, d_cz, d_qw, d_qx, d_qy, d_qz, d_U, d_ov);
+        ctx->dev.d_eval_cx, ctx->dev.d_eval_cy, ctx->dev.d_eval_cz,
+        ctx->dev.d_eval_qw, ctx->dev.d_eval_qx, ctx->dev.d_eval_qy, ctx->dev.d_eval_qz,
+        ctx->dev.d_eval_U, ctx->dev.d_eval_ov);
     EVAL_CUDA_CHECK(cudaGetLastError());
     EVAL_CUDA_CHECK(cudaDeviceSynchronize());
 
     double h_U = 0.0;
     int h_ov = 0;
-    EVAL_CUDA_CHECK(cudaMemcpy(&h_U, d_U, sizeof(double), cudaMemcpyDeviceToHost));
-    EVAL_CUDA_CHECK(cudaMemcpy(&h_ov, d_ov, sizeof(int), cudaMemcpyDeviceToHost));
+    EVAL_CUDA_CHECK(cudaMemcpy(&h_U, ctx->dev.d_eval_U, sizeof(double), cudaMemcpyDeviceToHost));
+    EVAL_CUDA_CHECK(cudaMemcpy(&h_ov, ctx->dev.d_eval_ov, sizeof(int), cudaMemcpyDeviceToHost));
 #undef EVAL_CUDA_CHECK
 
-    cleanup();
     if (out_overlap) *out_overlap = h_ov;
     return h_U;
 }
@@ -1849,6 +2013,123 @@ int proposer_run_direct_benchmark(
     if (out_Qst_kJ_mol) *out_Qst_kJ_mol = mu_q;
     if (out_sem_Qst_kJ_mol) *out_sem_Qst_kJ_mol = std::sqrt(var_q / n_b);
     if (out_max_drift_K) *out_max_drift_K = md;
+    return 0;
+}
+
+int proposer_set_external_grids(
+    void* handle,
+    int nx, int ny, int nz,
+    int n_lj,
+    const float* h_u_lj_flat,
+    const float* h_phi_elec) {
+
+    if (!handle || nx <= 0 || ny <= 0 || nz <= 0 || n_lj <= 0 || n_lj > PROP_MAX_LJ || !h_u_lj_flat) {
+        std::fprintf(stderr, "Error: invalid arguments to proposer_set_external_grids.\n");
+        return -1;
+    }
+    auto* ctx = static_cast<ProposerContext*>(handle);
+    if (ctx->owns_unified_grid) {
+        free_unified_grids_gpu(ctx->unified_grid);
+        ctx->owns_unified_grid = false;
+    } else {
+        free_proposer_uff_grids_gpu(ctx->grid);
+    }
+
+    ctx->grid = ProposerGridView{};
+    ctx->grid.nx = nx;
+    ctx->grid.ny = ny;
+    ctx->grid.nz = nz;
+    ctx->grid.n_lj = n_lj;
+    ctx->grid.has_phi = (h_phi_elec != nullptr) ? 1 : 0;
+    ctx->grid.has_efield = 0;
+
+    size_t total = (size_t)nx * (size_t)ny * (size_t)nz;
+    size_t bytes = total * sizeof(float);
+    for (int s = 0; s < n_lj; ++s) {
+        float* d_u = nullptr;
+        CUDA_CHECK_RET(cudaMalloc(&d_u, bytes), -1);
+        CUDA_CHECK_RET(cudaMemcpy(d_u, h_u_lj_flat + (size_t)s * total, bytes, cudaMemcpyHostToDevice), -1);
+        ctx->grid.U_lj[s] = d_u;
+    }
+    if (h_phi_elec != nullptr) {
+        float* d_phi = nullptr;
+        CUDA_CHECK_RET(cudaMalloc(&d_phi, bytes), -1);
+        CUDA_CHECK_RET(cudaMemcpy(d_phi, h_phi_elec, bytes, cudaMemcpyHostToDevice), -1);
+        ctx->grid.Phi_elec = d_phi;
+    }
+
+    propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
+        ctx->cell, ctx->grid, ctx->guest,
+        ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
+        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1,
+        ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
+    CUDA_CHECK_RET(cudaGetLastError(), -1);
+    CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
+    return 0;
+}
+
+int proposer_set_gg_lut(
+    void* handle,
+    double gg_q_scale,
+    double gg_lj_scale,
+    double r_min_A,
+    double r_max_A,
+    int n_bins,
+    const float* h_gg_com_lut_K) {
+
+    if (!handle || !std::isfinite(gg_q_scale) || !std::isfinite(gg_lj_scale) ||
+        gg_q_scale < 0.0 || gg_lj_scale < 0.0) {
+        std::fprintf(stderr, "Error: invalid scaling arguments to proposer_set_gg_lut.\n");
+        return -1;
+    }
+    auto* ctx = static_cast<ProposerContext*>(handle);
+    ctx->guest.gg_q_scale = gg_q_scale;
+    ctx->guest.gg_lj_scale = gg_lj_scale;
+    if (h_gg_com_lut_K != nullptr && n_bins >= 2) {
+        if (n_bins > 128 || !std::isfinite(r_min_A) || !std::isfinite(r_max_A) || r_max_A <= r_min_A) {
+            std::fprintf(stderr, "Error: invalid LUT bounds/bins in proposer_set_gg_lut.\n");
+            return -1;
+        }
+        ctx->guest.gg_lut_n = n_bins;
+        ctx->guest.gg_lut_rmin = r_min_A;
+        ctx->guest.gg_lut_rmax = r_max_A;
+        ctx->guest.gg_lut_inv_dr = (double)(n_bins - 1) / (r_max_A - r_min_A);
+        for (int i = 0; i < n_bins; ++i) {
+            if (!std::isfinite((double)h_gg_com_lut_K[i])) {
+                std::fprintf(stderr, "Error: non-finite entry in proposer_set_gg_lut.\n");
+                return -1;
+            }
+            ctx->guest.gg_lut_K[i] = h_gg_com_lut_K[i];
+        }
+    } else {
+        ctx->guest.gg_lut_n = 0;
+        ctx->guest.gg_lut_inv_dr = 0.0;
+    }
+
+    propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
+        ctx->cell, ctx->grid, ctx->guest,
+        ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
+        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1,
+        ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
+    CUDA_CHECK_RET(cudaGetLastError(), -1);
+    CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
+    return 0;
+}
+
+int proposer_set_mc_params(
+    void* handle,
+    int cbmc_k,
+    double p_ins_del_total) {
+
+    if (!handle || cbmc_k < 1 || cbmc_k > PROP_THREADS ||
+        !std::isfinite(p_ins_del_total) || p_ins_del_total < 0.10 || p_ins_del_total > 0.96) {
+        std::fprintf(stderr, "Error: invalid cbmc_k=%d or p_ins_del_total=%g in proposer_set_mc_params.\n",
+                     cbmc_k, p_ins_del_total);
+        return -1;
+    }
+    auto* ctx = static_cast<ProposerContext*>(handle);
+    ctx->cbmc_k = cbmc_k;
+    ctx->p_ins_del_total = p_ins_del_total;
     return 0;
 }
 
