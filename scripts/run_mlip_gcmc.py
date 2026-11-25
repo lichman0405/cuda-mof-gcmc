@@ -3,10 +3,10 @@
 Example:
   .venv-mlip\\Scripts\\python.exe -u scripts\\run_mlip_gcmc.py ^
       --cif data\\MgMOF-74.cif --supercell 1 1 2 --temp 298 ^
-      --pressures 0.002 0.01 0.05 0.15 --proposer mercado ^
+      --pressures 0.012 0.28 1.0 --proposer auto_mlip --cbmc-k 128 ^
       --model mace-matpes-r2scan-0 --dispersion off ^
-      --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 320 ^
-      --out-json build\\phase3_mgmof74_r2scan.json
+      --boxes 4 --k-steps 16 --pilot-cycles 40 --eq-cycles 1200 --prod-cycles 4800 ^
+      --out-json build\\mgmof74_co2_r2scan.json
 """
 
 import argparse
@@ -72,7 +72,7 @@ def parse_args():
     p.add_argument("--grid-spacing", type=float, default=0.11, help="Target unit-cell grid spacing (Angstrom) for auto grid dims")
     p.add_argument("--boxes", type=int, default=4, help="Parallel simulation replicas")
     p.add_argument("--max-mol", type=int, default=128, help="Max guest molecules per supercell")
-    p.add_argument("--k-steps", type=int, default=25, help="Inner GPU GCMC steps per outer Nested MC cycle")
+    p.add_argument("--k-steps", type=int, default=16, help="Inner GPU GCMC steps per outer Nested MC cycle")
     p.add_argument("--cbmc-k", type=int, default=128, help="Block-parallel GPU CBMC trial poses per inner insert/delete (1..128)")
     p.add_argument("--p-ins-del", type=float, default=0.50, help="Total insertion+deletion move fraction inside GPU proposer")
     p.add_argument("--distill-samples-1b", type=int, default=1200, help="Single-molecule MACE evaluations for auto_mlip 1B distillation")

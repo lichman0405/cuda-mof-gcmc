@@ -181,6 +181,7 @@ def test_proposer_energy_restore_rng_and_guards():
         prop.close()
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shift_kJ,k_steps", [(0.0, 5), (-4.0, 15), (+4.0, 15)])
 def test_classical_target_nested_mc_distribution_parity(shift_kJ, k_steps):
     """§3.1 Classical fixed target (IRMOF-1 CO2 2.0 bar): Direct GPU GCMC vs shifted Nested MC (<N>, Var(N), stationarity)."""

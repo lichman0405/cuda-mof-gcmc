@@ -8,6 +8,7 @@ CHECK_ONLY=0
 SKIP_BUILD=0
 REBUILD=0
 SKIP_TEST=0
+FULL_TEST=0
 SMOKE_MLIP=0
 ARCH_OVERRIDE=""
 CUDA_INDEX=""
@@ -23,7 +24,8 @@ Usage: ./fast_start.sh [options]
   --skip-build        Do not compile CUDA binaries
   --rebuild           Force clean rebuild of build/mof_gcmc_cli and build/libmof_gcmc_proposer.so
   --skip-test         Skip post-setup verification tests
-  --smoke-mlip        Also run a short live MACE-MP0 smoke simulation after pytest
+  --full-test         Run full non-MLIP pytest suite (including slow MC distribution parity tests)
+  --smoke-mlip        Also run a short live auto_mlip smoke simulation after pytest
   --arch sm_XX        Override CUDA compute capability (default: auto-detect via nvidia-smi)
   --cuda-index cuXXX  Override PyTorch wheel tag (e.g. cu124, cu128; default: auto from driver)
   --torch-index-url U Override full PyTorch wheel index URL (e.g. https://mirror.nju.edu.cn/pytorch/whl/cu124)
@@ -40,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=1; shift ;;
         --rebuild) REBUILD=1; shift ;;
         --skip-test) SKIP_TEST=1; shift ;;
+        --full-test) FULL_TEST=1; shift ;;
         --smoke-mlip) SMOKE_MLIP=1; shift ;;
         --arch) ARCH_OVERRIDE="${2:?--arch requires a value}"; shift 2 ;;
         --cuda-index) CUDA_INDEX="${2:?--cuda-index requires a value}"; shift 2 ;;
@@ -367,19 +370,25 @@ if [[ "$SKIP_TEST" -eq 0 ]]; then
     "$CLI_BIN" --test-scf
     ok "mof_gcmc_cli --test-scf passed."
 
-    echo "  [b] Running pytest classical regression suite (-m 'not mlip')..."
-    "$VENV_PY" -m pytest -v -m "not mlip"
-    ok "All non-MLIP pytest tests passed."
+    if [[ "$FULL_TEST" -eq 1 ]]; then
+        PYTEST_EXPR="not mlip"
+    else
+        PYTEST_EXPR="not mlip and not slow"
+    fi
+    echo "  [b] Running pytest regression suite (-m '${PYTEST_EXPR}')..."
+    "$VENV_PY" -m pytest -v -m "${PYTEST_EXPR}"
+    ok "Pytest checks (${PYTEST_EXPR}) passed."
 
     if [[ "$SMOKE_MLIP" -eq 1 ]]; then
-        echo "  [c] Running live MLIP smoke test (IRMOF-1 + CH4, MACE small)..."
+        echo "  [c] Running live MLIP smoke test (IRMOF-1 + CH4, auto_mlip + MACE small)..."
         TMP_SMOKE="$ROOT/build/_tmp_faststart_smoke.json"
         rm -f "$TMP_SMOKE"
         set +e
         "$VENV_PY" -u "$ROOT/scripts/run_mlip_gcmc.py" \
             --cif "$ROOT/data/IRMOF-1.cif" --supercell 1 1 1 --temp 298 --pressures 5.0 \
-            --guest ch4 --proposer uff --charge-mode auto \
-            --model small --dispersion off --boxes 2 --k-steps 15 --pilot-cycles 0 --eq-cycles 2 --prod-cycles 4 \
+            --guest ch4 --proposer auto_mlip --cbmc-k 128 --charge-mode auto \
+            --model small --dispersion off --distill-samples-1b 160 --distill-samples-2b 32 \
+            --boxes 2 --k-steps 16 --pilot-cycles 0 --eq-cycles 2 --prod-cycles 4 \
             --out-json "$TMP_SMOKE"
         SMOKE_RC=$?
         set -e
@@ -399,13 +408,14 @@ Copy-pasteable Linux runs:
 1) Classical / Pol-SCF GPU GCMC (seconds):
    CUDA_VISIBLE_DEVICES=${SEL_GPU} ./build/mof_gcmc_cli --config configs/mg_mof74_co2_298K_uff.json
 
-2) Any rigid MOF CIF + built-in guest MLIP-GCMC (auto spacegroup + QEq):
+2) Online-distilled auto_mlip Nested MC (Mg-MOF-74 + CO2, r2SCAN):
    CUDA_VISIBLE_DEVICES=${SEL_GPU} ${VENV_DIR}/bin/python -u scripts/run_mlip_gcmc.py \\
-     --cif data/IRMOF-1.cif --supercell 1 1 1 --temp 298 --pressures 5.0 \\
-     --guest ch4 --proposer uff --charge-mode auto --model medium --dispersion on --xc pbe \\
-     --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 320 \\
-     --out-json build/irmof1_ch4.json --out-csv build/irmof1_ch4.csv
+     --cif data/MgMOF-74.cif --supercell 1 1 2 --temp 298 --pressures 0.012 0.28 1.0 \\
+     --guest co2 --proposer auto_mlip --cbmc-k 128 --model mace-matpes-r2scan-0 --dispersion off \\
+     --boxes 4 --k-steps 16 --pilot-cycles 40 --eq-cycles 1200 --prod-cycles 4800 \\
+     --out-json build/mgmof74_co2_r2scan.json --out-csv build/mgmof74_co2_r2scan.csv
 
-3) Full pytest suite including live MACE parity:
+3) Full classical parity or full pytest suite:
+   ./fast_start.sh --full-test
    CUDA_VISIBLE_DEVICES=${SEL_GPU} ${VENV_DIR}/bin/python -m pytest -v
 EOF

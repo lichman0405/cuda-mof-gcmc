@@ -178,6 +178,7 @@ def test_external_grid_and_gg_lut_parity_and_reject_restore():
         prop.close()
 
 
+@pytest.mark.slow
 def test_gpu_cbmc_128_vs_1_zero_bias_from_empty_and_high_loading():
     """Gate 2: 128-thread GPU-CBMC must sample the exact same grand-canonical distribution as cbmc_k=1."""
     cif = str(DATA / "MgMOF-74.cif")
@@ -299,6 +300,7 @@ def mercado_distill_bundle(tmp_path_factory):
         tgt.close()
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("shift_kJ", [-3.0, 0.0, +3.0])
 def test_cross_potential_nested_mc_zero_bias_with_cbmc_128(mercado_distill_bundle, shift_kJ):
     """Gate 3: Distilled external grid + 2B LUT with cbmc_k=128 samples exact Mercado target with zero bias."""

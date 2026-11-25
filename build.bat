@@ -45,6 +45,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Auto-detect nvcc if not already on PATH
+where nvcc.exe >nul 2>&1
+if errorlevel 1 (
+    for /f "delims=" %%D in ('dir /b /ad /o-n "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\v*" 2^>nul') do (
+        if exist "%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\%%D\bin\nvcc.exe" (
+            where nvcc.exe >nul 2>&1 || (
+                set "CUDA_PATH=%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\%%D"
+                set "PATH=!CUDA_PATH!\bin;!PATH!"
+            )
+        )
+    )
+)
+where nvcc.exe >nul 2>&1
+if errorlevel 1 (
+    echo Error: Could not locate nvcc.exe on PATH or in CUDA Toolkit directory.
+    echo Run "cmd /c fast_start.bat" to detect/install prerequisites.
+    exit /b 1
+)
+
 REM Auto-detect CUDA compute capability (respect CUDA_ARCH override, e.g. set CUDA_ARCH=sm_89)
 if not defined CUDA_ARCH (
     for /f "usebackq delims=" %%G in (`nvidia-smi --query-gpu^=compute_cap --format^=csv^,noheader 2^>nul`) do (
@@ -56,7 +75,10 @@ if not defined CUDA_ARCH (
         )
     )
 )
-if not defined CUDA_ARCH set "CUDA_ARCH=sm_120"
+if not defined CUDA_ARCH (
+    echo [WARN] nvidia-smi unavailable; defaulting CUDA_ARCH=sm_120 ^(override with set CUDA_ARCH=sm_XX^).
+    set "CUDA_ARCH=sm_120"
+)
 
 if not exist build mkdir build
 

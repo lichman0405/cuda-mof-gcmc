@@ -1,13 +1,13 @@
 """Phase 2 Controlled Benchmark & Cross-MOF Generalization Orchestrator.
 
-Implements PLAN.zh-CN.md Phase 2 suites with strict hard-convergence gates:
+Implements the benchmark matrix reported in docs/TECHNICAL_REPORT.md with strict convergence gates:
 - Exp 1 (Mg-MOF-74 + CO2, 298 K, 0.012 / 0.28 / 1.0 bar, No-D3 & +D3):
   1. auto_mlip (1B+2B + 128-thread GPU-CBMC Nested MC), including empty & high_loading check
   2. Direct MLIP-GCMC baseline (ESS/GPU-s & MCSE wall-time comparison)
   3. UFF+QEq Nested MC and Mercado Nested MC baselines
   4. Unreweighted auto_mlip --grid-only ablation
 - Exp 2 (Cross-metal / cross-topology / cross-guest zero-parameter generalization):
-  NiMOF-74 + CO2, Cu-BTC + CO2, IRMOF-1 + CO2, IRMOF-1 + CH4.
+  NiMOF-74 + CO2, Cu-BTC + CO2, IRMOF-1 + CO2 (r2SCAN), IRMOF-1 + CH4 (MP0+D3).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from qeq_charges import extract_framework_for_proposer
 
 
 def evaluate_phase2_hard_gate(pt: dict) -> dict:
-    """Apply strict PLAN.zh-CN.md Phase 2 statistical convergence thresholds to a pressure point."""
+    """Apply strict report statistical convergence thresholds to a pressure point."""
     v2 = pt.get("diagnostics") or {}
     n_chains = int(pt.get("n_boxes", 0))
     ns = v2.get("N_stats") or {}
@@ -170,8 +170,8 @@ def _build_job_specs(args) -> List[dict]:
         boxes, pilot, eq_c, prod_c = 4, 40, 80, 200
         dir_eq, dir_pr, dir_wall = 40, 120, 180.0
     else:
-        boxes, pilot, eq_c, prod_c = 4, 40, 200, 1800
-        dir_eq, dir_pr, dir_wall = 60, 400, 360.0
+        boxes, pilot, eq_c, prod_c = 4, 40, 250, 4800
+        dir_eq, dir_pr, dir_wall = 60, 400, 300.0
 
     out_dir = Path(args.out_dir)
     ckpt_root = out_dir / "checkpoints"
@@ -267,13 +267,14 @@ def _build_job_specs(args) -> List[dict]:
 
     if args.suite in ("exp2_generalization", "all"):
         gen_cases = [
-            ("nimof74_co2", "data/NiMOF-74.cif", ["1", "1", "2"], "co2", ["0.012", "0.28", "1.0"]),
-            ("cubtc_co2", "data/Cu-BTC.cif", ["1", "1", "1"], "co2", ["0.15", "1.0"]),
-            ("irmof1_co2", "data/IRMOF-1.cif", ["1", "1", "1"], "co2", ["1.0", "5.0"]),
-            ("irmof1_ch4", "data/IRMOF-1.cif", ["1", "1", "1"], "ch4", ["1.0", "10.0"]),
+            ("nimof74_co2", "data/NiMOF-74.cif", ["1", "1", "2"], "co2", ["0.012", "0.28", "1.0"], args.model, "off", ""),
+            ("cubtc_co2", "data/Cu-BTC.cif", ["1", "1", "1"], "co2", ["0.15", "1.0"], args.model, "off", ""),
+            ("irmof1_co2", "data/IRMOF-1.cif", ["1", "1", "1"], "co2", ["1.0", "5.0"], args.model, "off", ""),
+            ("irmof1_ch4", "data/IRMOF-1.cif", ["1", "1", "1"], "ch4", ["1.0", "5.0"], "medium", "on", "pbe"),
         ]
-        for tag, cif, sc, gname, p_list in gen_cases:
+        for tag, cif, sc, gname, p_list, m_name, disp_flag, xc_name in gen_cases:
             p_run = [p_list[0]] if mode == "smoke" else p_list
+            xc_args = ["--xc", xc_name] if xc_name else []
             jname = f"exp2_{tag}"
             jobs.append({
                 "name": jname,
@@ -284,7 +285,7 @@ def _build_job_specs(args) -> List[dict]:
                     "--cif", cif, "--supercell", *sc,
                     "--guest", gname, "--temp", "298", "--pressures", *p_run,
                     "--proposer", "auto_mlip", "--cbmc-k", "128",
-                    "--model", args.model, "--dispersion", "off",
+                    "--model", m_name, "--dispersion", disp_flag, *xc_args,
                     "--boxes", str(boxes), "--k-steps", str(k_steps),
                     "--pilot-cycles", str(pilot), "--eq-cycles", str(eq_c), "--prod-cycles", str(prod_c),
                     "--distill-cache-dir", args.distill_cache_dir,
@@ -329,7 +330,7 @@ def parse_args():
     p.add_argument("--suite", choices=["exp1_mgmof74", "exp2_generalization", "all"], default="all")
     p.add_argument("--mode", choices=["smoke", "probe", "full"], default="probe")
     p.add_argument("--gpus", nargs="+", default=["0"], help="Confirmed idle GPU IDs (only among 0..3)")
-    p.add_argument("--k-steps", type=int, default=12, help="Inner GPU steps per outer Nested MC cycle")
+    p.add_argument("--k-steps", type=int, default=16, help="Inner GPU steps per outer Nested MC cycle")
     p.add_argument("--model", default="mace-matpes-r2scan-0")
     p.add_argument("--xc", default="pbe")
     p.add_argument("--dtype", choices=["float32", "float64"], default="float32")

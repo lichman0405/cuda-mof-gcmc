@@ -4,9 +4,13 @@ param(
     [switch]$SkipBuild,
     [switch]$Rebuild,
     [switch]$SkipTest,
+    [switch]$FullTest,
     [switch]$SmokeMlip,
     [string]$Arch = "",
     [string]$CudaIndex = "",
+    [string]$TorchIndexUrl = "",
+    [string]$Gpu = "",
+    [string]$Python = "3.12",
     [switch]$NoPrompt,
     [string]$VenvDir = ".venv-mlip"
 )
@@ -160,15 +164,33 @@ if (-not $smiCmd) {
     Write-Miss "nvidia-smi.exe not found. Please install NVIDIA GPU drivers first."
     exit 1
 }
-$gpuRaw = (& $smiCmd.Source --query-gpu=name,compute_cap,memory.total --format=csv,noheader 2>$null | Select-Object -First 1)
+$gpuRaw = (& $smiCmd.Source --query-gpu=index,name,compute_cap,memory.total,memory.used --format=csv,noheader,nounits 2>$null)
 if (-not $gpuRaw) {
     Write-Miss "No active NVIDIA GPU reported by nvidia-smi."
     exit 1
 }
-$gpuParts = $gpuRaw.Split(",") | ForEach-Object { $_.Trim() }
-$gpuName = $gpuParts[0]
-$ccRaw = $gpuParts[1]
-$gpuMem = if ($gpuParts.Count -ge 3) { $gpuParts[2] } else { "unknown" }
+$gpuRows = @($gpuRaw | ForEach-Object {
+    $parts = $_.Split(",") | ForEach-Object { $_.Trim() }
+    [PSCustomObject]@{
+        Index   = $parts[0]
+        Name    = $parts[1]
+        CC      = $parts[2]
+        MemTot  = $parts[3]
+        MemUsed = [int]$parts[4]
+    }
+})
+if (-not [string]::IsNullOrWhiteSpace($Gpu)) {
+    $env:CUDA_VISIBLE_DEVICES = $Gpu
+} elseif ([string]::IsNullOrWhiteSpace($env:CUDA_VISIBLE_DEVICES)) {
+    $best = ($gpuRows | Sort-Object MemUsed | Select-Object -First 1)
+    $env:CUDA_VISIBLE_DEVICES = $best.Index
+}
+$firstGpuId = ($env:CUDA_VISIBLE_DEVICES -split ",")[0].Trim()
+$selRow = ($gpuRows | Where-Object { $_.Index -eq $firstGpuId } | Select-Object -First 1)
+if (-not $selRow) { $selRow = $gpuRows[0] }
+$gpuName = $selRow.Name
+$ccRaw = $selRow.CC
+$gpuMem = "$($selRow.MemTot) MiB"
 $detectedArch = "sm_" + ($ccRaw -replace "\.", "")
 if (-not [string]::IsNullOrWhiteSpace($Arch)) {
     $env:CUDA_ARCH = $Arch
@@ -177,7 +199,7 @@ if (-not [string]::IsNullOrWhiteSpace($Arch)) {
 } else {
     $env:CUDA_ARCH = $detectedArch
 }
-Write-Ok "$gpuName | compute $ccRaw -> CUDA_ARCH=$($env:CUDA_ARCH) | VRAM $gpuMem"
+Write-Ok "$($gpuRows.Count) GPU(s); CUDA_VISIBLE_DEVICES=$($env:CUDA_VISIBLE_DEVICES) ($gpuName | compute $ccRaw -> CUDA_ARCH=$($env:CUDA_ARCH) | VRAM $gpuMem)"
 
 # 2. CUDA Toolkit Check
 Write-Step "2/6 Checking CUDA Toolkit (nvcc)"
@@ -241,14 +263,33 @@ if (-not (Test-Path $venvPy)) {
         }
     }
     if ($sysPy -and -not $CheckOnly) {
-        Write-Host "  Creating venv at $venvPath using $($sysPy.Path) (Python $($sysPy.Version))..."
-        & $sysPy.Path -m venv $venvPath
+        $uvCmd = Get-Command uv.exe -ErrorAction SilentlyContinue
+        if (-not $uvCmd -and (Test-Path "$HOME\.local\bin\uv.exe")) {
+            Ensure-DirInPath "$HOME\.local\bin"
+            $uvCmd = Get-Command "$HOME\.local\bin\uv.exe" -ErrorAction SilentlyContinue
+        }
+        if ($uvCmd) {
+            Write-Host "  Creating venv at $venvPath via uv (Python $Python)..."
+            $env:UV_LINK_MODE = if ($env:UV_LINK_MODE) { $env:UV_LINK_MODE } else { "copy" }
+            & $uvCmd.Source venv --python $Python $venvPath
+            if ($LASTEXITCODE -ne 0) {
+                Write-WarnLine "uv venv --python $Python failed; retrying with $($sysPy.Path)..."
+                & $sysPy.Path -m venv $venvPath
+            }
+        } else {
+            Write-Host "  Creating venv at $venvPath using $($sysPy.Path) (Python $($sysPy.Version))..."
+            & $sysPy.Path -m venv $venvPath
+        }
         if ($LASTEXITCODE -ne 0) { throw "Failed to create venv at $venvPath." }
-        & $venvPy -m pip install --upgrade pip
+        if (-not $uvCmd) { & $venvPy -m pip install --upgrade pip }
     }
 }
 
 if (Test-Path $venvPy) {
+    $uvCmd = Get-Command uv.exe -ErrorAction SilentlyContinue
+    if (-not $uvCmd -and (Test-Path "$HOME\.local\bin\uv.exe")) {
+        $uvCmd = Get-Command "$HOME\.local\bin\uv.exe" -ErrorAction SilentlyContinue
+    }
     $probeCode = @'
 import importlib, json
 out = {"torch_ok": False, "torch_cuda": False, "torch_ver": "", "missing": []}
@@ -260,14 +301,14 @@ try:
 except Exception:
     pass
 reqs = [
-    ("numpy", "numpy"),
-    ("scipy", "scipy"),
-    ("ase", "ase"),
-    ("mace", "mace-torch"),
-    ("torch_dftd", "torch-dftd"),
-    ("e3nn", "e3nn"),
-    ("matscipy", "matscipy"),
-    ("matplotlib", "matplotlib"),
+    ("numpy", "numpy>=1.26"),
+    ("scipy", "scipy>=1.11"),
+    ("ase", "ase>=3.22"),
+    ("mace", "mace-torch>=0.3.10"),
+    ("torch_dftd", "torch-dftd>=0.5.0"),
+    ("e3nn", "e3nn>=0.4.4"),
+    ("matscipy", "matscipy>=1.1"),
+    ("matplotlib", "matplotlib>=3.8"),
     ("pytest", "pytest>=8.0"),
 ]
 for mod_name, pkg_spec in reqs:
@@ -281,6 +322,17 @@ print(json.dumps(out))
     if ($LASTEXITCODE -ne 0) { throw "Failed to probe Python packages inside $venvPy." }
     $probe = $probeRaw | ConvertFrom-Json
 
+    $idx = $CudaIndex
+    if ([string]::IsNullOrWhiteSpace($idx)) {
+        $ccNum = [double]::Parse($ccRaw, [System.Globalization.CultureInfo]::InvariantCulture)
+        if ($ccNum -ge 12.0 -or ($cudaVerText -and [double]::Parse($cudaVerText, [System.Globalization.CultureInfo]::InvariantCulture) -ge 12.8)) {
+            $idx = "cu128"
+        } else {
+            $idx = "cu124"
+        }
+    }
+    $effTorchIndex = if (-not [string]::IsNullOrWhiteSpace($TorchIndexUrl)) { $TorchIndexUrl } elseif (-not [string]::IsNullOrWhiteSpace($env:TORCH_INDEX_URL)) { $env:TORCH_INDEX_URL } else { "https://download.pytorch.org/whl/$idx" }
+
     if ($probe.torch_ok -and $probe.torch_cuda) {
         Write-Ok "PyTorch $($probe.torch_ver) (CUDA enabled)"
     } else {
@@ -288,19 +340,18 @@ print(json.dumps(out))
         if ($CheckOnly) {
             $missingItems.Add("CUDA PyTorch in $VenvDir")
         } else {
-            $idx = $CudaIndex
-            if ([string]::IsNullOrWhiteSpace($idx)) {
-                $ccNum = [double]::Parse($ccRaw, [System.Globalization.CultureInfo]::InvariantCulture)
-                if ($ccNum -ge 12.0 -or ($cudaVerText -and [double]::Parse($cudaVerText, [System.Globalization.CultureInfo]::InvariantCulture) -ge 12.8)) {
-                    $idx = "cu128"
-                } else {
-                    $idx = "cu124"
-                }
+            Write-Host "  Installing CUDA PyTorch from $effTorchIndex ..."
+            if ($uvCmd) {
+                & $uvCmd.Source pip uninstall --python $venvPy torch 2>$null | Out-Null
+                & $uvCmd.Source pip install --python $venvPy --default-index $effTorchIndex torch
+            } else {
+                & $venvPy -m pip uninstall -y torch 2>$null | Out-Null
+                & $venvPy -m pip install torch --index-url $effTorchIndex
             }
-            Write-Host "  Installing CUDA PyTorch from https://download.pytorch.org/whl/$idx ..."
-            & $venvPy -m pip install torch --index-url "https://download.pytorch.org/whl/$idx"
             if ($LASTEXITCODE -ne 0) { throw "Failed to install CUDA PyTorch ($idx)." }
-            Write-Ok "Installed CUDA PyTorch ($idx)"
+            $probe.torch_ver = (& $venvPy -c "import torch; assert torch.cuda.is_available(); print(torch.__version__)").Trim()
+            if ($LASTEXITCODE -ne 0) { throw "Installed PyTorch could not initialize CUDA." }
+            Write-Ok "Installed CUDA PyTorch ($($probe.torch_ver))"
         }
     }
 
@@ -312,9 +363,23 @@ print(json.dumps(out))
         if ($CheckOnly) {
             $missingItems.Add("Python packages: $($missList -join ', ')")
         } else {
-            Write-Host "  Installing missing packages..."
-            & $venvPy -m pip install @missList
-            if ($LASTEXITCODE -ne 0) { throw "Failed to install missing Python packages." }
+            $constraintFile = [System.IO.Path]::GetTempFileName()
+            try {
+                if (-not [string]::IsNullOrWhiteSpace($probe.torch_ver)) {
+                    Set-Content -Path $constraintFile -Value "torch==$($probe.torch_ver)" -Encoding Ascii
+                }
+                Write-Host "  Installing missing packages (pinning torch==$($probe.torch_ver))..."
+                if ($uvCmd) {
+                    & $uvCmd.Source pip install --python $venvPy --extra-index-url $effTorchIndex --index-strategy unsafe-best-match -c $constraintFile @missList
+                } else {
+                    & $venvPy -m pip install --extra-index-url $effTorchIndex -c $constraintFile @missList
+                }
+                if ($LASTEXITCODE -ne 0) { throw "Failed to install missing Python packages." }
+                & $venvPy -c "import torch; assert torch.cuda.is_available(), 'CUDA PyTorch overwritten after pip install!'"
+                if ($LASTEXITCODE -ne 0) { throw "CUDA check failed after installing Python dependencies." }
+            } finally {
+                if (Test-Path $constraintFile) { Remove-Item -Force $constraintFile }
+            }
             Write-Ok "Installed: $($missList -join ', ')"
         }
     }
@@ -327,7 +392,7 @@ $propDll = Join-Path $RepoRoot "build\mof_gcmc_proposer.dll"
 $needBuild = $Rebuild -or -not (Test-Path $cliExe) -or -not (Test-Path $propDll)
 if (-not $needBuild) {
     $oldestBin = [Math]::Min((Get-Item $cliExe).LastWriteTimeUtc.Ticks, (Get-Item $propDll).LastWriteTimeUtc.Ticks)
-    $srcItems = @(Get-ChildItem (Join-Path $RepoRoot "include") -File) + @(Get-ChildItem (Join-Path $RepoRoot "src") -File)
+    $srcItems = @(Get-ChildItem (Join-Path $RepoRoot "include") -File -Recurse) + @(Get-ChildItem (Join-Path $RepoRoot "src") -File -Recurse)
     $newestSrc = ($srcItems | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
     if ($newestSrc -and $newestSrc.Ticks -gt $oldestBin) {
         $needBuild = $true
@@ -370,19 +435,21 @@ if (-not $SkipTest) {
     if ($LASTEXITCODE -ne 0) { throw "mof_gcmc_cli.exe --test-scf failed." }
     Write-Ok "mof_gcmc_cli.exe --test-scf passed."
 
-    Write-Host "  [b] Running pytest classical regression suite (-m 'not mlip')..."
-    & $venvPy -m pytest -v -m "not mlip" | Out-Host
+    $pytestMarker = if ($FullTest) { "not mlip" } else { "not mlip and not slow" }
+    Write-Host "  [b] Running pytest regression suite (-m '$pytestMarker')..."
+    & $venvPy -m pytest -v -m $pytestMarker | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "pytest failed." }
-    Write-Ok "All non-MLIP pytest tests passed."
+    Write-Ok "Pytest checks ($pytestMarker) passed."
 
     if ($SmokeMlip) {
-        Write-Host "  [c] Running live MLIP smoke test (IRMOF-1 + CH4, MACE small)..."
+        Write-Host "  [c] Running live MLIP smoke test (IRMOF-1 + CH4, auto_mlip + MACE small)..."
         $tmpSmoke = Join-Path $RepoRoot "build\_tmp_faststart_smoke.json"
         if (Test-Path $tmpSmoke) { Remove-Item -Force $tmpSmoke }
         & $venvPy -u scripts\run_mlip_gcmc.py `
             --cif data\IRMOF-1.cif --supercell 1 1 1 --temp 298 --pressures 5.0 `
-            --guest ch4 --proposer uff --charge-mode auto `
-            --model small --dispersion off --boxes 2 --k-steps 15 --pilot-cycles 0 --eq-cycles 2 --prod-cycles 4 `
+            --guest ch4 --proposer auto_mlip --cbmc-k 128 --charge-mode auto `
+            --model small --dispersion off --distill-samples-1b 160 --distill-samples-2b 32 `
+            --boxes 2 --k-steps 16 --pilot-cycles 0 --eq-cycles 2 --prod-cycles 4 `
             --out-json $tmpSmoke | Out-Host
         $rc = $LASTEXITCODE
         if (Test-Path $tmpSmoke) { Remove-Item -Force $tmpSmoke }
@@ -391,7 +458,7 @@ if (-not $SkipTest) {
     }
 }
 
-Write-Host "`n=== Fast-Start Complete! Ready for Single-GPU Runs ===" -ForegroundColor Green
+Write-Host "`n=== Fast-Start Complete! Ready for Single-GPU Runs (CUDA_VISIBLE_DEVICES=$($env:CUDA_VISIBLE_DEVICES), $($env:CUDA_ARCH)) ===" -ForegroundColor Green
 Write-Host @"
 
 Copy-pasteable single-GPU examples:
@@ -399,13 +466,14 @@ Copy-pasteable single-GPU examples:
 1) Classical / Pol-SCF GPU GCMC (seconds):
    .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_uff.json
 
-2) Any rigid MOF CIF + built-in guest MLIP-GCMC (auto spacegroup + QEq):
+2) Online-distilled auto_mlip Nested MC (Mg-MOF-74 + CO2, r2SCAN):
    .\.venv-mlip\Scripts\python.exe -u scripts\run_mlip_gcmc.py ``
-     --cif data\IRMOF-1.cif --supercell 1 1 1 --temp 298 --pressures 5.0 ``
-     --guest ch4 --proposer uff --charge-mode auto --model medium --dispersion on --xc pbe ``
-     --boxes 4 --k-steps 25 --eq-cycles 120 --prod-cycles 320 ``
-     --out-json build\irmof1_ch4.json --out-csv build\irmof1_ch4.csv
+     --cif data\MgMOF-74.cif --supercell 1 1 2 --temp 298 --pressures 0.012 0.28 1.0 ``
+     --guest co2 --proposer auto_mlip --cbmc-k 128 --model mace-matpes-r2scan-0 --dispersion off ``
+     --boxes 4 --k-steps 16 --pilot-cycles 40 --eq-cycles 1200 --prod-cycles 4800 ``
+     --out-json build\mgmof74_co2_r2scan.json --out-csv build\mgmof74_co2_r2scan.csv
 
-3) Resume an interrupted isotherm without recomputing finished pressures:
+3) Full classical parity suite or resume an interrupted isotherm:
+   cmd /c fast_start.bat -FullTest
    (add --resume to the same run_mlip_gcmc.py command)
 "@

@@ -40,7 +40,7 @@ All numbers come from the [technical report](docs/TECHNICAL_REPORT.md) and [`doc
 ```powershell
 # Windows: check prerequisites only
 cmd /c fast_start.bat -CheckOnly
-# Windows: install what is missing, build and self-test
+# Windows: install what is missing, build and run fast self-tests (-FullTest runs long parity checks)
 cmd /c fast_start.bat
 ```
 
@@ -53,7 +53,7 @@ cmd /c fast_start.bat
 ### Nested MC ([`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py))
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 .venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
   --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298 \
   --pressures 0.012 0.15 0.28 1.0 --proposer auto_mlip --cbmc-k 128 \
   --model mace-matpes-r2scan-0 --dispersion off \
@@ -66,7 +66,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts
 Widom insertion and energy decomposition:
 
 ```bash
-PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/widom_mlip.py \
+.venv-mlip/bin/python -u scripts/widom_mlip.py \
   --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298 \
   --model mace-matpes-r2scan-0 --dispersion off --n-samples 6000 \
   --out-json build/widom_mgmof74_r2scan.json
@@ -83,14 +83,13 @@ Regenerate the report figures:
 ```powershell
 .\build\mof_gcmc_cli.exe --test-scf
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_uff.json
-.\.venv-mlip\Scripts\python.exe -m pytest -v -m "not mlip"
+.\.venv-mlip\Scripts\python.exe -m pytest -v -m "not mlip and not slow"
 ```
 
 ## Documentation
 
 - [Technical report (English)](docs/TECHNICAL_REPORT.md) · [技术报告（中文）](docs/TECHNICAL_REPORT.zh-CN.md)
 - [Classical and polarizable validation](docs/CLASSICAL_VALIDATION.md) · [中文](docs/CLASSICAL_VALIDATION.zh-CN.md)
-- [Design plan and stage gates (Chinese)](PLAN.zh-CN.md)
 - [Result summary JSON](docs/results/phase2_phase3_summary.json)
 
 ```text

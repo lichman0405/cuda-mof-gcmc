@@ -40,7 +40,7 @@
 ```powershell
 # Windows：只检查依赖
 cmd /c fast_start.bat -CheckOnly
-# Windows：补齐依赖、编译并自检
+# Windows：补齐依赖、编译并运行快速自检（加 -FullTest 跑完整经典采样分布对比）
 cmd /c fast_start.bat
 ```
 
@@ -53,7 +53,7 @@ cmd /c fast_start.bat
 ### 运行嵌套 MC（[`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py)）
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 .venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
   --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298 \
   --pressures 0.012 0.15 0.28 1.0 --proposer auto_mlip --cbmc-k 128 \
   --model mace-matpes-r2scan-0 --dispersion off \
@@ -66,7 +66,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts
 Widom 插入与能量分解：
 
 ```bash
-PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/widom_mlip.py \
+.venv-mlip/bin/python -u scripts/widom_mlip.py \
   --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298 \
   --model mace-matpes-r2scan-0 --dispersion off --n-samples 6000 \
   --out-json build/widom_mgmof74_r2scan.json
@@ -83,14 +83,13 @@ PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/widom_mlip.py \
 ```powershell
 .\build\mof_gcmc_cli.exe --test-scf
 .\build\mof_gcmc_cli.exe --config configs\mg_mof74_co2_298K_uff.json
-.\.venv-mlip\Scripts\python.exe -m pytest -v -m "not mlip"
+.\.venv-mlip\Scripts\python.exe -m pytest -v -m "not mlip and not slow"
 ```
 
 ## 文档
 
 - [技术报告（中文）](docs/TECHNICAL_REPORT.zh-CN.md) · [Technical report (English)](docs/TECHNICAL_REPORT.md)
 - [经典与极化基准](docs/CLASSICAL_VALIDATION.zh-CN.md) · [English](docs/CLASSICAL_VALIDATION.md)
-- [设计方案与阶段门禁](PLAN.zh-CN.md)
 - [结果汇总 JSON](docs/results/phase2_phase3_summary.json)
 
 ```text
