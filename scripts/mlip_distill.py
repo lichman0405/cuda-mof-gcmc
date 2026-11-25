@@ -114,11 +114,13 @@ def assign_framework_environments(uc_atoms, charges: Optional[np.ndarray] = None
     neighbors: List[List[int]] = [[] for _ in range(n)]
     r_cov_arr = np.array([float(covalent_radii[int(z)]) for z in Z], dtype=np.float64)
     thresh2 = (r_cov_arr[:, None] + r_cov_arr[None, :] + 0.35) ** 2
+    is_metal = np.array([int(z) in METAL_ATOMIC_NUMBERS for z in Z], dtype=bool)
+    both_metal = is_metal[:, None] & is_metal[None, :]
 
     for sv in shift_vecs:
         dr = dr0 + sv.reshape(1, 1, 3)
         r2 = np.sum(dr * dr, axis=-1)
-        bonded = (r2 > 0.16) & (r2 < thresh2)
+        bonded = (r2 > 0.16) & (r2 < thresh2) & (~both_metal)
         ii, jj = np.nonzero(bonded)
         for i, j in zip(ii.tolist(), jj.tolist()):
             neighbors[i].append(int(Z[j]))
@@ -130,7 +132,6 @@ def assign_framework_environments(uc_atoms, charges: Optional[np.ndarray] = None
     counts = np.bincount(env_ids, minlength=len(unique_sigs)).astype(np.float64)
 
     q_arr = np.zeros(n, dtype=np.float64) if charges is None else np.asarray(charges, dtype=np.float64)
-    is_metal = np.array([int(z) in METAL_ATOMIC_NUMBERS for z in Z], dtype=bool)
     is_polar = np.abs(q_arr) >= 0.40
     # Mark coordinatively unsaturated or polar sites as priority pocket anchors
     active_mask = is_metal | is_polar

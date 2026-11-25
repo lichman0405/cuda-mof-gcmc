@@ -74,7 +74,7 @@ def parse_args():
     p.add_argument("--max-mol", type=int, default=128, help="Max guest molecules per supercell")
     p.add_argument("--k-steps", type=int, default=25, help="Inner GPU GCMC steps per outer Nested MC cycle")
     p.add_argument("--cbmc-k", type=int, default=128, help="Block-parallel GPU CBMC trial poses per inner insert/delete (1..128)")
-    p.add_argument("--p-ins-del", type=float, default=0.60, help="Total insertion+deletion move fraction inside GPU proposer")
+    p.add_argument("--p-ins-del", type=float, default=0.50, help="Total insertion+deletion move fraction inside GPU proposer")
     p.add_argument("--distill-samples-1b", type=int, default=960, help="Single-molecule MACE evaluations for auto_mlip 1B distillation")
     p.add_argument("--distill-samples-2b", type=int, default=192, help="Pore dimer MACE evaluations for auto_mlip 2B distillation")
     p.add_argument("--distill-cache-dir", default="build/distill_cache", help="Disk cache directory for distilled 1B+2B grids")
@@ -590,7 +590,7 @@ def run_pressure_point(
     run_metadata: dict | None = None,
     grid_only: bool = False,
     cbmc_k: int = 128,
-    p_ins_del: float = 0.60,
+    p_ins_del: float = 0.50,
     distill_res: dict | None = None,
 ):
     t_prop0 = time.perf_counter()
@@ -668,23 +668,26 @@ def run_pressure_point(
         )
     else:
         t_calib0 = time.perf_counter()
+        eq_fast = 15000 if int(cbmc_k) >= 32 else 30000
+        eq_mid = 12000 if int(cbmc_k) >= 32 else 20000
+        eq_boost = 8000 if int(cbmc_k) >= 32 else 15000
         shift_calib = {"mode": "override" if shift_override is not None else str(shift_mode)}
         if grid_only:
             de_final = 0.0
             prop.set_chem_pot_shift(0.0)
             if init_mode == "auto":
-                prop.equilibrate(30000)
+                prop.equilibrate(eq_fast)
             shift_calib = {"mode": "grid_only", "final_kJ_mol": 0.0}
         elif shift_override is not None:
             de_final = float(shift_override)
             prop.set_chem_pot_shift(de_final)
             if init_mode == "auto":
-                prop.equilibrate(30000)
+                prop.equilibrate(eq_fast)
             fug_mult = math.exp(-de_final / (K_TO_KJMOL * T_K))
             shift_calib["override_kJ_mol"] = de_final
             print(f"  [P={P_bar:.4g} bar] Override Shift={de_final:.2f} kJ/mol ({fug_mult:.2f}x inner f_ref)")
         elif shift_mode == "auto":
-            prop.equilibrate(20000)
+            prop.equilibrate(eq_mid)
             cal1_st = prop.get_accepted_quat()
             boosts_tried = []
             mean_n1 = float(np.mean([s["N"] for s in cal1_st]))
@@ -692,7 +695,7 @@ def run_pressure_point(
                 for boost in (-4.0, -8.0, -12.0, -16.0):
                     boosts_tried.append(boost)
                     prop.set_chem_pot_shift(boost)
-                    prop.equilibrate(15000)
+                    prop.equilibrate(eq_boost)
                     cal1_st = prop.get_accepted_quat()
                     if np.mean([s["N"] for s in cal1_st]) >= 4.0:
                         break
@@ -700,7 +703,7 @@ def run_pressure_point(
                 for boost in (4.0, 8.0, 12.0):
                     boosts_tried.append(boost)
                     prop.set_chem_pot_shift(boost)
-                    prop.equilibrate(15000)
+                    prop.equilibrate(eq_boost)
                     cal1_st = prop.get_accepted_quat()
                     if np.mean([s["N"] for s in cal1_st]) <= 0.85 * float(max_mol):
                         break
@@ -709,14 +712,14 @@ def run_pressure_point(
             s1_info["boosts_tried_kJ_mol"] = boosts_tried
             shift_calib["stage1"] = s1_info
             prop.set_chem_pot_shift(de1)
-            prop.equilibrate(30000)
+            prop.equilibrate(eq_fast)
 
             cal2_st = prop.get_accepted_quat()
             cal2_u = target.eval_batch(cal2_st)
             de2, s2_info = _evaluate_shift_stage(cal2_st, cal2_u, -24.0, 24.0, de1)
             shift_calib["stage2"] = s2_info
             prop.set_chem_pot_shift(de2)
-            prop.equilibrate(20000)
+            prop.equilibrate(eq_mid)
 
             if pilot_cycles > 0:
                 if pilot_cycles >= 20:

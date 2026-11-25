@@ -152,7 +152,7 @@ class CudaGcmcProposer:
         seed: int = 20261123,
         device_id: int = 0,
         cbmc_k: int = 128,
-        p_ins_del: float = 0.60,
+        p_ins_del: float = 0.50,
     ):
         obj = cls.__new__(cls)
         _register_dll_dirs()
@@ -220,7 +220,7 @@ class CudaGcmcProposer:
         seed: int = 20261123,
         device_id: int = 0,
         cbmc_k: int = 128,
-        p_ins_del: float = 0.60,
+        p_ins_del: float = 0.50,
     ):
         grids = np.ascontiguousarray(distill_res["grids_u_lj"], dtype=np.float32)
         if grids.ndim != 4:
@@ -443,7 +443,7 @@ class CudaGcmcProposer:
         if rc != 0:
             raise RuntimeError(f"proposer_set_gg_lut failed with code {rc}")
 
-    def set_mc_params(self, cbmc_k: int = 128, p_ins_del_total: float = 0.60) -> None:
+    def set_mc_params(self, cbmc_k: int = 128, p_ins_del_total: float = 0.50) -> None:
         rc = self.lib.proposer_set_mc_params(self.handle, int(cbmc_k), float(p_ins_del_total))
         if rc != 0:
             raise RuntimeError(f"proposer_set_mc_params failed with code {rc}")

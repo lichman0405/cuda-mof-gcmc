@@ -209,7 +209,7 @@ def merge_replica_shard_results(
         "n_boxes": int(total_boxes),
         "k_steps": k_steps,
         "cbmc_k": int(shards[0].get("cbmc_k", 128)),
-        "p_ins_del": float(shards[0].get("p_ins_del", 0.60)),
+        "p_ins_del": float(shards[0].get("p_ins_del", 0.50)),
         "grid_only": bool(shards[0].get("grid_only", False)),
         "eq_cycles": int(eq_cycles),
         "prod_cycles": prod_cycles,
@@ -413,7 +413,7 @@ def _pressure_worker_main(
                 run_metadata=run_cfg.get("run_metadata"),
                 grid_only=grid_only,
                 cbmc_k=int(run_cfg.get("cbmc_k", 128)),
-                p_ins_del=float(run_cfg.get("p_ins_del", 0.60)),
+                p_ins_del=float(run_cfg.get("p_ins_del", 0.50)),
                 distill_res=distill_res,
             )
             consistency_checked = True
@@ -488,7 +488,7 @@ def _replica_worker_main(
                 run_metadata=run_cfg.get("run_metadata"),
                 grid_only=grid_only,
                 cbmc_k=int(run_cfg.get("cbmc_k", 128)),
-                p_ins_del=float(run_cfg.get("p_ins_del", 0.60)),
+                p_ins_del=float(run_cfg.get("p_ins_del", 0.50)),
                 distill_res=distill_res,
             )
             consistency_checked = True
