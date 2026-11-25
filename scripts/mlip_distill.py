@@ -14,7 +14,7 @@ from run_metadata import sha256_file, sha256_json_obj
 
 K_TO_KJMOL = 8.31446261815324e-3
 KE_K = 167100.9558738398
-DISTILL_VERSION = "v1_1b2b"
+DISTILL_VERSION = "v1.1"
 
 # Mild generic LJ defaults (eps_K, sigma_A) used ONLY for guest-guest steric core
 # when a guest site carries zero classical LJ parameters (e.g. SPC/E or TIP-style H).
@@ -481,12 +481,16 @@ def _solve_1b_model(
         lb[n_sr + m] = -5.0
         ub[n_sr + m] = +5.0
 
-    # Boltzmann-inspired weights: emphasize binding minima and zero-crossing, prevent high wall outliers from skewing pocket
+    # Boltzmann-inspired weights: emphasize OMS pockets & binding minima, prevent high-wall outliers from skewing pocket
     y_kJ = y_K * K_TO_KJMOL
     w_sample = np.where(
-        y_kJ <= 15.0,
-        np.where(dmin <= 2.75, 1.4, 1.0),
-        1.0 / np.sqrt(1.0 + np.maximum(0.0, y_kJ - 15.0) / 20.0),
+        y_kJ <= -10.0,
+        2.5,
+        np.where(
+            y_kJ <= 15.0,
+            np.where(dmin <= 2.80, 1.5, 1.0),
+            1.0 / (1.0 + np.maximum(0.0, y_kJ - 15.0) / 15.0),
+        ),
     )
 
     # Regularization matrix (light Tikhonov on splines, moderate on Ewald modes)
@@ -555,17 +559,20 @@ def _solve_2b_model(
     n_lut = 128
     lut_r = np.linspace(r_min_A, r_max_A, n_lut, dtype=np.float64)
 
-    mu_2b = np.linspace(2.5, max(3.2, r_max_A - 0.7), 8, dtype=np.float64)
+    mu_2b = np.linspace(3.10, max(3.60, r_max_A - 0.70), 7, dtype=np.float64)
     sig_2b = max(0.45, 0.7 * float(mu_2b[1] - mu_2b[0]))
-    r_on = max(r_min_A + 0.5, r_max_A - 1.5)
+    r_on = max(3.60, r_max_A - 1.5)
     inv_span = 1.0 / max(1e-6, r_max_A - r_on)
 
     def _rad_basis(r_arr: np.ndarray) -> np.ndarray:
+        t_in = np.clip((r_arr - 2.75) / 0.45, 0.0, 1.0)
+        f_in = 0.5 * (1.0 - np.cos(math.pi * t_in))
+        f_in = np.where(r_arr <= 2.75, 0.0, f_in)
         t_tap = np.clip((r_arr - r_on) * inv_span, 0.0, 1.0)
         f_cut = 0.5 * (1.0 + np.cos(math.pi * t_tap))
         f_cut = np.where(r_arr >= r_max_A, 0.0, f_cut)
         diff = r_arr[:, None] - mu_2b[None, :]
-        return np.exp(-(diff * diff) / (2.0 * sig_2b * sig_2b)) * f_cut[:, None]
+        return np.exp(-(diff * diff) / (2.0 * sig_2b * sig_2b)) * (f_in * f_cut)[:, None]
 
     if len(u2_true_K) < 16 or np.max(np.abs(u2_true_K)) < 1e-6:
         return {
@@ -581,21 +588,21 @@ def _solve_2b_model(
         }
 
     B_2b = _rad_basis(r_com)
-    X = np.column_stack([u_lj0, u_q0, B_2b])  # shape (M, 2 + 8)
+    X = np.column_stack([u_lj0, u_q0, B_2b])  # shape (M, 2 + 7)
     n_p = X.shape[1]
 
-    lb = np.full(n_p, -2000.0, dtype=np.float64)
-    ub = np.full(n_p, +2000.0, dtype=np.float64)
-    lb[0], ub[0] = 0.15, 2.50  # gg_lj_scale
-    lb[1], ub[1] = 0.00, 2.50  # gg_q_scale^2
+    lb = np.full(n_p, -350.0, dtype=np.float64)
+    ub = np.full(n_p, +350.0, dtype=np.float64)
+    lb[0], ub[0] = 0.85, 1.35  # gg_lj_scale: preserve Pauli core repulsion
+    lb[1], ub[1] = 0.50, 1.50  # gg_q_scale^2
 
-    # Mild prior pulling c_lj, c_q2 toward 1.0 and radial corrections toward 0.0
+    # Pull scaling parameters strongly toward 1.0 and radial corrections toward 0.0
     prior = np.zeros(n_p, dtype=np.float64)
     prior[0] = 1.0
     prior[1] = 1.0
-    reg_w = np.full(n_p, 1.0e-1, dtype=np.float64)
-    reg_w[0] = 5.0e1
-    reg_w[1] = 5.0e1
+    reg_w = np.full(n_p, 10.0, dtype=np.float64)
+    reg_w[0] = 2.0e3
+    reg_w[1] = 2.0e3
 
     y_kJ = u2_true_K * K_TO_KJMOL
     sw = np.sqrt(np.where(y_kJ <= 10.0, 1.0, 1.0 / (1.0 + np.maximum(0.0, y_kJ - 10.0) / 15.0)))
@@ -611,7 +618,8 @@ def _solve_2b_model(
     w_rad = theta[2:]
 
     B_lut = _rad_basis(lut_r)
-    lut_K = (B_lut @ w_rad).astype(np.float64)
+    lut_K = np.clip((B_lut @ w_rad).astype(np.float64), -400.0, +400.0)
+    lut_K[lut_r <= 2.75] = 0.0
     lut_K[-1] = 0.0
 
     pred_K = X @ theta
@@ -921,8 +929,11 @@ def distill_mlip_surrogate(
     y_1b = y_1b_all[keep_1b]
     pts_1b = (c_pool[sel_kept][:, None, :] + offs_pool[sel_kept]).reshape(-1, 3)
 
-    mu_centers = np.linspace(1.80, 6.40, 14, dtype=np.float64)
-    sigma_rbf = 0.45
+    mu_centers = np.array(
+        [1.75, 1.98, 2.22, 2.46, 2.72, 3.00, 3.32, 3.68, 4.08, 4.52, 5.00, 5.55, 6.15],
+        dtype=np.float64,
+    )
+    sigma_rbf = 0.34
     r_cut_1b = 8.0
     n_rad = 1 + len(mu_centers)
 

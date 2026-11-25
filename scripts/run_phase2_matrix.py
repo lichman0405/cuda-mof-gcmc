@@ -161,91 +161,106 @@ def _run_direct_worker(args):
 
 def _build_job_specs(args) -> List[dict]:
     mode = args.mode
+    k_steps = int(args.k_steps)
     if mode == "smoke":
-        boxes, k_steps, pilot, eq_c, prod_c = 4, 25, 20, 40, 80
+        boxes, pilot, eq_c, prod_c = 4, 30, 60, 120
         dir_eq, dir_pr, dir_wall = 20, 40, 60.0
     elif mode == "probe":
-        boxes, k_steps, pilot, eq_c, prod_c = 4, 25, 40, 80, 200
+        boxes, pilot, eq_c, prod_c = 4, 40, 80, 200
         dir_eq, dir_pr, dir_wall = 40, 120, 180.0
     else:
-        boxes, k_steps, pilot, eq_c, prod_c = 4, 25, 40, 160, 480
-        dir_eq, dir_pr, dir_wall = 80, 400, 600.0
+        boxes, pilot, eq_c, prod_c = 4, 40, 200, 1800
+        dir_eq, dir_pr, dir_wall = 60, 400, 360.0
 
     out_dir = Path(args.out_dir)
+    ckpt_root = out_dir / "checkpoints"
     jobs: List[dict] = []
+
+    model_cfgs = [
+        ("r2scan_nod3", args.model, "off", ""),
+        ("mp0_d3", "medium", "on", "pbe"),
+    ]
 
     if args.suite in ("exp1_mgmof74", "all"):
         press_str = ["0.28"] if mode == "smoke" else ["0.012", "0.28", "1.0"]
-        for disp_tag, disp_flag in [("nod3", "off"), ("d3", "on")]:
+        for m_tag, m_name, disp_flag, xc_name in model_cfgs:
+            xc_args = ["--xc", xc_name] if xc_name else []
             for prop_name in ("auto_mlip", "uff", "mercado"):
+                jname = f"exp1_{prop_name}_{m_tag}"
                 jobs.append({
-                    "name": f"exp1_{prop_name}_{disp_tag}",
+                    "name": jname,
                     "kind": "nested",
-                    "out_json": str(out_dir / f"exp1_{prop_name}_{disp_tag}.json"),
+                    "out_json": str(out_dir / f"{jname}.json"),
                     "cmd": [
                         sys.executable, "scripts/run_mlip_gcmc.py",
                         "--cif", "data/MgMOF-74.cif", "--supercell", "1", "1", "2",
                         "--guest", "co2", "--temp", "298", "--pressures", *press_str,
                         "--proposer", prop_name, "--cbmc-k", "128",
-                        "--model", args.model, "--dispersion", disp_flag, "--xc", args.xc,
+                        "--model", m_name, "--dispersion", disp_flag, *xc_args,
                         "--boxes", str(boxes), "--k-steps", str(k_steps),
                         "--pilot-cycles", str(pilot), "--eq-cycles", str(eq_c), "--prod-cycles", str(prod_c),
                         "--distill-cache-dir", args.distill_cache_dir,
+                        "--checkpoint-dir", str(ckpt_root / jname),
+                        "--checkpoint-every", "100",
                         "--resume-mode", args.resume_mode,
-                        "--out-json", str(out_dir / f"exp1_{prop_name}_{disp_tag}.json"),
+                        "--out-json", str(out_dir / f"{jname}.json"),
                     ],
                 })
             # Unreweighted surrogate ablation (grid_only)
+            jname_go = f"exp1_grid_only_{m_tag}"
             jobs.append({
-                "name": f"exp1_grid_only_{disp_tag}",
+                "name": jname_go,
                 "kind": "nested",
-                "out_json": str(out_dir / f"exp1_grid_only_{disp_tag}.json"),
+                "out_json": str(out_dir / f"{jname_go}.json"),
                 "cmd": [
                     sys.executable, "scripts/run_mlip_gcmc.py",
                     "--cif", "data/MgMOF-74.cif", "--supercell", "1", "1", "2",
                     "--guest", "co2", "--temp", "298", "--pressures", *press_str,
                     "--proposer", "auto_mlip", "--grid-only", "--cbmc-k", "128",
-                    "--model", args.model, "--dispersion", disp_flag, "--xc", args.xc,
+                    "--model", m_name, "--dispersion", disp_flag, *xc_args,
                     "--boxes", str(boxes), "--k-steps", str(k_steps),
                     "--eq-cycles", str(eq_c), "--prod-cycles", str(prod_c),
                     "--distill-cache-dir", args.distill_cache_dir,
                     "--resume-mode", args.resume_mode,
-                    "--out-json", str(out_dir / f"exp1_grid_only_{disp_tag}.json"),
+                    "--out-json", str(out_dir / f"{jname_go}.json"),
                 ],
             })
-            # High-loading initial state consistency verification at 0.28 bar
             if mode != "smoke":
+                jname_hl = f"exp1_auto_mlip_{m_tag}_highload_0p28"
                 jobs.append({
-                    "name": f"exp1_auto_mlip_{disp_tag}_highload_0p28",
+                    "name": jname_hl,
                     "kind": "nested",
-                    "out_json": str(out_dir / f"exp1_auto_mlip_{disp_tag}_highload_0p28.json"),
+                    "out_json": str(out_dir / f"{jname_hl}.json"),
                     "cmd": [
                         sys.executable, "scripts/run_mlip_gcmc.py",
                         "--cif", "data/MgMOF-74.cif", "--supercell", "1", "1", "2",
                         "--guest", "co2", "--temp", "298", "--pressures", "0.28",
                         "--proposer", "auto_mlip", "--cbmc-k", "128",
                         "--init-mode", "high_loading", "--init-loading", "8.5",
-                        "--model", args.model, "--dispersion", disp_flag, "--xc", args.xc,
+                        "--model", m_name, "--dispersion", disp_flag, *xc_args,
                         "--boxes", str(boxes), "--k-steps", str(k_steps),
                         "--pilot-cycles", str(pilot), "--eq-cycles", str(eq_c), "--prod-cycles", str(prod_c),
                         "--distill-cache-dir", args.distill_cache_dir,
+                        "--checkpoint-dir", str(ckpt_root / jname_hl),
+                        "--checkpoint-every", "100",
                         "--resume-mode", args.resume_mode,
-                        "--out-json", str(out_dir / f"exp1_auto_mlip_{disp_tag}_highload_0p28.json"),
+                        "--out-json", str(out_dir / f"{jname_hl}.json"),
                     ],
                 })
             # Direct MLIP-GCMC comparison at 0.28 bar
+            jname_dir = f"exp1_direct_{m_tag}_0p28"
             jobs.append({
-                "name": f"exp1_direct_{disp_tag}_0p28",
+                "name": jname_dir,
                 "kind": "direct",
-                "out_json": str(out_dir / f"exp1_direct_{disp_tag}_0p28.json"),
+                "out_json": str(out_dir / f"{jname_dir}.json"),
                 "cmd": [
                     sys.executable, "scripts/run_phase2_matrix.py", "--direct-worker",
                     "--cif", "data/MgMOF-74.cif", "--supercell", "1", "1", "2",
                     "--guest", "co2", "--temp", "298", "--pressures", "0.28",
-                    "--model", args.model, "--dispersion", disp_flag, "--xc", args.xc,
+                    "--model", m_name, "--dispersion", disp_flag, *xc_args,
                     "--boxes", str(boxes), "--direct-eq-steps", str(dir_eq),
                     "--direct-prod-steps", str(dir_pr), "--direct-max-wall-s", str(dir_wall),
-                    "--out-json", str(out_dir / f"exp1_direct_{disp_tag}_0p28.json"),
+                    "--out-json", str(out_dir / f"{jname_dir}.json"),
                 ],
             })
 
@@ -258,21 +273,24 @@ def _build_job_specs(args) -> List[dict]:
         ]
         for tag, cif, sc, gname, p_list in gen_cases:
             p_run = [p_list[0]] if mode == "smoke" else p_list
+            jname = f"exp2_{tag}"
             jobs.append({
-                "name": f"exp2_{tag}",
+                "name": jname,
                 "kind": "nested",
-                "out_json": str(out_dir / f"exp2_{tag}.json"),
+                "out_json": str(out_dir / f"{jname}.json"),
                 "cmd": [
                     sys.executable, "scripts/run_mlip_gcmc.py",
                     "--cif", cif, "--supercell", *sc,
                     "--guest", gname, "--temp", "298", "--pressures", *p_run,
                     "--proposer", "auto_mlip", "--cbmc-k", "128",
-                    "--model", args.model, "--dispersion", "on", "--xc", args.xc,
+                    "--model", args.model, "--dispersion", "off",
                     "--boxes", str(boxes), "--k-steps", str(k_steps),
                     "--pilot-cycles", str(pilot), "--eq-cycles", str(eq_c), "--prod-cycles", str(prod_c),
                     "--distill-cache-dir", args.distill_cache_dir,
+                    "--checkpoint-dir", str(ckpt_root / jname),
+                    "--checkpoint-every", "100",
                     "--resume-mode", args.resume_mode,
-                    "--out-json", str(out_dir / f"exp2_{tag}.json"),
+                    "--out-json", str(out_dir / f"{jname}.json"),
                 ],
             })
     return jobs
@@ -310,6 +328,7 @@ def parse_args():
     p.add_argument("--suite", choices=["exp1_mgmof74", "exp2_generalization", "all"], default="all")
     p.add_argument("--mode", choices=["smoke", "probe", "full"], default="probe")
     p.add_argument("--gpus", nargs="+", default=["0"], help="Confirmed idle GPU IDs (only among 0..3)")
+    p.add_argument("--k-steps", type=int, default=12, help="Inner GPU steps per outer Nested MC cycle")
     p.add_argument("--model", default="mace-matpes-r2scan-0")
     p.add_argument("--xc", default="pbe")
     p.add_argument("--dtype", choices=["float32", "float64"], default="float32")

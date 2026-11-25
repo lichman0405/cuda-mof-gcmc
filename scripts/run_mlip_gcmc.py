@@ -75,7 +75,7 @@ def parse_args():
     p.add_argument("--k-steps", type=int, default=25, help="Inner GPU GCMC steps per outer Nested MC cycle")
     p.add_argument("--cbmc-k", type=int, default=128, help="Block-parallel GPU CBMC trial poses per inner insert/delete (1..128)")
     p.add_argument("--p-ins-del", type=float, default=0.50, help="Total insertion+deletion move fraction inside GPU proposer")
-    p.add_argument("--distill-samples-1b", type=int, default=960, help="Single-molecule MACE evaluations for auto_mlip 1B distillation")
+    p.add_argument("--distill-samples-1b", type=int, default=1200, help="Single-molecule MACE evaluations for auto_mlip 1B distillation")
     p.add_argument("--distill-samples-2b", type=int, default=192, help="Pore dimer MACE evaluations for auto_mlip 2B distillation")
     p.add_argument("--distill-cache-dir", default="build/distill_cache", help="Disk cache directory for distilled 1B+2B grids")
     p.add_argument("--grid-only", action="store_true", help="Run pure GPU surrogate grid GCMC without outer MLIP reweighting (ablation mode)")

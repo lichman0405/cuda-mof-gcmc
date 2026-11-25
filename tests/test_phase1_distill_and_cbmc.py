@@ -8,6 +8,7 @@ import pytest
 
 from guests import load_guest
 from mlip_distill import (
+    _solve_2b_model,
     _unscaled_gg_pair_energy_K,
     assign_framework_environments,
     distill_mlip_surrogate,
@@ -94,6 +95,24 @@ def test_env_classification_and_guest_channels():
         real_chans = {s.lj_type for s in dg.sites if s.Z > 0}
         assert len(real_chans) == exp_chan
         assert all(s.eps_K > 0.0 and s.sigma_A > 0.0 for s in dg.sites if s.Z > 0)
+
+
+def test_2b_model_preserves_short_range_repulsion():
+    """Verify _solve_2b_model cannot crush Pauli LJ core repulsion or extrapolate negative short-range wells."""
+    rng = np.random.default_rng(20261125)
+    r_com = rng.uniform(2.85, 6.20, size=120)
+    u_lj0 = 120.0 * ((3.1 / r_com) ** 12 - (3.1 / r_com) ** 6)
+    u_q0 = -180.0 * np.exp(-((r_com - 3.6) / 0.8) ** 2)
+    # Deep artificial over-attractive target around 3.2 A to stress-test constraints
+    u2_true = 0.3 * u_lj0 + 0.2 * u_q0 - 2500.0 * np.exp(-((r_com - 3.15) / 0.35) ** 2)
+    res = _solve_2b_model(u_lj0, u_q0, r_com, u2_true, r_cut_gg=6.6)
+    assert 0.85 <= res["gg_lj_scale"] <= 1.35
+    assert 0.50 <= res["gg_q_scale"] ** 2 <= 1.50
+    lut = res["gg_com_lut_K"]
+    lut_r = np.linspace(res["r_min_A"], res["r_max_A"], len(lut))
+    assert np.all(lut[lut_r <= 2.75] == 0.0)
+    assert float(np.min(lut)) >= -400.0
+    assert abs(float(lut[-1])) < 1e-6
 
 
 def test_external_grid_and_gg_lut_parity_and_reject_restore():
