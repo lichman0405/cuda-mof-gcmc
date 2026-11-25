@@ -1,556 +1,650 @@
-"""Generate publication-grade Phase 4 figures from verified Phase 2-3 JSON outputs."""
+"""Figures for the Auto-MLIP / GPU-CBMC Nested MC preprint.
+
+All numbers are read from docs/results/phase2_phase3_summary.json, docs/results/arch_inputs_mgmof74_r2scan.npz
+and data/exp_isotherms/*.csv. Nothing is typed in by hand except values that were only ever recorded in logs
+(they are marked LOG below).
+"""
 
 import csv
 import json
 from pathlib import Path
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle
+from matplotlib.lines import Line2D
 
 ROOT = Path(__file__).resolve().parent.parent
-SUMMARY_PATH = ROOT / "docs" / "results" / "phase2_phase3_summary.json"
-EXP_DIR = ROOT / "data" / "exp_isotherms"
-ASSETS_DIR = ROOT / "assets"
+SUMMARY = ROOT / "docs" / "results" / "phase2_phase3_summary.json"
+ARCH_NPZ = ROOT / "docs" / "results" / "arch_inputs_mgmof74_r2scan.npz"
+EXP = ROOT / "data" / "exp_isotherms"
+OUT = ROOT / "assets"
 
 plt.rcParams.update({
-    "font.family": "DejaVu Sans",
-    "font.size": 10,
-    "axes.titlesize": 11.5,
-    "axes.titleweight": "bold",
-    "axes.labelsize": 10.5,
-    "xtick.labelsize": 9.5,
-    "ytick.labelsize": 9.5,
-    "legend.fontsize": 8.8,
-    "figure.dpi": 150,
-    "savefig.dpi": 300,
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+    "font.size": 9.5,
+    "axes.labelsize": 9.5,
+    "axes.titlesize": 10,
+    "axes.titleweight": "normal",
+    "axes.linewidth": 0.8,
+    "xtick.labelsize": 8.5,
+    "ytick.labelsize": 8.5,
+    "xtick.major.width": 0.8,
+    "ytick.major.width": 0.8,
+    "xtick.direction": "out",
+    "ytick.direction": "out",
+    "legend.fontsize": 8,
+    "legend.frameon": False,
     "axes.spines.top": False,
     "axes.spines.right": False,
-    "axes.grid": True,
-    "grid.alpha": 0.25,
-    "grid.linestyle": "--",
+    "savefig.dpi": 300,
+    "mathtext.fontset": "dejavusans",
 })
 
+C = {
+    "exp1": "#4B5563", "exp2": "#9CA3AF",
+    "auto": "#1F4E9C", "hl": "#2A9D8F", "grid": "#7FB3D5",
+    "mp0d3": "#B83227", "mp0": "#7D8B3A",
+    "direct": "#222222", "uff": "#8E6CB0", "mercado": "#D98E04",
+    "pass": "#2E7D32", "fail": "#E08E0B", "ink": "#1F2937", "muted": "#6B7280",
+}
+MG_SUPER_MASS = 4368.744  # g/mol, Mg-MOF-74 1x1x2 supercell (from run JSON fw_mass_gmol)
 
-def load_csv_isotherm(filename: str):
+
+def panel_label(ax, s, x=-0.13, y=1.04):
+    ax.text(x, y, s, transform=ax.transAxes, fontsize=12, fontweight="bold", va="bottom", ha="left")
+
+
+def load_exp(fn):
     xs, ys = [], []
-    with (EXP_DIR / filename).open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
+    with (EXP / fn).open(encoding="utf-8") as f:
+        for row in csv.DictReader(f):
             xs.append(float(row["P_bar"]))
             ys.append(float(row["uptake_mmol_g"]))
     return np.array(xs), np.array(ys)
 
 
-def extract_series(summary: dict, run_key: str):
-    pts = sorted(summary["runs"][run_key]["points"], key=lambda x: x["P_bar"])
-    p = np.array([pt["P_bar"] for pt in pts], dtype=float)
-    q = np.array([pt["uptake_mmol_g"] for pt in pts], dtype=float)
-    e = np.array([pt["uptake_sem_mmol_g"] for pt in pts], dtype=float)
-    return p, q, e, pts
+def pts(s, key):
+    return sorted(s["runs"][key]["points"], key=lambda p: p["P_bar"])
 
 
-def plot_architecture(summary: dict):
-    fig, ax = plt.subplots(figsize=(14.5, 6.4))
-    ax.set_xlim(0, 100)
-    ax.set_ylim(0, 52)
-    ax.axis("off")
-    ax.grid(False)
+def series(s, key):
+    p = pts(s, key)
+    return (np.array([x["P_bar"] for x in p]), np.array([x["uptake_mmol_g"] for x in p]),
+            np.array([x["uptake_sem_mmol_g"] for x in p]))
 
-    ax.text(
-        50, 48.8,
-        "Auto-MLIP + 128-Thread GPU Rosenbluth CBMC Nested Monte Carlo Architecture",
-        ha="center", va="center", fontsize=14.5, fontweight="bold", color="#0F172A"
-    )
-    ax.text(
-        50, 45.6,
-        "Zero Manual Force Fields | Environment-Aware 1B+2B Self-Distillation -> Exact Many-Body MLIP Reweighting -> Multi-GPU Scaling",
-        ha="center", va="center", fontsize=10.2, color="#475569"
-    )
 
-    boxes = [
-        (
-            2.5, 11, 20.5, 30, "#EFF6FF", "#1D4ED8",
-            "1. Universal Input",
-            "Any Rigid MOF CIF\n(230 Space Groups)\n+ Any Rigid Guest\n(<=12 sites, <=6 chans)\n\nASE Symmetry Expand\nScreened Ewald QEq\nSymmetric Channel Map",
-        ),
-        (
-            27.0, 11, 21.5, 30, "#ECFDF5", "#047857",
-            "2. Online Self-Distill",
-            "Zero-Manual-Typing 1B+2B\n(mlip_distill.py)\n\n1B: 1200 MLIP Poses\n  Non-uniform OMS RBFs\n  + Ewald Null-Space q\n  R2 = 0.985-0.991\n2B: 192 Dimers -> Pore LUT\n53-210 s (Disk-Cached)",
-        ),
-        (
-            52.5, 11, 21.5, 30, "#FFFBEB", "#B45309",
-            "3. CUDA GPU-CBMC",
-            "Zero-I/O Proposer ABI\n(src/proposer_dll.cu)\n\n128-Thread Block-Parallel\n  Rosenbluth Trials (K=128)\n  O(h4) Tricubic Grids\n  + Scaled 2B Pore LUT\nReversible Inner Burst\n(k = 16 steps / outer eval)",
-        ),
-        (
-            78.0, 11, 19.5, 30, "#F5F3FF", "#6D28D9",
-            "4. Exact Nested MC",
-            "Exact Target MLIP\n(MACE + GPU DFT-D3)\n\nMedian Delta-Eps Shift\nUnbiased Metropolis\nR-hat / ESS / MCSE Gates\nBidirectional Check\nMulti-GPU: Pressure &\n  Replica (3.25x MC)",
-        ),
-    ]
+def mean_trace_mmol(pt, mass=MG_SUPER_MASS):
+    tr = np.asarray(pt["box_N_trace"], dtype=float)
+    return tr.mean(axis=1) * 1000.0 / mass
 
-    for x, y, w, h, fc, ec, title, body in boxes:
-        patch = FancyBboxPatch(
-            (x, y), w, h,
-            boxstyle="round,pad=0.6,rounding_size=1.8",
-            facecolor=fc, edgecolor=ec, linewidth=2.0
-        )
-        ax.add_patch(patch)
-        hdr = FancyBboxPatch(
-            (x + 0.3, y + h - 5.2), w - 0.6, 4.9,
-            boxstyle="round,pad=0.2,rounding_size=1.2",
-            facecolor=ec, edgecolor=ec, linewidth=0.5
-        )
-        ax.add_patch(hdr)
-        ax.text(x + w / 2, y + h - 2.75, title, ha="center", va="center",
-                fontsize=10.8, fontweight="bold", color="white")
-        ax.text(x + 1.0, y + h - 7.0, body, ha="left", va="top",
-                fontsize=9.1, color="#1E293B", linespacing=1.42)
 
-    for x_start, x_end in [(23.7, 26.4), (49.2, 51.9), (74.7, 77.4)]:
-        arr = FancyArrowPatch(
-            (x_start, 26), (x_end, 26),
-            arrowstyle="-|>,head_length=7,head_width=4.5",
-            linewidth=2.4, color="#334155"
-        )
-        ax.add_patch(arr)
+# --------------------------------------------------------------------------------------------
+# Figure 1: method overview
+# --------------------------------------------------------------------------------------------
 
-    # Return arrow from Stage 4 back to Stage 3 for outer Nested MC reweighting
-    fb = FancyArrowPatch(
-        (87.8, 10.2), (63.2, 10.2),
-        connectionstyle="arc3,rad=0.14",
-        arrowstyle="-|>,head_length=6,head_width=4",
-        linewidth=1.8, linestyle="--", color="#6D28D9"
-    )
-    ax.add_patch(fb)
-    ax.text(75.5, 4.4, "Exact MH Reweighting on Zero-I/O Device Pointers (Roll Back on Reject)",
-            ha="center", va="center", fontsize=9.2, fontweight="bold", color="#6D28D9")
+def _box(ax, x, y, w, h, title, body, fc, ec, title_size=9.5, body_size=8.3, body_lines=1.45):
+    ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0,rounding_size=1.2",
+                                fc=fc, ec=ec, lw=1.0))
+    ax.add_patch(Rectangle((x, y + h - 4.2), w, 4.2, fc=ec, ec=ec, lw=0))
+    ax.text(x + 1.2, y + h - 2.1, title, color="white", fontsize=title_size, fontweight="bold", va="center")
+    ax.text(x + 1.2, y + h - 5.6, body, color=C["ink"], fontsize=body_size, va="top", linespacing=body_lines)
 
-    # Bottom verified throughput note
-    note = (
-        "Verified Mg-MOF-74 CO2 (298 K, 0.28 bar):  57.5% insertion acc vs 3.65% Direct MLIP (15.8x)  |  "
-        "ESJD_N 0.131 vs 0.016 (8.0x)  |  1.0 bar r2SCAN No-D3: 8.148 vs 8.170 mmol/g Exp (0.26% dev)"
-    )
-    ax.text(50, 1.4, note, ha="center", va="center", fontsize=9.2,
-            color="#0F172A", bbox=dict(boxstyle="round,pad=0.4", facecolor="#F1F5F9", edgecolor="#CBD5E1"))
 
-    fig.tight_layout()
-    out = ASSETS_DIR / "architecture_auto_mlip_cbmc.png"
-    fig.savefig(out, bbox_inches="tight")
+def _arrow(ax, p0, p1, color="#374151", rad=0.0, lw=1.2, ls="-"):
+    ax.add_patch(FancyArrowPatch(p0, p1, connectionstyle=f"arc3,rad={rad}",
+                                 arrowstyle="-|>,head_length=5,head_width=3", lw=lw, color=color, ls=ls,
+                                 shrinkA=0, shrinkB=0))
+
+
+def fig_architecture(s):
+    arch = np.load(ARCH_NPZ)
+    fig = plt.figure(figsize=(13.6, 8.4))
+
+    # ---------------- (a) surrogate construction ----------------
+    axa = fig.add_axes([0.015, 0.515, 0.635, 0.445])
+    axa.set_xlim(0, 100); axa.set_ylim(0, 44); axa.axis("off")
+    axa.text(0, 43.2, "a", fontsize=13, fontweight="bold", va="top")
+    axa.text(3.2, 43.0, "One-time surrogate construction  (per framework, guest and target MLIP)",
+             fontsize=10.5, va="top", color=C["ink"])
+
+    blue_fc, blue_ec = "#EEF3FA", "#2F5D8A"
+    _box(axa, 0.5, 12, 22.5, 23, "Inputs",
+         "Rigid framework (CIF,\n  any space group)\nRigid guest (\u2264 12 sites)\nTarget MLIP:\n  MACE, with or without D3\nT, list of pressures", blue_fc, blue_ec)
+    _box(axa, 25.8, 12, 22.5, 23, "Typing",
+         "Framework atoms grouped by\n  element + neighbour\n  signature (6\u20138 classes)\nGuest atoms grouped into\n  symmetry channels\nNo hand-assigned\n  force-field types", blue_fc, blue_ec)
+    _box(axa, 51.1, 12, 22.5, 23, "Target sampling",
+         "1,200 single-guest poses,\n  stratified by distance\n  to the framework\n192 in-pore dimers\nBatched MACE (\u00b1 D3)\n  energies", blue_fc, blue_ec)
+    _box(axa, 76.4, 12, 23.1, 23, "Constrained fit",
+         "1B: radial basis per\n  (channel, class) + $r^{-12}$ core\n  + neutral Ewald modes\n2B: scaled LJ/Coulomb\n  + COM residual table\n85/15 hold-out check", blue_fc, blue_ec)
+    for x0 in (23.0, 48.3, 73.6):
+        _arrow(axa, (x0 + 0.2, 23.5), (x0 + 2.6, 23.5))
+    d0 = s["distillation"]["5e543d0520048f84"]
+    axa.text(50, 7.6, "Cached by SHA-256 key; 56\u2013210 s per (framework, guest, MLIP) on one RTX 3090",
+             ha="center", fontsize=8.3, color=C["muted"], style="italic")
+    axa.text(50, 3.6, f"Example on the right (Mg-MOF-74, CO$_2$, r2SCAN): 15 % hold-out 1B R$^2$ = {d0['r2_1b']:.3f}, "
+                      f"1B MAE = {d0['mae_1b_kJ_mol']:.2f} kJ/mol, 2B MAE = {d0['mae_2b_kJ_mol']:.2f} kJ/mol",
+             ha="center", fontsize=8.0, color=C["muted"], style="italic")
+
+    # real outputs: 1B grid slice and 2B residual table
+    axg = fig.add_axes([0.665, 0.545, 0.17, 0.37])
+    Z = np.clip(arch["o_min_kJ"], -45.0, 5.0)
+    n = Z.shape[0]
+    a = float(arch["a"]); g = np.deg2rad(float(arch["gamma_deg"]))
+    A = np.array([a, 0.0]); B = np.array([a * np.cos(g), a * np.sin(g)])
+    fa = (np.arange(n + 1) / n)
+    FA, FB = np.meshgrid(fa, fa)
+    for i in (0, 1):
+        for j in (0, 1):
+            X = (FA + i) * A[0] + (FB + j) * B[0]
+            Y = (FA + i) * A[1] + (FB + j) * B[1]
+            im = axg.pcolormesh(X, Y, Z, cmap="YlGnBu_r", vmin=-45, vmax=5, shading="flat", rasterized=True)
+    cx, cy = 0.5 * (A + B) + 0.5 * (A + B)
+    half = 15.0
+    axg.set_xlim(cx - half, cx + half); axg.set_ylim(cy - half, cy + half)
+    axg.set_aspect("equal"); axg.set_xticks([]); axg.set_yticks([])
+    for sp in axg.spines.values():
+        sp.set_visible(True); sp.set_linewidth(0.6)
+    axg.plot([cx - half + 2, cx - half + 12], [cy - half + 2] * 2, color="#111827", lw=2.2)
+    axg.text(cx - half + 7, cy - half + 3.2, "10 \u00c5", color="#111827", ha="center", fontsize=8, fontweight="bold")
+    axg.set_title("1B grid, Mg-MOF-74 (r2SCAN)\nO(CO$_2$) channel, minimum along c", fontsize=8.3, color=C["ink"])
+    cax = fig.add_axes([0.665, 0.522, 0.17, 0.012])
+    cb = fig.colorbar(im, cax=cax, orientation="horizontal")
+    cb.set_label("U$_{1B}$ (kJ mol$^{-1}$)", fontsize=7.8, labelpad=1)
+    cb.ax.tick_params(labelsize=7)
+
+    axl = fig.add_axes([0.875, 0.61, 0.11, 0.27])
+    lut = arch["lut_K"] * 8.31446261815324e-3
+    r = np.linspace(float(arch["lut_rmin"]), float(arch["lut_rmax"]), len(lut))
+    axl.axhline(0, color="#9CA3AF", lw=0.6)
+    axl.plot(r, lut, color=blue_ec, lw=1.4)
+    axl.set_xlabel("r$_{COM}$ (\u00c5)", fontsize=8)
+    axl.set_ylabel("\u0394U$_{2B}$ (kJ mol$^{-1}$)", fontsize=8)
+    axl.tick_params(labelsize=7)
+    axl.set_title("2B residual table", fontsize=8.3, color=C["ink"])
+
+    # ---------------- (b) nested MC cycle ----------------
+    axb = fig.add_axes([0.015, 0.03, 0.635, 0.45])
+    axb.set_xlim(0, 100); axb.set_ylim(0, 46); axb.axis("off")
+    axb.text(0, 45.4, "b", fontsize=13, fontweight="bold", va="top")
+    axb.text(3.2, 45.2, "One outer cycle of the nested Monte Carlo chain  (repeated for every box)",
+             fontsize=10.5, va="top", color=C["ink"])
+
+    _box(axb, 0.5, 14.5, 19.5, 17, "Accepted state",
+         "$x=(N,\\{\\mathbf{r}_i,\\mathbf{q}_i\\})$\n4 independent boxes\nper pressure", "#F3F4F6", "#4B5563")
+    _box(axb, 27.5, 24.5, 39.5, 17.5, "GPU inner burst  (one CUDA block per box)",
+         "k = 16 moves on the shifted surrogate $U_{\\rm ref}(x)+\\Delta\\varepsilon\\,N$\n"
+         "translate, rotate, insert, delete (25 % each)\n"
+         "insert/delete: K = 128 Rosenbluth trials, one per thread\n"
+         "1B tricubic grids + 2B table in device memory", "#FDF5EA", "#B5651D")
+    _box(axb, 74.5, 14.5, 25.0, 17, "Target energy",
+         "$U_{\\rm MLIP}(x')$ for all boxes\nin one batched call\n(MACE, optionally + D3)", "#EEF3FA", "#2F5D8A")
+    _box(axb, 27.5, 1.0, 39.5, 17.0, "Outer Metropolis test", "", "#F1EEF8", "#5B4B8A")
+    axb.text(47.25, 9.4,
+             r"$\alpha=\min\left\{1,\ \exp\left(-\beta\,[\,\Delta U_{\rm MLIP}-\Delta U_{\rm ref}-\Delta\varepsilon\,\Delta N\,]\right)\right\}$",
+             ha="center", va="center", fontsize=10.5, color=C["ink"])
+    axb.text(47.25, 4.0, "accept: commit x\u2032      reject: restore x on the device",
+             ha="center", va="center", fontsize=8.3, color=C["ink"])
+
+    _arrow(axb, (11.0, 31.6), (27.3, 35.5), rad=-0.25)
+    axb.text(13.5, 37.0, "$x$", fontsize=9.5)
+    _arrow(axb, (67.2, 33.0), (80.0, 31.7), rad=-0.25)
+    axb.text(70.5, 36.0, "candidate $x'$", fontsize=8.5)
+    _arrow(axb, (86.5, 14.3), (67.2, 9.5), rad=-0.25)
+    axb.text(77.5, 7.2, "$U_{\\rm MLIP}(x')$", fontsize=8.5)
+    _arrow(axb, (27.3, 9.5), (10.5, 14.3), rad=-0.25)
+
+    axb.text(0.5, 8.4, "$\\Delta\\varepsilon$: per-molecule MLIP\u2013surrogate offset,\nset once per pressure (median over\n"
+                       "boxes, then a 40-cycle pilot). The chain\nsamples the MLIP ensemble for any $\\Delta\\varepsilon$;\n"
+                       "it only changes efficiency.",
+             fontsize=7.2, color=C["muted"], va="top", linespacing=1.3)
+
+    # ---------------- (c) multi-GPU layouts ----------------
+    axc = fig.add_axes([0.665, 0.03, 0.325, 0.45])
+    axc.set_xlim(0, 100); axc.set_ylim(0, 46); axc.axis("off")
+    axc.text(0, 45.4, "c", fontsize=13, fontweight="bold", va="top")
+    axc.text(5.5, 45.2, "Multi-GPU execution", fontsize=10.5, va="top", color=C["ink"])
+    shades = ["#C7D7EC", "#93B4DA", "#5E8FC6", "#2F5D8A"]
+
+    def gpu_row(y0, label, fill_fn, note):
+        axc.text(0, y0 + 13.6, label, fontsize=8.8, fontweight="bold", color=C["ink"])
+        for gi in range(4):
+            gx = 2 + gi * 24.5
+            axc.add_patch(FancyBboxPatch((gx, y0), 22.0, 11.0, boxstyle="round,pad=0,rounding_size=0.8",
+                                         fc="white", ec="#6B7280", lw=0.8))
+            axc.text(gx + 11.0, y0 + 8.9, f"GPU {gi}", ha="center", fontsize=7.6, color=C["muted"])
+            fill_fn(gi, gx, y0)
+        axc.text(0, y0 - 2.6, note, fontsize=7.8, color=C["muted"], va="top")
+
+    def fill_pressure(gi, gx, y0):
+        for bi in range(4):
+            axc.add_patch(Rectangle((gx + 2.0 + bi * 4.6, y0 + 1.8), 3.8, 4.4, fc=shades[gi], ec="none"))
+        axc.text(gx + 11.0, y0 + 6.6, f"$P_{gi + 1}$", ha="center", fontsize=8, color=C["ink"])
+
+    def fill_replica(gi, gx, y0):
+        for bi in range(2):
+            axc.add_patch(Rectangle((gx + 6.4 + bi * 4.8, y0 + 1.8), 3.8, 4.4, fc=shades[2], ec="none"))
+        axc.text(gx + 11.0, y0 + 6.6, "$P$", ha="center", fontsize=8, color=C["ink"])
+
+    p1 = s["runs"]["phase3_scale_1gpu_pressure"]["total_wall_s"]; p4 = s["runs"]["phase3_scale_4gpu_pressure"]["total_wall_s"]
+    r1 = s["runs"]["phase3_scale_1gpu_replica"]["points"][0]["elapsed_s"]; r4 = s["runs"]["phase3_scale_4gpu_replica"]["points"][0]["elapsed_s"]
+    gpu_row(26.0, "Pressure queue: one pressure per GPU (4 boxes each)", fill_pressure,
+            f"4 pressures, end-to-end: {p1:.0f} s \u2192 {p4:.0f} s on 4\u00d7RTX 3090 ({p1 / p4:.2f}\u00d7)")
+    gpu_row(5.0, "Replica sharding: one pressure, 8 boxes split 2 per GPU", fill_replica,
+            f"MC time: {r1:.0f} s \u2192 {r4:.0f} s ({r1 / r4:.2f}\u00d7); chains merged for statistics")
+
+    fig.savefig(OUT / "fig1_architecture.png", bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print("Saved", out)
+    print("saved fig1_architecture.png")
 
 
-def plot_fig1(summary: dict):
-    fig, axes = plt.subplots(2, 2, figsize=(13.8, 10.2))
-    axA, axB, axC, axD = axes.ravel()
+# --------------------------------------------------------------------------------------------
+# Figure 2: Experiment 1 (Mg-MOF-74 + CO2)
+# --------------------------------------------------------------------------------------------
 
-    # Panel A: Mg-MOF-74 Isotherms & Method Comparison
-    p_e1, q_e1 = load_csv_isotherm("mgmof74_10.1021acs.jpcc.7b08239.Isotherm1.csv")
-    m1 = (p_e1 >= 0.003) & (p_e1 <= 1.2)
-    p_e2, q_e2 = load_csv_isotherm("mgmof74_10.1039c5dt03137k.Isotherm1.csv")
-    m2 = (p_e2 >= 0.003) & (p_e2 <= 1.2)
+def fig_exp1(s):
+    fig, axs = plt.subplots(2, 2, figsize=(11.0, 8.6))
+    (ax_a, ax_b), (ax_c, ax_d) = axs
+    fig.subplots_adjust(hspace=0.62, wspace=0.30)
 
-    axA.semilogx(p_e1[m1], q_e1[m1], "o--", color="#475569", ms=5, lw=1.6, label="Exp (jpcc.7b08239)")
-    axA.semilogx(p_e2[m2], q_e2[m2], "s:", color="#94A3B8", ms=4.5, lw=1.4, label="Exp (c5dt03137k)")
+    # (a) isotherms, log-log
+    for fn, col, mk, lab in [("mgmof74_10.1021acs.jpcc.7b08239.Isotherm1.csv", C["exp1"], "o", "Exp. (10.1021/acs.jpcc.7b08239)"),
+                             ("mgmof74_10.1039c5dt03137k.Isotherm1.csv", C["exp2"], "s", "Exp. (10.1039/c5dt03137k)")]:
+        x, y = load_exp(fn)
+        m = (x > 0.004) & (x < 1.3)
+        ax_a.plot(x[m], y[m], mk, ms=4.2, mfc="none", mec=col, mew=1.0, ls="none", label=lab)
+    for key, col, mk, lab, ls in [("exp1_auto_mlip_r2scan_nod3", C["auto"], "D", "Nested MC, r2SCAN (no D3)", "-"),
+                                  ("exp1_grid_only_r2scan", C["grid"], "^", "Surrogate only (1B+2B), r2SCAN", "--"),
+                                  ("exp1_auto_mlip_mp0_d3", C["mp0d3"], "v", "Nested MC, MP0 + D3", "-")]:
+        p, q, e = series(s, key)
+        ax_a.errorbar(p, q, yerr=e, fmt=mk + ls, color=col, ms=5.5, lw=1.4, capsize=2.5, label=lab)
+    pm = pts(s, "exp1_mp0_nod3_0p28")[0]
+    ax_a.errorbar([pm["P_bar"]], [pm["uptake_mmol_g"]], yerr=[pm["uptake_sem_mmol_g"]], fmt="P", color=C["mp0"],
+                  ms=7, label="Nested MC, MP0 (no D3)")
+    ax_a.set_xscale("log"); ax_a.set_yscale("log")
+    ax_a.set_xlim(0.008, 1.4); ax_a.set_ylim(0.1, 30)
+    ax_a.set_xlabel("Pressure (bar)"); ax_a.set_ylabel("CO$_2$ uptake (mmol g$^{-1}$)")
+    ax_a.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, fontsize=7.2, handlelength=1.8, columnspacing=1.0)
+    ax_a.set_title("Isotherms at 298 K", loc="left")
+    panel_label(ax_a, "a")
 
-    p_r2, q_r2, e_r2, _ = extract_series(summary, "exp1_auto_mlip_r2scan_nod3")
-    axA.errorbar(p_r2, q_r2, yerr=e_r2, fmt="-D", color="#1D4ED8", lw=2.3, ms=7, capsize=3.5,
-                 label="Auto-MLIP + CBMC (r2SCAN No-D3)", zorder=5)
+    # (b) relaxation vs wall time at 0.28 bar
+    d_wall = s["runs"]["exp1_auto_mlip_r2scan_nod3"]["distillation"]["distill_wall_s"]
+    runs_b = [("exp1_direct_r2scan_0p28", C["direct"], "Direct MLIP-GCMC", 0.0, "-"),
+              ("exp1_uff_r2scan_0p28", C["uff"], "UFF proposer", 0.0, "-"),
+              ("exp1_mercado_r2scan_0p28", C["mercado"], "Mercado-2016 proposer", 0.0, "-"),
+              ("exp1_auto_mlip_r2scan_nod3", C["auto"], "Auto-MLIP proposer, empty start", d_wall, "-"),
+              ("exp1_auto_mlip_r2scan_nod3_highload_0p28", C["hl"], "Auto-MLIP proposer, loaded start", d_wall, "-")]
+    for key, col, lab, off, ls in runs_b:
+        pt = [p for p in s["runs"][key]["points"] if abs(p["P_bar"] - 0.28) < 1e-6][0]
+        y = mean_trace_mmol(pt)
+        t = off + pt["elapsed_s"] * (np.arange(1, len(y) + 1) / len(y))
+        ax_b.plot(t, y, color=col, lw=1.3, ls=ls, label=lab)
+        ax_b.plot(t[-1], y[-1], "o", color=col, ms=3.5)
+    ax_b.axvspan(0, d_wall, color="#E5E7EB", alpha=0.7, lw=0)
+    ax_b.text(d_wall / 2, 7.65, "distillation", ha="center", fontsize=7.2, color=C["muted"], rotation=90, va="top")
+    ax_b.axhspan(4.745, 6.937, color="#D1D5DB", alpha=0.35, lw=0)
+    ax_b.text(780, 5.05, "experimental range\nat 0.28 bar", fontsize=7.2, color=C["muted"], ha="right")
+    ax_b.set_xlim(0, 800); ax_b.set_ylim(0, 8)
+    ax_b.set_xlabel("Wall-clock time on one RTX 3090 (s)")
+    ax_b.set_ylabel("Box-averaged uptake (mmol g$^{-1}$)")
+    ax_b.set_title("Relaxation at 0.28 bar, same target (r2SCAN, no D3)", loc="left")
+    ax_b.legend(loc="lower right", fontsize=7.2, bbox_to_anchor=(1.0, 0.04))
+    panel_label(ax_b, "b")
 
-    p_go, q_go, e_go, _ = extract_series(summary, "exp1_grid_only_r2scan")
-    axA.errorbar(p_go, q_go, yerr=e_go, fmt="--^", color="#0EA5E9", lw=1.7, ms=6.5, capsize=3,
-                 label="Grid-Only 1B+2B (r2SCAN, no MB)")
+    # (c) nested MC minus surrogate-only
+    P = [0.012, 0.28, 1.0]
+    width = 0.36
+    for k, (auto_key, grid_key, col, lab) in enumerate([("exp1_auto_mlip_r2scan_nod3", "exp1_grid_only_r2scan", C["auto"], "r2SCAN (no D3)"),
+                                                        ("exp1_auto_mlip_mp0_d3", "exp1_grid_only_mp0_d3", C["mp0d3"], "MP0 + D3")]):
+        a = {round(p["P_bar"], 3): p for p in pts(s, auto_key)}
+        g = {round(p["P_bar"], 3): p for p in pts(s, grid_key)}
+        d = [a[p]["uptake_mmol_g"] - g[p]["uptake_mmol_g"] for p in P]
+        e = [np.hypot(a[p]["uptake_sem_mmol_g"], g[p]["uptake_sem_mmol_g"]) for p in P]
+        xs = np.arange(3) + (k - 0.5) * width
+        ax_c.bar(xs, d, width=width * 0.92, yerr=e, color=col, alpha=0.85, capsize=2.5, label=lab, ecolor="#374151")
+        for xi, di, ei in zip(xs, d, e):
+            ax_c.text(xi, di + (ei + 0.12 if di >= 0 else -ei - 0.12), f"{di:+.2f}", ha="center",
+                      va="bottom" if di >= 0 else "top", fontsize=7.6)
+    ax_c.axhline(0, color="#374151", lw=0.8)
+    ax_c.set_xticks(np.arange(3)); ax_c.set_xticklabels(["0.012 bar", "0.28 bar", "1.0 bar"])
+    ax_c.set_ylabel("q$_{nested}$ \u2212 q$_{surrogate}$ (mmol g$^{-1}$)")
+    ax_c.set_ylim(-1.2, 3.2)
+    ax_c.set_title("What the outer MLIP correction changes", loc="left")
+    ax_c.legend(loc="upper left", fontsize=7.6)
+    panel_label(ax_c, "c")
 
-    p_mp3, q_mp3, e_mp3, _ = extract_series(summary, "exp1_auto_mlip_mp0_d3")
-    axA.errorbar(p_mp3, q_mp3, yerr=e_mp3, fmt="-v", color="#DC2626", lw=1.8, ms=6.5, capsize=3,
-                 label="Auto-MLIP (MP0+D3 PBE, overbinding)")
+    # (d) target functional at 0.28 bar
+    items = [("MP0\n(no D3)", pts(s, "exp1_mp0_nod3_0p28")[0], C["mp0"]),
+             ("r2SCAN\n(no D3)", [p for p in pts(s, "exp1_auto_mlip_r2scan_nod3") if abs(p["P_bar"] - 0.28) < 1e-6][0], C["auto"]),
+             ("MP0\n+ D3", [p for p in pts(s, "exp1_auto_mlip_mp0_d3") if abs(p["P_bar"] - 0.28) < 1e-6][0], C["mp0d3"])]
+    xs = np.arange(len(items))
+    ax_d.axhspan(4.745, 6.937, color="#D1D5DB", alpha=0.45, lw=0, label="experiment (two datasets)")
+    for xi, (lab, p, col) in zip(xs, items):
+        ax_d.bar(xi, p["uptake_mmol_g"], width=0.55, color=col, alpha=0.88, yerr=p["uptake_sem_mmol_g"], capsize=2.5, ecolor="#374151")
+        ax_d.text(xi, p["uptake_mmol_g"] + 0.6, f"{p['uptake_mmol_g']:.2f} mmol/g\nQ$_{{st}}$ = {p['Qst_fluc_kJ_mol']:.1f} kJ/mol",
+                  ha="center", va="bottom", fontsize=7.8)
+    ax_d.set_xticks(xs); ax_d.set_xticklabels([i[0] for i in items])
+    ax_d.set_ylabel("CO$_2$ uptake at 0.28 bar (mmol g$^{-1}$)")
+    ax_d.set_ylim(0, 23.5)
+    ax_d.set_title("Effect of the target MLIP (same sampler)", loc="left")
+    ax_d.legend(loc="upper left", fontsize=7.6)
+    panel_label(ax_d, "d")
 
-    # Single-point baselines at 0.28 bar
-    single_pts = [
-        ("exp1_mercado_r2scan_0p28", "P", "#D97706", "Mercado2016 + CBMC"),
-        ("exp1_uff_r2scan_0p28", "X", "#9333EA", "UFF + CBMC"),
-        ("exp1_direct_r2scan_0p28", "o", "#0F172A", "Direct MLIP (300s cap)"),
-        ("exp1_mp0_nod3_0p28", "*", "#10B981", "Auto-MLIP (MP0 No-D3)"),
-    ]
-    for key, marker, col, lbl in single_pts:
-        pt = summary["runs"][key]["points"][0]
-        axA.errorbar([pt["P_bar"]], [pt["uptake_mmol_g"]], yerr=[pt["uptake_sem_mmol_g"]],
-                     fmt=marker, color=col, ms=8.5, capsize=3, label=lbl, zorder=6)
-
-    axA.set_xlabel("Pressure (bar, log scale)")
-    axA.set_ylabel("CO2 Uptake (mmol/g)")
-    axA.set_title("A. Mg-MOF-74 CO2 @ 298 K: Methods vs. Experiment")
-    axA.set_xlim(0.008, 1.35)
-    axA.set_ylim(-0.3, 21.0)
-    axA.legend(loc="upper left", fontsize=7.6, frameon=True, ncol=1)
-
-    # Panel B: 0.28 bar Method Comparison Bar Chart (r2SCAN target)
-    labels_b = [
-        "Direct MLIP\n(300s)",
-        "UFF+\nCBMC",
-        "Grid-Only\n(1B+2B)",
-        "Mercado+\nCBMC",
-        "Auto-MLIP\n(Empty)",
-        "Auto-MLIP\n(High-Load)",
-    ]
-    keys_b = [
-        ("exp1_direct_r2scan_0p28", 0),
-        ("exp1_uff_r2scan_0p28", 0),
-        ("exp1_grid_only_r2scan", 1),
-        ("exp1_mercado_r2scan_0p28", 0),
-        ("exp1_auto_mlip_r2scan_nod3", 1),
-        ("exp1_auto_mlip_r2scan_nod3_highload_0p28", 0),
-    ]
-    vals_b = [summary["runs"][k]["points"][idx]["uptake_mmol_g"] for k, idx in keys_b]
-    errs_b = [summary["runs"][k]["points"][idx]["uptake_sem_mmol_g"] for k, idx in keys_b]
-    accs_b = [
-        3.65,  # Direct ins acc (prod_ins_acc/att = 158/4330)
-        summary["runs"]["exp1_uff_r2scan_0p28"]["points"][0]["prod_outer_acc_pct"],
-        100.0,
-        summary["runs"]["exp1_mercado_r2scan_0p28"]["points"][0]["prod_outer_acc_pct"],
-        summary["runs"]["exp1_auto_mlip_r2scan_nod3"]["points"][1]["prod_outer_acc_pct"],
-        summary["runs"]["exp1_auto_mlip_r2scan_nod3_highload_0p28"]["points"][0]["prod_outer_acc_pct"],
-    ]
-    cols_b = ["#64748B", "#9333EA", "#0EA5E9", "#D97706", "#1D4ED8", "#047857"]
-    x_b = np.arange(len(labels_b))
-    bars = axB.bar(x_b, vals_b, yerr=errs_b, color=cols_b, width=0.62, capsize=4, edgecolor="#1E293B", linewidth=0.8)
-    axB.axhspan(4.74, 6.80, color="#94A3B8", alpha=0.18, label="Exp @ ~0.28 bar (4.74-6.80)")
-    for rect, v, acc, kpair in zip(bars, vals_b, accs_b, keys_b):
-        tag = f"{v:.2f}\n(Ins 3.6%)" if kpair[0] == "exp1_direct_r2scan_0p28" else (f"{v:.2f}\n(No MB)" if "grid_only" in kpair[0] else f"{v:.2f}\n({acc:.1f}% acc)")
-        axB.text(rect.get_x() + rect.get_width() / 2, v + 0.35, tag, ha="center", va="bottom", fontsize=7.8, fontweight="bold")
-    axB.set_xticks(x_b)
-    axB.set_xticklabels(labels_b, fontsize=8.4)
-    axB.set_ylabel("CO2 Uptake @ 0.28 bar (mmol/g)")
-    axB.set_title("B. 0.28 bar Target Parity & Acceptance (r2SCAN No-D3)")
-    axB.set_ylim(0, 8.2)
-    axB.legend(loc="upper left", frameon=True)
-
-    # Panel C: Bidirectional Trace (Empty vs High-Loading vs Direct MLIP)
-    pt_emp = summary["runs"]["exp1_auto_mlip_r2scan_nod3"]["points"][1]
-    pt_hl = summary["runs"]["exp1_auto_mlip_r2scan_nod3_highload_0p28"]["points"][0]
-    pt_dir = summary["runs"]["exp1_direct_r2scan_0p28"]["points"][0]
-    conv_mg = 1000.0 / pt_emp["fw_mass_gmol"]
-
-    tr_emp = np.mean(np.array(pt_emp["box_N_trace"]), axis=1) * conv_mg
-    tr_hl = np.mean(np.array(pt_hl["box_N_trace"]), axis=1) * conv_mg
-    tr_dir = np.mean(np.array(pt_dir["box_N_trace"]), axis=1) * conv_mg
-
-    c_emp = np.linspace(0, pt_emp["eq_cycles"] + pt_emp["prod_cycles"], len(tr_emp))
-    c_hl = np.linspace(0, pt_hl["eq_cycles"] + pt_hl["prod_cycles"], len(tr_hl))
-    c_dir = np.linspace(0, pt_dir["elapsed_s"], len(tr_dir))
-
-    axC.plot(c_emp, tr_emp, color="#1D4ED8", lw=1.8, alpha=0.9, label=f"Empty Init -> {pt_emp['uptake_mmol_g']:.3f}+-{pt_emp['uptake_sem_mmol_g']:.3f}")
-    axC.plot(c_hl, tr_hl, color="#047857", lw=1.8, alpha=0.88, label=f"High-Load Init -> {pt_hl['uptake_mmol_g']:.3f}+-{pt_hl['uptake_sem_mmol_g']:.3f}")
-    axC.axhline(6.318, color="#0F172A", ls=":", lw=1.3, label="Consensus Plateau (~6.32 mmol/g, diff 0.12%)")
-    axC.plot(c_dir * 4.0, tr_dir, color="#DC2626", lw=1.8, ls="--", label=f"Direct MLIP (300s trace scaled x4) -> {pt_dir['uptake_mmol_g']:.2f}")
-    axC.axvline(1200, color="#64748B", ls="--", lw=1.1, label="Burn-in Cutoff (1200 cyc)")
-    axC.set_xlabel("Nested MC Cycle (Direct trace shown at 4x s-to-cycle)")
-    axC.set_ylabel("Box-Mean CO2 Uptake (mmol/g)")
-    axC.set_title("C. Bidirectional Convergence Trace @ 0.28 bar")
-    axC.set_ylim(0, 8.6)
-    axC.legend(loc="lower right", fontsize=8.0, frameon=True)
-
-    # Panel D: MLIP Functional Physics Audit @ 0.28 bar (MP0 No-D3 vs r2SCAN No-D3 vs MP0+D3)
-    labels_d = ["MP0 No-D3\n(PBE)", "Grid-Only\n(r2SCAN 1B+2B)", "r2SCAN No-D3\n(Auto-MLIP)", "MP0+D3\n(PBE+D3)"]
-    vals_d = [
-        summary["runs"]["exp1_mp0_nod3_0p28"]["points"][0]["uptake_mmol_g"],
-        summary["runs"]["exp1_grid_only_r2scan"]["points"][1]["uptake_mmol_g"],
-        summary["runs"]["exp1_auto_mlip_r2scan_nod3"]["points"][1]["uptake_mmol_g"],
-        summary["runs"]["exp1_auto_mlip_mp0_d3"]["points"][1]["uptake_mmol_g"],
-    ]
-    qsts_d = [
-        summary["runs"]["exp1_mp0_nod3_0p28"]["points"][0]["Qst_fluc_kJ_mol"],
-        summary["runs"]["exp1_grid_only_r2scan"]["points"][1]["Qst_fluc_kJ_mol"],
-        summary["runs"]["exp1_auto_mlip_r2scan_nod3"]["points"][1]["Qst_fluc_kJ_mol"],
-        summary["runs"]["exp1_auto_mlip_mp0_d3"]["points"][1]["Qst_molar_kJ_mol"],
-    ]
-    cols_d = ["#10B981", "#0EA5E9", "#1D4ED8", "#DC2626"]
-    x_d = np.arange(len(labels_d))
-    bars_d = axD.bar(x_d, vals_d, color=cols_d, width=0.55, edgecolor="#1E293B", linewidth=0.8)
-    axD.axhspan(4.74, 7.04, color="#94A3B8", alpha=0.22, label="Exp @ 0.28-0.31 bar")
-    for rect, v, qv in zip(bars_d, vals_d, qsts_d):
-        axD.text(rect.get_x() + rect.get_width() / 2, v + 0.45,
-                 f"{v:.2f} mmol/g\n(Qst={qv:.1f} kJ/mol)", ha="center", va="bottom", fontsize=8.0, fontweight="bold")
-    axD.annotate(
-        "+2.33 mmol/g\nmany-body OMS\ncooperativity",
-        xy=(1.0, 4.1), xytext=(0.4, 12.2),
-        arrowprops=dict(arrowstyle="->", color="#0284C7", lw=1.5),
-        fontsize=8.3, fontweight="bold", color="#0369A1",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="#E0F2FE", edgecolor="#7DD3FC")
-    )
-    axD.set_xticks(x_d)
-    axD.set_xticklabels(labels_d, fontsize=8.8)
-    axD.set_ylabel("CO2 Uptake @ 0.28 bar (mmol/g)")
-    axD.set_title("D. MLIP Functional Sensitivity & Many-Body Gap")
-    axD.set_ylim(0, 22.8)
-    axD.legend(loc="upper left", frameon=True)
-
-    fig.tight_layout()
-    out = ASSETS_DIR / "fig1_mgmof74_method_comparison.png"
-    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(OUT / "fig2_exp1_mgmof74.png", bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print("Saved", out)
+    print("saved fig2_exp1_mgmof74.png")
 
 
-def plot_fig2(summary: dict):
-    fig, axes = plt.subplots(2, 3, figsize=(15.5, 9.4))
-    ax1, ax2, ax3, ax4, ax5, ax6 = axes.ravel()
+# --------------------------------------------------------------------------------------------
+# Figure 3: Experiment 2 (transferability)
+# --------------------------------------------------------------------------------------------
 
-    # Panel A: Mg-MOF-74 + CO2
-    p_e, q_e = load_csv_isotherm("mgmof74_10.1021acs.jpcc.7b08239.Isotherm1.csv")
-    m = (p_e >= 0.005) & (p_e <= 1.2)
-    ax1.plot(p_e[m], q_e[m], "o--", color="#475569", ms=5, lw=1.5, label="Exp (jpcc.7b08239)")
-    p, q, e, _ = extract_series(summary, "exp1_auto_mlip_r2scan_nod3")
-    ax1.errorbar(p, q, yerr=e, fmt="-D", color="#1D4ED8", lw=2.0, ms=6.5, capsize=3.5, label="r2SCAN No-D3")
-    ax1.set_title("A. Mg-MOF-74 + CO2 @ 298 K")
-    ax1.set_xlabel("Pressure (bar)")
-    ax1.set_ylabel("Uptake (mmol/g)")
-    ax1.annotate("1.0 bar: 8.15 vs 8.17\n(0.26% dev)", xy=(1.0, 8.15), xytext=(0.38, 5.2),
-                 arrowprops=dict(arrowstyle="->", lw=1.2, color="#1D4ED8"), fontsize=8.3, color="#1E3A8A")
-    ax1.legend(loc="upper left", frameon=True)
+def _iso_panel(ax, exp_specs, sim_specs, xlim, ylim, title, xlog=False):
+    for fn, col, mk, lab in exp_specs:
+        x, y = load_exp(fn)
+        m = (x <= xlim[1] * 1.02) & (x > 0)
+        ax.plot(x[m], y[m], mk, ms=3.8, mfc="none", mec=col, mew=0.9, ls="none", label=lab)
+    for p, q, e, col, mk, lab in sim_specs:
+        ax.errorbar(p, q, yerr=e, fmt=mk + "-", color=col, ms=5.5, lw=1.4, capsize=2.5, label=lab)
+    if xlog:
+        ax.set_xscale("log")
+    ax.set_xlim(*xlim); ax.set_ylim(*ylim)
+    ax.set_xlabel("Pressure (bar)"); ax.set_ylabel("Uptake (mmol g$^{-1}$)")
+    ax.set_title(title, loc="left")
 
-    # Panel B: Ni-MOF-74 + CO2
-    p_e, q_e = load_csv_isotherm("nimof74_10.1021acs.jpcc.5b03700.Isotherm47.csv")
-    ax2.plot(p_e, q_e, "o--", color="#475569", ms=4.5, lw=1.4, label="Exp (jpcc.5b03700)")
-    p, q, e, _ = extract_series(summary, "exp2_nimof74_co2")
-    ax2.errorbar(p, q, yerr=e, fmt="-D", color="#0F766E", lw=2.0, ms=6.5, capsize=3.5, label="r2SCAN No-D3")
-    ax2.set_title("B. Ni-MOF-74 + CO2 @ 298 K")
-    ax2.set_xlabel("Pressure (bar)")
-    ax2.set_ylabel("Uptake (mmol/g)")
-    ax2.text(0.05, 3.0, "Qst = 25.2-25.5 kJ/mol\n(Exp ~38-41 kJ/mol;\nr2SCAN Ni d-band sensitivity)",
-             fontsize=8.0, color="#0F172A", bbox=dict(boxstyle="round,pad=0.3", facecolor="#F0FDFA", edgecolor="#99F6E4"))
-    ax2.legend(loc="upper left", frameon=True)
 
-    # Panel C: Cu-BTC + CO2
-    p_e, q_e = load_csv_isotherm("hkust1_10.1002aic.15837.Isotherm7.csv")
-    m = p_e <= 1.08
-    ax3.plot(p_e[m], q_e[m], "o--", color="#475569", ms=4, lw=1.4, label="Exp (aic.15837)")
-    p, q, e, _ = extract_series(summary, "exp2_cubtc_co2")
-    ax3.errorbar(p, q, yerr=e, fmt="-D", color="#D97706", lw=2.0, ms=6.5, capsize=3.5, label="r2SCAN No-D3 (2/2 PASS)")
-    ax3.set_title("C. Cu-BTC (HKUST-1) + CO2 @ 298 K")
-    ax3.set_xlabel("Pressure (bar)")
-    ax3.set_ylabel("Uptake (mmol/g)")
-    ax3.text(0.06, 2.2, "0.15 bar: Rhat=1.0021\n1.0 bar: Rhat=1.0069\nQst=17.6-18.1 kJ/mol",
-             fontsize=8.0, bbox=dict(boxstyle="round,pad=0.3", facecolor="#FFFBEB", edgecolor="#FDE68A"))
-    ax3.legend(loc="upper left", frameon=True)
+def fig_exp2(s):
+    fig, axs = plt.subplots(2, 3, figsize=(14.2, 8.6))
+    fig.subplots_adjust(hspace=0.45, wspace=0.62)
+    (a, b, c), (d, e, f) = axs
+    lab_sim = "Nested MC, r2SCAN (no D3)"
 
-    # Panel D: IRMOF-1 + CO2
-    p_e1, q_e1 = load_csv_isotherm("irmof1_10.1021acs.jctc.5b00093.Isotherm1.csv")
-    p_e2, q_e2 = load_csv_isotherm("irmof1_10.1038srep12045.Isotherm2.csv")
-    m1 = p_e1 <= 6.5
-    m2 = p_e2 <= 6.5
-    ax4.plot(p_e1[m1], q_e1[m1], "o--", color="#475569", ms=5, lw=1.4, label="Exp (jctc.5b00093)")
-    ax4.plot(p_e2[m2], q_e2[m2], "s:", color="#94A3B8", ms=5, lw=1.4, label="Exp (srep12045)")
-    pt1 = summary["runs"]["exp2_irmof1_co2"]["points"][0]
-    pt5 = summary["runs"]["exp2_irmof1_co2_5bar"]["points"][0]
-    ax4.errorbar([pt1["P_bar"], pt5["P_bar"]], [pt1["uptake_mmol_g"], pt5["uptake_mmol_g"]],
-                 yerr=[pt1["uptake_sem_mmol_g"], pt5["uptake_sem_mmol_g"]],
-                 fmt="-D", color="#7C3AED", lw=2.0, ms=6.5, capsize=3.5, label="r2SCAN No-D3")
-    ax4.set_title("D. IRMOF-1 + CO2 @ 298 K")
-    ax4.set_xlabel("Pressure (bar)")
-    ax4.set_ylabel("Uptake (mmol/g)")
-    ax4.set_xlim(-0.2, 6.6)
-    ax4.set_ylim(-0.2, 6.8)
-    ax4.legend(loc="upper left", frameon=True)
+    p, q, er = series(s, "exp2_nimof74_co2")
+    _iso_panel(a, [("nimof74_10.1021acs.jpcc.5b03700.Isotherm47.csv", C["exp1"], "o", "Exp. (10.1021/acs.jpcc.5b03700)"),
+                   ("nimof74_10.108015422119.2014.884507.Isotherm5.csv", C["exp2"], "s", "Exp. (10.1080/15422119.2014.884507)")],
+               [(p, q, er, "#0F766E", "D", lab_sim)], (0, 1.05), (0, 8.3), "Ni-MOF-74 + CO$_2$, 298 K")
+    a.legend(loc="lower right", bbox_to_anchor=(1.0, 0.12), fontsize=7.0)
+    panel_label(a, "a")
 
-    # Panel E: IRMOF-1 + CH4 (MP0+D3) + r2SCAN OOD Diagnostic Inset
-    p_ch4, q_ch4, e_ch4, _ = extract_series(summary, "exp2_irmof1_ch4_mp0d3")
-    ax5.errorbar(p_ch4, q_ch4, yerr=e_ch4, fmt="-o", color="#DC2626", lw=2.1, ms=7, capsize=3.5,
-                 label="Auto-MLIP MP0+D3 (1B R2=0.987)")
-    for pv, qv, ev in zip(p_ch4, q_ch4, e_ch4):
-        ax5.text(pv, qv + 0.35, f"{qv:.2f}+-{ev:.2f}", ha="center", va="bottom", fontsize=8.0, fontweight="bold", color="#991B1B")
-    ax5.set_title("E. IRMOF-1 + CH4 @ 298 K (MP0+D3 & OOD Audit)")
-    ax5.set_xlabel("Pressure (bar)")
-    ax5.set_ylabel("CH4 Uptake (mmol/g)")
-    ax5.set_xlim(-0.2, 5.6)
-    ax5.set_ylim(0.0, 9.0)
-    diag = summary["irmof1_ch4_mlip_diagnostic"]
-    ood_txt = (
-        "Direct ASE MACE Cross-Check:\n"
-        f"r2SCAN No-D3: {np.mean(diag['r2scan_nod3_ase_kJ_mol']):.1f} kJ/mol (OOD)\n"
-        f"MP0+D3: {np.mean(diag['mp0_d3_fast_kJ_mol']):.1f} kJ/mol (Physical)\n"
-        f"MP0 No-D3: {np.mean(diag['mp0_nod3_fast_kJ_mol']):+.1f} kJ/mol"
-    )
-    ax5.text(0.25, 5.2, ood_txt, fontsize=7.9,
-             bbox=dict(boxstyle="round,pad=0.35", facecolor="#FEF2F2", edgecolor="#FECACA"))
-    ax5.legend(loc="upper left", frameon=True, fontsize=8.0)
+    p, q, er = series(s, "exp2_cubtc_co2")
+    _iso_panel(b, [("hkust1_10.1002aic.15837.Isotherm7.csv", C["exp1"], "o", "Exp. (10.1002/aic.15837)"),
+                   ("hkust1_10.1007s1045001395272.Isotherm50.csv", C["exp2"], "s", "Exp. (10.1007/s10450-013-9527-2)")],
+               [(p, q, er, C["mercado"], "D", lab_sim)], (0, 1.08), (0, 5.0), "Cu-BTC (HKUST-1) + CO$_2$, 298 K")
+    b.legend(loc="upper left", fontsize=7.0)
+    panel_label(b, "b")
 
-    # Panel F: Distillation R2 & MAE across all MOFs / Guests / Models
-    dist_items = [
-        ("Mg74\nr2SCAN", "MgMOF-74__co2__mace-matpes-r2scan-0__disp_False"),
-        ("Mg74\nMP0+D3", "MgMOF-74__co2__medium__disp_True"),
-        ("Mg74\nMP0", "MgMOF-74__co2__medium__disp_False"),
-        ("Ni74\nr2SCAN", "NiMOF-74__co2__mace-matpes-r2scan-0__disp_False"),
-        ("CuBTC\nr2SCAN", "Cu-BTC__co2__mace-matpes-r2scan-0__disp_False"),
-        ("IRMOF1\nCO2", "IRMOF-1__co2__mace-matpes-r2scan-0__disp_False"),
-        ("IRMOF1\nCH4", "IRMOF-1__ch4__medium__disp_True"),
-    ]
-    lbls_f = [x[0] for x in dist_items]
-    r2s_f = [summary["distillation"][x[1]]["r2_1b"] for x in dist_items]
-    mae1_f = [summary["distillation"][x[1]]["mae_1b_kJ_mol"] for x in dist_items]
-    mae2_f = [summary["distillation"][x[1]]["mae_2b_kJ_mol"] for x in dist_items]
-    x_f = np.arange(len(lbls_f))
-    w = 0.36
-    b1 = ax6.bar(x_f - w/2, mae1_f, width=w, color="#2563EB", label="1B MAE (kJ/mol)")
-    b2 = ax6.bar(x_f + w/2, mae2_f, width=w, color="#F59E0B", label="2B Pore LUT MAE (kJ/mol)")
-    for i, r2v in enumerate(r2s_f):
-        ax6.text(x_f[i], max(mae1_f[i], mae2_f[i]) + 0.14, f"R2={r2v:.3f}", ha="center", va="bottom", fontsize=7.3, fontweight="bold", color="#1E3A8A")
-    ax6.set_xticks(x_f)
-    ax6.set_xticklabels(lbls_f, fontsize=7.8, rotation=18, ha="center")
-    ax6.set_ylabel("Held-Out Distillation MAE (kJ/mol)")
-    ax6.set_title("F. Online 1B+2B Self-Distillation Accuracy (15% Holdout)")
-    ax6.set_ylim(0, 3.2)
-    ax6.legend(loc="upper right", frameon=True, fontsize=8.0)
+    p1 = pts(s, "exp2_irmof1_co2")[0]
+    p5 = pts(s, "exp2_irmof1_co2_5bar")[0]
+    _iso_panel(c, [("irmof1_10.1021acs.jctc.5b00093.Isotherm1.csv", C["exp1"], "o", "Exp. (10.1021/acs.jctc.5b00093)"),
+                   ("irmof1_10.1038srep12045.Isotherm2.csv", C["exp2"], "s", "Exp. (10.1038/srep12045)")],
+               [(np.array([1.0, 5.0]), np.array([p1["uptake_mmol_g"], p5["uptake_mmol_g"]]),
+                 np.array([p1["uptake_sem_mmol_g"], p5["uptake_sem_mmol_g"]]), "#6D28D9", "D", lab_sim)],
+               (0, 6.6), (0, 7.0), "IRMOF-1 + CO$_2$, 298 K")
+    c.legend(loc="upper left", fontsize=7.0)
+    panel_label(c, "c")
 
-    fig.tight_layout()
-    out = ASSETS_DIR / "fig2_cross_mof_generalization.png"
-    fig.savefig(out, bbox_inches="tight")
+    # (d) IRMOF-1 + CH4 with MP0+D3, inset single-molecule energies
+    p, q, er = series(s, "exp2_irmof1_ch4_mp0d3")
+    d.errorbar(p, q, yerr=er, fmt="o-", color=C["mp0d3"], ms=5.5, lw=1.4, capsize=2.5, label="Nested MC, MP0 + D3")
+    for pi, qi in zip(p, q):
+        d.text(pi, qi + 0.45, f"{qi:.2f}", ha="center", fontsize=7.6)
+    d.set_xlim(0, 5.6); d.set_ylim(0, 9.5)
+    d.set_xlabel("Pressure (bar)"); d.set_ylabel("CH$_4$ uptake (mmol g$^{-1}$)")
+    d.set_title("IRMOF-1 + CH$_4$, 298 K", loc="left")
+    d.legend(loc="upper left", fontsize=7.4)
+    d.text(0.02, 0.80, "no CH$_4$ reference isotherm\nin data/exp_isotherms", transform=d.transAxes, fontsize=7.0, color=C["muted"], va="top")
+    diag = s["irmof1_ch4_mlip_diagnostic"]
+    ins = d.inset_axes([0.50, 0.20, 0.47, 0.36])
+    xx = np.arange(4); w = 0.26
+    ins.bar(xx - w, diag["r2scan_nod3_ase_kJ_mol"], w, color=C["auto"], label="r2SCAN")
+    ins.bar(xx, diag["mp0_d3_fast_kJ_mol"], w, color=C["mp0d3"], label="MP0+D3")
+    ins.bar(xx + w, diag["mp0_nod3_fast_kJ_mol"], w, color=C["mp0"], label="MP0")
+    ins.axhline(0, color="#374151", lw=0.6)
+    ins.set_xticks(xx); ins.set_xticklabels([f"{v:.2f}" for v in diag["poses_dmin_A"]], fontsize=6.4)
+    ins.set_xlabel("pose, distance to framework (\u00c5)", fontsize=6.4, labelpad=1.5)
+    ins.set_ylabel("U$_{int}$ (kJ/mol)", fontsize=6.6, labelpad=1)
+    ins.tick_params(labelsize=6.2)
+    ins.legend(fontsize=5.8, loc="upper center", ncol=3, handlelength=0.8, columnspacing=0.6)
+    ins.set_ylim(-42, 16)
+    ins.set_title("single CH$_4$, direct MACE", fontsize=6.8)
+    panel_label(d, "d")
+
+    # (e) parity against experiment
+    ex = s["experimental_interpolated_mmol_g"]
+    rows = []
+    for mof, key, P_list, col, mk in [("Mg-MOF-74", "exp1_auto_mlip_r2scan_nod3", [0.012, 0.28, 1.0], C["auto"], "D"),
+                                       ("Ni-MOF-74", "exp2_nimof74_co2", [0.012, 0.28, 1.0], "#0F766E", "s"),
+                                       ("Cu-BTC", "exp2_cubtc_co2", [0.15, 1.0], C["mercado"], "^"),
+                                       ("IRMOF-1", "exp2_irmof1_co2_5bar", [5.0], "#6D28D9", "o")]:
+        sim = {round(p["P_bar"], 3): p for p in pts(s, key)}
+        for P in P_list:
+            vals = [v for v in ex[mof][str(P)].values() if v is not None]
+            sp = sim[round(P, 3)]
+            rows.append((mof, P, np.mean(vals), min(vals), max(vals), sp["uptake_mmol_g"], sp["uptake_sem_mmol_g"], col, mk, sp["diag_status"]))
+    lims = (0.005, 30)
+    xx = np.logspace(np.log10(lims[0]), np.log10(lims[1]), 50)
+    e.plot(xx, xx, color="#374151", lw=0.8)
+    e.plot(xx, 2 * xx, color="#9CA3AF", lw=0.7, ls="--"); e.plot(xx, 0.5 * xx, color="#9CA3AF", lw=0.7, ls="--")
+    e.plot(xx, 10 * xx, color="#D1D5DB", lw=0.7, ls=":"); e.plot(xx, 0.1 * xx, color="#D1D5DB", lw=0.7, ls=":")
+    seen = set()
+    for mof, P, xm, xlo, xhi, ys, ye, col, mk, st in rows:
+        e.errorbar(xm, ys, xerr=[[xm - xlo], [xhi - xm]], yerr=ye, fmt=mk, color=col, ms=5.5,
+                   mfc=col if st == "pass" else "white", mew=1.1, capsize=1.8, lw=0.9,
+                   label=mof if mof not in seen else None)
+        seen.add(mof)
+        off = {("Mg-MOF-74", 1.0): (6, 2), ("Mg-MOF-74", 0.28): (-34, 4), ("Mg-MOF-74", 0.012): (5, -11),
+               ("Ni-MOF-74", 1.0): (6, -4), ("Ni-MOF-74", 0.28): (6, -9), ("Ni-MOF-74", 0.012): (-38, -3),
+               ("Cu-BTC", 1.0): (-30, -6), ("Cu-BTC", 0.15): (5, -11), ("IRMOF-1", 5.0): (-30, 3)}.get((mof, P), (4, -9))
+        e.annotate(f"{P:g} bar", (xm, ys), xytext=off, textcoords="offset points", fontsize=6.3, color=col)
+    e.set_xscale("log"); e.set_yscale("log"); e.set_xlim(*lims); e.set_ylim(*lims)
+    e.set_xlabel("Experiment (mmol g$^{-1}$, interpolated)"); e.set_ylabel("Nested MC, r2SCAN (mmol g$^{-1}$)")
+    e.set_title("Parity with experiment, CO$_2$", loc="left")
+    e.text(0.6, 1.5, "\u00d72", fontsize=7, color="#6B7280"); e.text(0.9, 0.3, "\u00d70.5", fontsize=7, color="#6B7280")
+    e.text(0.25, 4.5, "\u00d710", fontsize=7, color="#9CA3AF"); e.text(0.22, 0.031, "\u00d70.1", fontsize=7, color="#9CA3AF")
+    leg1 = e.legend(loc="upper left", fontsize=7.0)
+    e.add_artist(leg1)
+    e.legend(handles=[Line2D([], [], marker="o", color="#374151", ls="none", mfc="#374151", label="all gates passed"),
+                      Line2D([], [], marker="o", color="#374151", ls="none", mfc="white", label="not all gates passed")],
+             loc="lower right", fontsize=6.8)
+    panel_label(e, "e")
+
+    # (f) surrogate fidelity for the caches used in production
+    caches = [("5e543d0520048f84", "Mg-MOF-74, CO$_2$\nr2SCAN"), ("e523efe1b8f2e137", "Mg-MOF-74, CO$_2$\nMP0+D3"),
+              ("269c6d37da0d1de5", "Mg-MOF-74, CO$_2$\nMP0"), ("c829b9bb903aaded", "Ni-MOF-74, CO$_2$\nr2SCAN"),
+              ("9be1cad17f79fedb", "Cu-BTC, CO$_2$\nr2SCAN"), ("0ca4d69d7bafef2b", "IRMOF-1, CO$_2$\nr2SCAN"),
+              ("5134add5a31071bc", "IRMOF-1, CH$_4$\nMP0+D3")]
+    y = np.arange(len(caches))[::-1]
+    m1 = [s["distillation"][c]["mae_1b_kJ_mol"] for c, _ in caches]
+    m2 = [s["distillation"][c]["mae_2b_kJ_mol"] for c, _ in caches]
+    r2 = [s["distillation"][c]["r2_1b"] for c, _ in caches]
+    tw = [s["distillation"][c]["distill_wall_s"] for c, _ in caches]
+    f.barh(y + 0.18, m1, height=0.34, color="#2F5D8A", label="1B hold-out MAE")
+    f.barh(y - 0.18, m2, height=0.34, color="#D98E04", label="2B hold-out MAE")
+    for yi, a1, rr, tt in zip(y, m1, r2, tw):
+        f.text(a1 + 0.06, yi + 0.18, f"R\u00b2 = {rr:.3f}   ({tt:.0f} s)", va="center", fontsize=6.9)
+    f.set_yticks(y); f.set_yticklabels([c[1] for c in caches], fontsize=7.0)
+    f.set_xlim(0, 4.2)
+    f.set_xlabel("Error on 15 % hold-out (kJ mol$^{-1}$)")
+    f.set_title("Surrogate fidelity (caches used in production)", loc="left")
+    f.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, fontsize=7.0)
+    panel_label(f, "f", x=-0.42)
+
+    fig.savefig(OUT / "fig3_exp2_transferability.png", bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print("Saved", out)
+    print("saved fig3_exp2_transferability.png")
 
 
-def plot_fig3(summary: dict):
-    fig, axes = plt.subplots(2, 2, figsize=(13.8, 10.0))
-    axA, axB, axC, axD = axes.ravel()
+# --------------------------------------------------------------------------------------------
+# Figure 4: Experiment 3 (physics checks, efficiency, convergence)
+# --------------------------------------------------------------------------------------------
 
-    # Panel A: Widom & MACE vs D3 Energy Decomposition
-    w_r2 = summary["widom"]["phase3_widom_r2scan"]
-    w_mp = summary["widom"]["phase3_widom_mp0d3"]
-    dec_r2 = w_r2["mace_d3_decomposition"]
-    dec_mp = w_mp["mace_d3_decomposition"]
-    press_labels = ["0 bar\n(Widom Qst0)", "0.012 bar\n(U/N)", "0.28 bar\n(U/N)", "1.0 bar\n(U/N)"]
-    x_a = np.arange(len(press_labels))
-    r2_mace = [w_r2["widom"]["Qst_0_kJ_mol"]] + [-d["mean_u_mace_per_mol_kJ_mol"] for d in dec_r2]
-    mp_mace = [w_mp["widom"]["Qst_0_kJ_mol"]] + [-d["mean_u_mace_per_mol_kJ_mol"] for d in dec_mp]
-    mp_d3 = [0.0] + [-d["mean_u_d3_per_mol_kJ_mol"] for d in dec_mp]
+def fig_exp3(s):
+    fig, axs = plt.subplots(2, 3, figsize=(14.2, 8.4))
+    fig.subplots_adjust(hspace=0.48, wspace=0.38)
+    (a, b, c), (d, e, f) = axs
+    wr = s["widom"]["phase3_widom_r2scan"]; wm = s["widom"]["phase3_widom_mp0d3"]
 
-    w = 0.34
-    axA.bar(x_a - w/2, r2_mace, width=w, color="#1D4ED8", label="r2SCAN No-D3 (MACE only)")
-    axA.bar(x_a + w/2, mp_mace, width=w, color="#F97316", label="MP0+D3: MACE part")
-    axA.bar(x_a + w/2, mp_d3, width=w, bottom=mp_mace, color="#DC2626", alpha=0.85, label="MP0+D3: D3(BJ) part")
-    axA.text(x_a[0] - w/2, r2_mace[0] + 0.8, f"{r2_mace[0]:.1f}", ha="center", va="bottom", fontsize=7.8, fontweight="bold", color="#1E3A8A")
-    axA.text(x_a[0] + w/2, mp_mace[0] + 0.8, f"{mp_mace[0]:.1f}\n(K_H=8450\nvs 7.31)", ha="center", va="bottom", fontsize=7.4, fontweight="bold", color="#991B1B")
-    for i in range(1, 4):
-        tot = mp_mace[i] + mp_d3[i]
-        axA.text(x_a[i] + w/2, tot + 0.8, f"{tot:.1f}\n({100*mp_d3[i]/tot:.0f}% D3)", ha="center", va="bottom", fontsize=7.4, fontweight="bold", color="#991B1B")
-        axA.text(x_a[i] - w/2, r2_mace[i] + 0.8, f"{r2_mace[i]:.1f}", ha="center", va="bottom", fontsize=7.8, fontweight="bold", color="#1E3A8A")
-    axA.set_xticks(x_a)
-    axA.set_xticklabels(press_labels, fontsize=8.5)
-    axA.set_ylabel("Binding Magnitude -<U>/N or Qst(0) (kJ/mol)")
-    axA.set_title("A. Widom Henry Regime & MACE / D3 Decomposition (Mg-MOF-74)")
-    axA.set_ylim(0, 61)
-    axA.legend(loc="upper right", frameon=True, fontsize=8.0)
+    # (a) Widom
+    labs = ["r2SCAN\n(no D3)", "MP0\n+ D3"]
+    q0 = [wr["widom"]["Qst_0_kJ_mol"], wm["widom"]["Qst_0_kJ_mol"]]
+    q0e = [wr["widom"]["Qst_0_sem_kJ_mol"], wm["widom"]["Qst_0_sem_kJ_mol"]]
+    kh = [wr["widom"]["K_H_mmol_g_bar"], wm["widom"]["K_H_mmol_g_bar"]]
+    khe = [wr["widom"]["K_H_sem_mmol_g_bar"], wm["widom"]["K_H_sem_mmol_g_bar"]]
+    a.bar([0, 1], q0, yerr=q0e, width=0.5, color=[C["auto"], C["mp0d3"]], alpha=0.88, capsize=2.5, ecolor="#374151")
+    for i in range(2):
+        kh_txt = f"{kh[i]:.0f} \u00b1 {khe[i]:.0f}" if kh[i] > 100 else f"{kh[i]:.2f} \u00b1 {khe[i]:.2f}"
+        a.text(i, q0[i] + q0e[i] + 1.2, f"Q$_{{st}}$(0) = {q0[i]:.1f} \u00b1 {q0e[i]:.1f}\nK$_H$ = {kh_txt}",
+               ha="center", fontsize=7.6)
+    a.set_xticks([0, 1]); a.set_xticklabels(labs)
+    a.set_ylim(0, 66); a.set_xlim(-0.6, 1.6)
+    a.set_ylabel("Q$_{st}$(0) (kJ mol$^{-1}$)")
+    a.set_title("Widom insertion, Mg-MOF-74 + CO$_2$", loc="left")
+    a.text(0.02, 0.97, "6,000 insertions; K$_H$ in mmol g$^{-1}$ bar$^{-1}$", transform=a.transAxes, fontsize=7.0,
+           color=C["muted"], va="top")
+    panel_label(a, "a")
 
-    # Panel B: k_steps Calibration Sweep + Finite Size Inset
-    ks = np.array([5, 10, 15, 25])
-    accs = np.array([68.2, 50.1, 39.9, 25.1])
-    esjd = np.array([0.1595, 0.2374, 0.2688, 0.2575])
-    ess_s = np.array([0.673, 0.607, 0.733, 1.029])
+    # (b) energy decomposition from equilibrium configurations
+    Pl = ["0.012", "0.28", "1.0"]
+    dr = wr["mace_d3_decomposition"]; dm = wm["mace_d3_decomposition"]
+    x = np.arange(3); w = 0.36
+    r_mace = [-z["mean_u_mace_per_mol_kJ_mol"] for z in dr]
+    m_mace = [-z["mean_u_mace_per_mol_kJ_mol"] for z in dm]
+    m_d3 = [-z["mean_u_d3_per_mol_kJ_mol"] for z in dm]
+    b.bar(x - w / 2, r_mace, w, color=C["auto"], alpha=0.88, label="r2SCAN: MACE")
+    b.bar(x + w / 2, m_mace, w, color="#E8A39B", label="MP0+D3: MACE part")
+    b.bar(x + w / 2, m_d3, w, bottom=m_mace, color=C["mp0d3"], label="MP0+D3: D3 part")
+    for i in range(3):
+        tot = m_mace[i] + m_d3[i]
+        b.text(x[i] + w / 2, tot + 0.8, f"{tot:.1f}\n(D3 {100 * m_d3[i] / tot:.0f}%)", ha="center", fontsize=7.0)
+        nb = dr[i]["per_box"]
+        lab = f"{r_mace[i]:.1f}" + ("\n(N=1)" if sum(bb["N"] for bb in nb) <= 1 else "")
+        b.text(x[i] - w / 2, r_mace[i] + 0.8, lab, ha="center", fontsize=7.0)
+    b.set_xticks(x); b.set_xticklabels([p + " bar" for p in Pl])
+    b.set_ylim(0, 64)
+    b.set_ylabel(r"$-\langle U\rangle/N$ in equilibrium (kJ mol$^{-1}$)")
+    b.set_title("Where the binding energy comes from", loc="left")
+    b.legend(loc="upper center", fontsize=6.6, ncol=3, handlelength=1.0, columnspacing=0.8)
+    panel_label(b, "b")
 
-    l1 = axB.plot(ks, accs, "-o", color="#1D4ED8", lw=2.1, ms=7, label="Outer Acceptance (%)")
-    axB.set_xlabel("Inner GPU-CBMC Steps per Outer MLIP Call (k_steps)")
-    axB.set_ylabel("Outer Acceptance (%)", color="#1D4ED8")
-    axB.tick_params(axis="y", labelcolor="#1D4ED8")
-    axB.set_ylim(0, 82)
-    axB.axvline(16, color="#047857", ls="--", lw=1.4)
-    axB.text(16.4, 72, "Selected k=16\n(~32-40% acc)", fontsize=8.2, fontweight="bold", color="#047857")
+    # (c) k_steps
+    ks = s["kstep_sweep_mgmof74_0p28"]
+    kk = np.array(ks["k_steps"]); acc = np.array(ks["outer_acc_pct"]); esjd = np.array(ks["esjd_N"])
+    c.plot(kk, acc, "o-", color=C["auto"], lw=1.4, ms=5, label="outer acceptance")
+    c.set_xlabel("Inner moves per outer MLIP call, k"); c.set_ylabel("Outer acceptance (%)", color=C["auto"])
+    c.tick_params(axis="y", colors=C["auto"])
+    c.set_ylim(0, 80)
+    c2 = c.twinx(); c2.spines["right"].set_visible(True); c2.spines["top"].set_visible(False)
+    c2.plot(kk, esjd, "s--", color=C["mercado"], lw=1.4, ms=5, label="ESJD$_N$")
+    c2.set_ylabel("ESJD$_N$ (molecules$^2$ per cycle)", color=C["mercado"]); c2.tick_params(axis="y", colors=C["mercado"])
+    c2.set_ylim(0.10, 0.30)
+    c.axvline(ks["selected"], color="#6B7280", lw=0.9, ls=":")
+    c.text(ks["selected"] + 0.4, 74, f"k = {ks['selected']} used", fontsize=7.4, color=C["muted"])
+    h1, l1 = c.get_legend_handles_labels(); h2, l2 = c2.get_legend_handles_labels()
+    c.legend(h1 + h2, l1 + l2, loc="lower left", fontsize=7.2)
+    c.set_title("Calibrating the inner burst length", loc="left")
+    panel_label(c, "c")
 
-    axB2 = axB.twinx()
-    axB2.spines["top"].set_visible(False)
-    axB2.grid(False)
-    l2 = axB2.plot(ks, esjd, "--s", color="#D97706", lw=1.9, ms=6.5, label="ESJD_N")
-    l3 = axB2.plot(ks, ess_s * 0.25, ":^", color="#DC2626", lw=1.9, ms=6.5, label="0.25 * ESS_N/s")
-    axB2.set_ylabel("ESJD_N / Scaled ESS_N per s", color="#B45309")
-    axB2.tick_params(axis="y", labelcolor="#B45309")
-    axB2.set_ylim(0.10, 0.34)
-    lines = l1 + l2 + l3
-    axB.legend(lines, [l.get_label() for l in lines], loc="lower left", frameon=True, fontsize=7.8)
-    axB.set_title("B. Inner-Burst Calibration (k_steps) & 1x1x2 vs 1x1x4 Finite-Size")
+    # (d) multi-GPU
+    p1 = s["runs"]["phase3_scale_1gpu_pressure"]["total_wall_s"]; p4 = s["runs"]["phase3_scale_4gpu_pressure"]["total_wall_s"]
+    r1w = s["runs"]["phase3_scale_1gpu_replica"]["total_wall_s"]; r4w = s["runs"]["phase3_scale_4gpu_replica"]["total_wall_s"]
+    r1 = s["runs"]["phase3_scale_1gpu_replica"]["points"][0]["elapsed_s"]; r4 = s["runs"]["phase3_scale_4gpu_replica"]["points"][0]["elapsed_s"]
+    cats = ["pressure queue\nend-to-end", "replica sharding\nend-to-end", "replica sharding\nMC only"]
+    one = [p1, r1w, r1]; four = [p4, r4w, r4]
+    x = np.arange(3); w = 0.36
+    d.bar(x - w / 2, one, w, color="#9CA3AF", label="1 \u00d7 RTX 3090")
+    d.bar(x + w / 2, four, w, color="#0F766E", label="4 \u00d7 RTX 3090")
+    for i in range(3):
+        d.text(x[i] - w / 2, one[i] + 2, f"{one[i]:.0f}", ha="center", fontsize=7.4)
+        d.text(x[i] + w / 2, four[i] + 2, f"{four[i]:.0f}\n{one[i] / four[i]:.2f}\u00d7", ha="center", fontsize=7.4, color="#0F766E")
+    d.set_xticks(x); d.set_xticklabels(cats, fontsize=8)
+    d.set_ylabel("Time (s)"); d.set_ylim(0, 150)
+    d.set_title("Multi-GPU throughput (60 + 200 cycles)", loc="left")
+    d.legend(loc="upper right", fontsize=7.4)
+    panel_label(d, "d")
 
-    # Finite-size note box inside B
-    fs = w_r2["finite_size_check"]
-    fs_txt = "1x1x2 vs 1x1x4 Max |dU/N|:\n" + "\n".join(
-        [f"  {item['P_bar']} bar: {item['max_abs_diff_kJ_mol']:.2e} kJ/mol" for item in fs]
-    )
-    axB.text(13.8, 12.0, fs_txt, fontsize=7.6, bbox=dict(boxstyle="round,pad=0.3", facecolor="#F8FAFC", edgecolor="#CBD5E1"))
+    # (e) convergence audit
+    prod = [("exp1_auto_mlip_r2scan_nod3", "Mg-MOF-74 r2SCAN", "D", C["auto"]),
+            ("exp1_auto_mlip_r2scan_nod3_highload_0p28", "Mg-MOF-74 r2SCAN", "D", C["auto"]),
+            ("exp1_mp0_nod3_0p28", "Mg-MOF-74 MP0", "P", C["mp0"]),
+            ("exp1_auto_mlip_mp0_d3", "Mg-MOF-74 MP0+D3", "v", C["mp0d3"]),
+            ("exp2_nimof74_co2", "Ni-MOF-74", "s", "#0F766E"),
+            ("exp2_cubtc_co2", "Cu-BTC", "^", C["mercado"]),
+            ("exp2_irmof1_co2", "IRMOF-1 CO$_2$", "o", "#6D28D9"),
+            ("exp2_irmof1_co2_5bar", "IRMOF-1 CO$_2$", "o", "#6D28D9"),
+            ("exp2_irmof1_ch4_mp0d3", "IRMOF-1 CH$_4$", "h", "#9D174D")]
+    seen = set()
+    n_pass = n_tot = 0
+    for key, lab, mk, col in prod:
+        for p in s["runs"][key]["points"]:
+            if key == "exp2_irmof1_co2" and abs(p["P_bar"] - 5.0) < 1e-6:
+                continue  # superseded by exp2_irmof1_co2_5bar
+            if p["diag_status"] == "insufficient":
+                continue
+            ess = max(p["N_ess_bulk"], 1.0); rh = max(p["N_rhat_max"] - 1.0, 1e-4)
+            ok = p["diag_status"] == "pass"
+            n_tot += 1; n_pass += int(ok)
+            e.plot(ess, rh, mk, color=col, ms=6.2, mfc=col if ok else "white", mew=1.2, ls="none",
+                   label=lab if lab not in seen else None)
+            seen.add(lab)
+    e.axvline(400, color="#B91C1C", lw=0.8, ls="--"); e.axhline(0.01, color="#B91C1C", lw=0.8, ls="--")
+    e.fill_between([400, 5000], 1e-4, 0.01, color="#DCFCE7", alpha=0.6, lw=0)
+    e.text(4500, 1.4e-4, "gate region", fontsize=7.0, color=C["pass"], ha="right")
+    e.set_xscale("log"); e.set_yscale("log")
+    e.set_xlim(3, 5000); e.set_ylim(1e-4, 1.5)
+    e.set_xlabel("Bulk ESS of N (4 chains)"); e.set_ylabel("$\\hat{R}$ \u2212 1 for N")
+    e.set_title(f"Convergence of production points ({n_pass}/{n_tot} pass all gates)", loc="left")
+    e.legend(loc="upper right", fontsize=6.6, ncol=1)
+    e.text(0.02, 0.03, "filled: all gates passed\n(N, U, OMS, MCSE, drift)", transform=e.transAxes, fontsize=6.6, color=C["muted"])
+    panel_label(e, "e")
 
-    # Panel C: Multi-GPU Scaling (1x vs 4x RTX 3090)
-    s1p = summary["runs"]["phase3_scale_1gpu_pressure"]["total_wall_s"]
-    s4p = summary["runs"]["phase3_scale_4gpu_pressure"]["total_wall_s"]
-    s1r_wall = summary["runs"]["phase3_scale_1gpu_replica"]["total_wall_s"]
-    s4r_wall = summary["runs"]["phase3_scale_4gpu_replica"]["total_wall_s"]
-    s1r_mc = summary["runs"]["phase3_scale_1gpu_replica"]["points"][0]["elapsed_s"]
-    s4r_mc = summary["runs"]["phase3_scale_4gpu_replica"]["points"][0]["elapsed_s"]
-
-    cats = ["Pressure Queue\n(4P End-to-End)", "Replica Parallel\n(8 Box End-to-End)", "Replica Parallel\n(Pure MC Kernel)"]
-    t_1gpu = [s1p, s1r_wall, s1r_mc]
-    t_4gpu = [s4p, s4r_wall, s4r_mc]
-    x_c = np.arange(len(cats))
-    w_c = 0.34
-    b_1 = axC.bar(x_c - w_c/2, t_1gpu, width=w_c, color="#64748B", label="1x RTX 3090")
-    b_4 = axC.bar(x_c + w_c/2, t_4gpu, width=w_c, color="#0F766E", label="4x RTX 3090")
-    for i, (t1, t4) in enumerate(zip(t_1gpu, t_4gpu)):
-        sp = t1 / t4
-        axC.text(x_c[i] - w_c/2, t1 + 2.5, f"{t1:.1f}s", ha="center", va="bottom", fontsize=8.3, fontweight="bold")
-        axC.text(x_c[i] + w_c/2, t4 + 2.5, f"{t4:.1f}s\n({sp:.2f}x)", ha="center", va="bottom", fontsize=8.3, fontweight="bold", color="#0F766E")
-    axC.set_xticks(x_c)
-    axC.set_xticklabels(cats, fontsize=8.7)
-    axC.set_ylabel("Wall Time (s)")
-    axC.set_title("C. Multi-GPU Scaling Across 4x RTX 3090 (Mg-MOF-74 r2SCAN)")
-    axC.set_ylim(0, 155)
-    axC.legend(loc="upper right", frameon=True)
-
-    # Panel D: Honest Convergence Audit Across Production Runs
-    audit_rows = [
-        ("Mg-MOF-74 (r2SCAN 0.012)", summary["runs"]["exp1_auto_mlip_r2scan_nod3"]["points"][0]),
-        ("Mg-MOF-74 (r2SCAN 0.28)", summary["runs"]["exp1_auto_mlip_r2scan_nod3"]["points"][1]),
-        ("Mg-MOF-74 (r2SCAN 1.0)", summary["runs"]["exp1_auto_mlip_r2scan_nod3"]["points"][2]),
-        ("Mg-MOF-74 (MP0 NoD3 0.28)", summary["runs"]["exp1_mp0_nod3_0p28"]["points"][0]),
-        ("Ni-MOF-74 (r2SCAN 0.28)", summary["runs"]["exp2_nimof74_co2"]["points"][1]),
-        ("Ni-MOF-74 (r2SCAN 1.0)", summary["runs"]["exp2_nimof74_co2"]["points"][2]),
-        ("Cu-BTC (r2SCAN 0.15)", summary["runs"]["exp2_cubtc_co2"]["points"][0]),
-        ("Cu-BTC (r2SCAN 1.0)", summary["runs"]["exp2_cubtc_co2"]["points"][1]),
-        ("IRMOF-1 CO2 (r2SCAN 1.0)", summary["runs"]["exp2_irmof1_co2"]["points"][0]),
-        ("IRMOF-1 CH4 (MP0+D3 1.0)", summary["runs"]["exp2_irmof1_ch4_mp0d3"]["points"][0]),
+    # (f) consistency checks
+    def pt_at(key, P):
+        return [p for p in s["runs"][key]["points"] if abs(p["P_bar"] - P) < 1e-6][0]
+    rowsf = [
+        ("Mg-MOF-74 0.28 bar, empty start (\u0394\u03b5 = 0.58)", pt_at("exp1_auto_mlip_r2scan_nod3", 0.28), C["auto"]),
+        ("Mg-MOF-74 0.28 bar, loaded start (\u0394\u03b5 = 0.39)", pt_at("exp1_auto_mlip_r2scan_nod3_highload_0p28", 0.28), C["hl"]),
+        None,
+        ("IRMOF-1 5 bar, \u0394\u03b5 = 2.50 kJ/mol", pt_at("exp2_irmof1_co2_5bar", 5.0), "#6D28D9"),
+        ("IRMOF-1 5 bar, \u0394\u03b5 = 0.00 kJ/mol (LOG)", {"uptake_mmol_g": 3.8506, "uptake_sem_mmol_g": 0.2123}, "#A78BFA"),
+        ("IRMOF-1 5 bar, \u0394\u03b5 = 10.53 kJ/mol (stalled)", pt_at("exp2_irmof1_co2", 5.0), "#D1D5DB"),
+        None,
+        ("Mg-MOF-74 0.28 bar short run, 1 GPU (8 boxes)", pt_at("phase3_scale_1gpu_replica", 0.28), "#6B7280"),
+        ("Mg-MOF-74 0.28 bar short run, 4 GPUs (2 boxes each)", pt_at("phase3_scale_4gpu_replica", 0.28), "#0F766E"),
     ]
-    y_d = np.arange(len(audit_rows))
-    rhats = [pt["N_rhat_max"] for _, pt in audit_rows]
-    esss = [pt["N_ess_bulk"] for _, pt in audit_rows]
-    passes = [pt["diag_status"] == "pass" for _, pt in audit_rows]
-    bar_cols = ["#16A34A" if p else "#F59E0B" for p in passes]
+    yy = 0
+    for r in rowsf:
+        if r is None:
+            yy -= 0.5
+            continue
+        lab, p, col = r
+        f.errorbar(p["uptake_mmol_g"], yy, xerr=2 * p["uptake_sem_mmol_g"], fmt="o", color=col, ms=5.2, capsize=2.5, lw=1.2)
+        f.text(0.25, yy + 0.30, lab, fontsize=6.9, color=C["ink"], va="bottom")
+        f.text(p["uptake_mmol_g"] + 2 * p["uptake_sem_mmol_g"] + 0.12, yy, f"{p['uptake_mmol_g']:.2f}", fontsize=6.6,
+               va="center", color=col if col != "#D1D5DB" else C["muted"])
+        yy -= 1.15
+    f.set_yticks([]); f.spines["left"].set_visible(False)
+    f.set_ylim(yy + 0.6, 0.9)
+    f.set_xlabel("Uptake (mmol g$^{-1}$), bars: \u00b12 s.e.")
+    f.set_xlim(0.2, 7.6)
+    f.set_title("Internal consistency checks", loc="left")
+    panel_label(f, "f", x=-0.06)
 
-    axD.barh(y_d, esss, color=bar_cols, edgecolor="#1E293B", linewidth=0.7, height=0.66)
-    axD.axvline(400, color="#DC2626", ls="--", lw=1.6, label="Gate: ESS_bulk >= 400 (100/chain)")
-    for i, (rh, es, ok) in enumerate(zip(rhats, esss, passes)):
-        tag = f"ESS={es:.0f}, Rhat={rh:.4f} [{'PASS' if ok else 'PARTIAL'}]"
-        axD.text(es + 38, i, tag, va="center", ha="left", fontsize=7.5, fontweight="bold",
-                 color="#166534" if ok else "#92400E")
-    axD.set_yticks(y_d)
-    axD.set_yticklabels([lbl for lbl, _ in audit_rows], fontsize=8.0)
-    axD.invert_yaxis()
-    axD.set_xlabel("Rank-Normalized Bulk ESS (N)")
-    axD.set_title("D. Honest Convergence Audit (Split-Rhat & Bulk ESS)")
-    axD.set_xlim(0, 3550)
-    axD.legend(loc="lower right", frameon=True, fontsize=8.0)
-
-    fig.tight_layout()
-    out = ASSETS_DIR / "fig3_physics_widom_scaling.png"
-    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(OUT / "fig4_exp3_physics_scaling.png", bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print("Saved", out)
+    print("saved fig4_exp3_physics_scaling.png")
 
 
 def main():
-    summary = json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
-    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-    plot_architecture(summary)
-    plot_fig1(summary)
-    plot_fig2(summary)
-    plot_fig3(summary)
+    s = json.loads(SUMMARY.read_text(encoding="utf-8"))
+    OUT.mkdir(parents=True, exist_ok=True)
+    fig_architecture(s)
+    fig_exp1(s)
+    fig_exp2(s)
+    fig_exp3(s)
 
 
 if __name__ == "__main__":

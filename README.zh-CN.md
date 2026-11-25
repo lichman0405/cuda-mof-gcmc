@@ -3,62 +3,56 @@
 # `cuda-mof-gcmc`
 
 ![CUDA C++](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?style=flat-square&logo=nvidia)
-![Multi-GPU Verified](https://img.shields.io/badge/Multi--GPU-sm__86%20%2F%20sm__120-2563EB?style=flat-square)
+![Multi-GPU](https://img.shields.io/badge/Multi--GPU-sm__86%20%2F%20sm__120-2563EB?style=flat-square)
 ![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
 
-面向 **Windows（RTX 5070 `sm_120`）与多卡 Linux（RTX 3090 `sm_86`）** 的纯 CUDA/C++17 **任意刚性 MOF** 气体吸附 GCMC 引擎。项目集成了两大核心能力：**（1）通过 `RASPA3` 对标验证的 GPU 经典及多体全自洽极化（`Pol-SCF`）求解器**；**（2）零手工力场 `Auto-MLIP`（在线 `1B+2B` 自蒸馏 + 128 线程块并行 CUDA Rosenbluth GPU-CBMC）与批处理机器学习势（`MACE + TorchDFTD3`）直连、支持多卡并行的精确嵌套蒙特卡洛（Nested MC）引擎**。
+刚性 MOF 气体吸附的 CUDA/C++17 GCMC 引擎，支持 Windows（RTX 5070，`sm_120`）和多卡 Linux（RTX 3090，`sm_86`）。项目包含两部分：
 
----
+1. 经典与全自洽极化（`Pol-SCF`）GCMC 求解器，已与 `RASPA3` 对标，详见[经典基准文档](docs/CLASSICAL_VALIDATION.zh-CN.md)。
+2. 以机器学习势（MACE，可选 D3）为目标的嵌套蒙特卡洛引擎。参考势从目标 MLIP 在线蒸馏得到，不需要手工力场；内层在 GPU 上做 128 路 Rosenbluth 构型偏倚移动，外层做批量 MLIP 评估和精确 Metropolis 修正。方法与结果见[技术报告](docs/TECHNICAL_REPORT.zh-CN.md)。
 
-## 核心技术成果摘要（详见 [中文技术报告](docs/TECHNICAL_REPORT.zh-CN.md)）
+![方法示意](assets/fig1_architecture.png)
 
-![Auto-MLIP + GPU-CBMC Nested MC 架构图](assets/architecture_auto_mlip_cbmc.png)
+## 主要结果
 
-- **在线 `1B+2B` 自蒸馏 + 128 线程块并行 GPU-CBMC（零手工原子型力场）**：自动从 `1,200` 个单分子与 `192` 个孔内二聚体 MLIP 采样中蒸馏环境感知 `1B` 网格（15% 留出集 $R^2 = \mathbf{0.985\text{–}0.991}$，MAE `1.27–2.29 kJ/mol`）与孔道 `2B` LUT（MAE `0.10–1.65 kJ/mol`，单次 `52.8–209.5 s` SHA-256 缓存复用）。
-- **`Mg-MOF-74 + CO₂ @ 298 K` 方法学压测与实验对齐**：
-  ![Mg-MOF-74 方法对比与双向收敛](assets/fig1_mgmof74_method_comparison.png)
-  - 相比 `Direct MLIP-GCMC`（插入接收率 `3.65%`），`Auto-MLIP + CBMC`（`k=16`）将 `0.28 bar` **插入接收率提升 `15.8×`（`57.5%`）**、$\text{ESJD}_N$ 提升 **`8.0×`**（`0.1314` vs `0.0164`），`dN_moves/s` 提升 **`2.6×`**；
-  - `empty` 与 `high_loading` 双向初始化收敛至 **`6.322 ± 0.233`** 与 **`6.314 ± 0.171 mmol/g`**（差异仅 **`0.0074 mmol/g / 0.12%`**）；在 `1.0 bar`（`r2SCAN No-D3`）实测 **`8.148 ± 0.025 mmol/g`**，与 NIST 实验值 `8.170 mmol/g` 仅差 **`0.26%`**。
-- **跨 MOF / 跨客体迁移与基础模型物理诊断**：横跨 **`Mg-MOF-74`、`Ni-MOF-74`、`Cu-BTC`、`IRMOF-1`** 四种骨架与 **`CO₂ / CH₄`** 双客体，配合 **Widom 插入** 揭示了 `MP0+D3` 因 `D3(BJ)` 贡献 `51%–57%` 吸引能导致的过结合机制，以及 `mace-matpes-r2scan-0` 在 `IRMOF-1 + CH₄` 的分布外吸引伪影。
-- **`4× RTX 3090` 并行可扩展性**：`replica` 分片模式实测纯 MC 核加速比 **`3.26×`**（`51.10 s → 15.69 s`，并行效率 **`81.4%`**；含多进程权重加载端到端 `1.90×`）；`pressure` 队列模式端到端 **`2.19×`**（`131.23 s → 59.79 s`）。
-- **经典与 `Pol-SCF` 基线**（见 [经典基准校验](docs/CLASSICAL_VALIDATION.zh-CN.md)）：`Mg-MOF-74` 对比单核 `RASPA3 3.0.29` Tricubic 误差 `≤ 0.54σ`，经典核吞吐达 `598,669 MC-steps/s`（`153.2×`），`Pol-SCF` 与精确 `36×36` 矩阵求逆偏差 `1.83e-08 K`。
+以下数字均来自[技术报告](docs/TECHNICAL_REPORT.zh-CN.md)与 [`docs/results/phase2_phase3_summary.json`](docs/results/phase2_phase3_summary.json)。
 
----
+- **代理势构建**：每个（框架、客体、MLIP）组合用 1,200 个单分子构型和 192 个孔内二聚体拟合，单卡耗时 56–210 s。在生产使用的 7 个缓存上，1B 项 15% 留出集 R² 为 0.975–0.990，MAE 为 1.27–2.44 kJ/mol。
+- **采样效率（Mg-MOF-74 + CO₂，0.28 bar，同一目标势 r2SCAN）**：直接 MLIP-GCMC 运行 300 s 后箱平均吸附量约 1.8 mmol/g；UFF 提议器外层接受率 2.9%；本方法从空箱和预装载两个方向分别收敛到 6.32 ± 0.23 和 6.31 ± 0.17 mmol/g，效率与专门拟合的 Mercado-2016 力场相当。
+- **与实验比较**：吻合程度主要由目标 MLIP 决定。r2SCAN 在 Mg-MOF-74 1 bar（8.15 vs. 实验 7.02–8.16 mmol/g）和 IRMOF-1 5 bar（3.74 vs. 4.70）附近接近实验，但在 Mg-MOF-74 0.012 bar 低估 8–14 倍，对 Ni-MOF-74、Cu-BTC 低估约一个数量级；MP0+D3 在 Mg-MOF-74 上高估约 2.4 倍，其结合能中 51%–57% 来自 D3。
+- **收敛性**：16 个生产压力点中 6 个通过全部判据（$\hat{R}<1.01$、ESS ≥ 400 等）；未通过的点（主要是等温线陡峭段和高装载）在报告中逐一列出。
+- **多卡**：4 张 RTX 3090 上，副本分片的纯 MC 时间加速 3.26 倍，压力队列端到端加速 2.19 倍。
+- **经典与 `Pol-SCF` 基线**：Mg-MOF-74 与单核 `RASPA3 3.0.29` Tricubic 结果偏差 ≤ 0.54σ；经典内核 598,669 MC-steps/s；`Pol-SCF` 与 36×36 精确矩阵求逆偏差 1.83×10⁻⁸ K。
 
-## 核心架构模块
+![实验一：Mg-MOF-74 + CO₂](assets/fig2_exp1_mgmof74.png)
 
-1. **通用晶体与多位点刚体客体前处理**（[`scripts/qeq_charges.py`](scripts/qeq_charges.py)、[`scripts/guests.py`](scripts/guests.py)）：由 ASE 展开全部 `230` 个空间群，利用 `spacegroup_kinds` 保留 CIF 电荷与原子标签，无电荷骨架自动计算带介电屏蔽（`eps_eff = 1.50`）的周期性 Ewald QEq；客体支持最多 `12` 个位点及 Peng–Robinson 状态方程逸度。
-2. **在线 `1B+2B` MLIP 自蒸馏与零 I/O CUDA CBMC 提议器**（[`scripts/mlip_distill.py`](scripts/mlip_distill.py)、[`src/proposer_dll.cu`](src/proposer_dll.cu)、[`include/proposer_api.h`](include/proposer_api.h)）：在 GPU 显存驻留 `O(h^4)` Tricubic 网格与 `2B` LUT，Block 内 128 线程并发 Rosenbluth 试探推进内层可逆 GCMC。
-3. **精确 Nested MC、严格统计审计与多卡调度**（[`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py)、[`scripts/mcmc_diagnostics.py`](scripts/mcmc_diagnostics.py)、[`scripts/multi_gpu.py`](scripts/multi_gpu.py)）：`FastMaceD3Target` 结合中位数 $\Delta\varepsilon$ 校准、rank-normalized split/folded $\hat{R}$、bulk/tail ESS、独立涨落 $Q_{\text{st}}$ 估计、SHA-256 断点续跑（[`scripts/run_metadata.py`](scripts/run_metadata.py)）以及 `pressure` / `replica` 多卡扩展。
+## 代码结构
 
----
+1. **结构与客体前处理**（[`scripts/qeq_charges.py`](scripts/qeq_charges.py)、[`scripts/guests.py`](scripts/guests.py)）：ASE 展开任意空间群并保留 CIF 电荷；无电荷框架使用带屏蔽的周期性 Ewald QEq；刚性客体最多 12 个位点，逸度由 Peng–Robinson 方程计算。
+2. **代理势蒸馏与 GPU 提议器**（[`scripts/mlip_distill.py`](scripts/mlip_distill.py)、[`src/proposer_dll.cu`](src/proposer_dll.cu)、[`include/proposer_api.h`](include/proposer_api.h)）：1B 三维网格与 2B 残差表驻留显存，每个线程块对应一个模拟箱，通过 C ABI 与 Python 零拷贝交换构型。
+3. **嵌套 MC、收敛诊断与多卡调度**（[`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py)、[`scripts/mcmc_diagnostics.py`](scripts/mcmc_diagnostics.py)、[`scripts/multi_gpu.py`](scripts/multi_gpu.py)、[`scripts/run_metadata.py`](scripts/run_metadata.py)）：批量 MACE/D3 评估、Δε 校准、rank-normalized $\hat{R}$ 与 bulk/tail ESS、带 SHA-256 元数据校验的断点续跑，以及 `pressure` / `replica` 两种多卡模式。
 
-## 快速开始（Windows 与 Linux）
+## 快速开始
 
-### 一键检测、安装、编译与自检（`fast_start.bat` / `fast_start.sh`）
-
-- **Windows**：在仓库根目录执行 [`fast_start.bat`](fast_start.bat)（内部调用 [`scripts/fast_start_win.ps1`](scripts/fast_start_win.ps1)）：
+### 环境检测与编译
 
 ```powershell
-# 仅检查依赖状态
+# Windows：只检查依赖
 cmd /c fast_start.bat -CheckOnly
-
-# 自动补齐缺失依赖、调用 build.bat 编译并运行自检
+# Windows：补齐依赖、编译并自检
 cmd /c fast_start.bat
 ```
 
-- **Linux**：在仓库根目录执行 [`fast_start.sh`](fast_start.sh)：
-
 ```bash
+# Linux
 ./fast_start.sh --check-only
 ./fast_start.sh --gpu 0
 ```
 
-### `Auto-MLIP + GPU-CBMC` Nested MC 实跑命令（[`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py)）
+### 运行嵌套 MC（[`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py)）
 
 ```bash
-# Mg-MOF-74 + CO2 @ 298 K (r2SCAN No-D3, 128-trial GPU-CBMC, 多卡压力队列 + 断点续跑)
 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
   --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298 \
   --pressures 0.012 0.15 0.28 1.0 --proposer auto_mlip --cbmc-k 128 \
@@ -67,15 +61,24 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts
   --distill-cache-dir build/distill_cache --gpus 0 1 2 3 --parallel-mode auto \
   --checkpoint-dir build/ckpt_mg74 --checkpoint-every 200 --resume-mode extend \
   --out-json build/mgmof74_co2_r2scan.json
+```
 
-# Widom 零负载 Henry 常数与 MACE/D3 能量分解
+Widom 插入与能量分解：
+
+```bash
 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/widom_mlip.py \
   --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298 \
   --model mace-matpes-r2scan-0 --dispersion off --n-samples 6000 \
   --out-json build/widom_mgmof74_r2scan.json
 ```
 
-### 经典与 `Pol-SCF` CLI 回归校验
+重新生成报告中的图：
+
+```bash
+.venv-mlip/bin/python scripts/plot_phase4_figures.py
+```
+
+### 经典与 `Pol-SCF` 回归测试
 
 ```powershell
 .\build\mof_gcmc_cli.exe --test-scf
@@ -83,24 +86,23 @@ PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/widom_mlip.py \
 .\.venv-mlip\Scripts\python.exe -m pytest -v -m "not mlip"
 ```
 
----
+## 文档
 
-## 文档与目录导航
-
-- [**MLIP Nested MC 技术报告（中文）**](docs/TECHNICAL_REPORT.zh-CN.md) | [**Technical Report (EN)**](docs/TECHNICAL_REPORT.md)
-- [**经典与全自洽极化 CUDA 引擎基准校验**](docs/CLASSICAL_VALIDATION.zh-CN.md) | [**English**](docs/CLASSICAL_VALIDATION.md)
-- [**架构重构与阶段门禁方案**](PLAN.zh-CN.md) | [**结构化数据归档 JSON**](docs/results/phase2_phase3_summary.json)
+- [技术报告（中文）](docs/TECHNICAL_REPORT.zh-CN.md) · [Technical report (English)](docs/TECHNICAL_REPORT.md)
+- [经典与极化基准](docs/CLASSICAL_VALIDATION.zh-CN.md) · [English](docs/CLASSICAL_VALIDATION.md)
+- [设计方案与阶段门禁](PLAN.zh-CN.md)
+- [结果汇总 JSON](docs/results/phase2_phase3_summary.json)
 
 ```text
 cuda-mof-gcmc/
-├── fast_start.bat / .sh  # 一键环境检测、依赖安装、编译与自检入口
+├── fast_start.bat / .sh  # 环境检测、依赖安装、编译与自检
 ├── build.bat / .sh       # MSVC+CUDA / nvcc+g++ 编译脚本
-├── configs/              # mof_gcmc_cli 经典与 Pol-SCF 预设配置
-├── data/                 # MOF CIF 晶体、Mercado 力场与 NIST ISODB 实验等温线 CSV
-├── docs/                 # 中英文技术报告、经典验证文档及 docs/results/phase2_phase3_summary.json
-├── include/              # CUDA/C++17 头文件与零 I/O proposer C ABI (proposer_api.h)
-├── src/                  # GPU GCMC 与 128 线程块并行 GPU-CBMC 核源码 + src/legacy/
-├── scripts/              # run_mlip_gcmc, mlip_distill, widom_mlip, nested_mc_engine, multi_gpu, plot_phase4_figures
-├── tests/                # Pytest 回归测试集（含 test_phase1_distill_and_cbmc.py）
-└── assets/               # Phase 1–4 出版级图表与架构图
+├── configs/              # mof_gcmc_cli 预设（UFF、Mercado、烟道气、Pol-SCF）
+├── data/                 # CIF、Mercado 力场参数、实验等温线
+├── docs/                 # 技术报告、经典基准文档、results/
+├── include/              # CUDA/C++17 头文件与 proposer C ABI
+├── src/                  # CUDA 内核与驱动；src/legacy/ 为旧版
+├── scripts/              # run_mlip_gcmc、mlip_distill、widom_mlip、nested_mc_engine、multi_gpu、plot_phase4_figures 等
+├── tests/                # pytest 测试
+└── assets/               # 报告与文档中的图
 ```

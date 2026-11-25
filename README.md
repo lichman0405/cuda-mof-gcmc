@@ -3,57 +3,56 @@
 # `cuda-mof-gcmc`
 
 ![CUDA C++](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?style=flat-square&logo=nvidia)
-![Multi-GPU Verified](https://img.shields.io/badge/Multi--GPU-sm__86%20%2F%20sm__120-2563EB?style=flat-square)
+![Multi-GPU](https://img.shields.io/badge/Multi--GPU-sm__86%20%2F%20sm__120-2563EB?style=flat-square)
 ![RASPA3 Verified](https://img.shields.io/badge/RASPA3%203.0.29-%E2%89%A4%200.54%CF%83-0F766E?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=flat-square)
 
-A cross-platform GPU-native simulation engine for gas adsorption in **arbitrary rigid Metal–Organic Frameworks (MOFs)** (verified on **Windows RTX 5070** `sm_120` and **Linux RTX 3090** `sm_86`). It combines **(1) a `RASPA3`-validated CUDA classical and many-body self-consistent polarizable (`Pol-SCF`) GCMC solver** with **(2) a zero-manual-force-field `Auto-MLIP` (`1B+2B` online self-distillation + 128-thread block-parallel GPU Rosenbluth CBMC) Nested Monte Carlo engine** coupled directly via zero-I/O device pointers with batched `MACE + TorchDFTD3` and multi-GPU scaling.
+A CUDA/C++17 GCMC engine for gas adsorption in rigid MOFs, running on Windows (RTX 5070, `sm_120`) and multi-GPU Linux (RTX 3090, `sm_86`). It has two parts:
 
----
+1. A classical and fully self-consistent polarizable (`Pol-SCF`) GCMC solver, benchmarked against `RASPA3`; see the [classical validation](docs/CLASSICAL_VALIDATION.md).
+2. A nested Monte Carlo engine whose target is a machine-learned potential (MACE, optionally with D3). The reference potential is distilled online from the target MLIP, so no hand-built force field is needed; inner moves are 128-trial Rosenbluth configurational-bias moves on the GPU, and the outer step applies a batched MLIP evaluation with an exact Metropolis correction. Methods and results are in the [technical report](docs/TECHNICAL_REPORT.md).
 
-## Key Verified Results (See [Technical Report](docs/TECHNICAL_REPORT.md))
+![Method overview](assets/fig1_architecture.png)
 
-![Auto-MLIP + GPU-CBMC Nested MC Architecture](assets/architecture_auto_mlip_cbmc.png)
+## Main results
 
-- **Zero-Manual-Typing `1B+2B` Self-Distillation + Block-Parallel GPU-CBMC**: Distills environment-aware `1B` tricubic grids (15% holdout $R^2 = \mathbf{0.985\text{–}0.991}$, MAE `1.27–2.29 kJ/mol`) and in-pore `2B` pair LUTs (MAE `0.10–1.65 kJ/mol`) directly from MLIP samples in `52.8–209.5 s` with SHA-256 disk caching.
-- **`Mg-MOF-74 + CO₂ @ 298 K` Method Benchmark & Experimental Parity**:
-  ![Mg-MOF-74 Method Comparison](assets/fig1_mgmof74_method_comparison.png)
-  - Relative to `Direct MLIP-GCMC` (`3.65%` insertion acc), `Auto-MLIP + CBMC` (`k=16`) raises **insertion acceptance by `15.8×` (`57.5%`)**, **$\text{ESJD}_N$ by `8.0×`** (`0.1314` vs. `0.0164`), and **`dN_moves/s` by `2.6×`**;
-  - Bidirectional `empty` vs. `high_loading` initializations (`0.28 bar`) converge to **`6.322 ± 0.233`** and **`6.314 ± 0.171 mmol/g`** (**`0.0074 mmol/g` / `0.12%`** difference); at **`1.0 bar`**, `r2SCAN No-D3` yields **`8.148 ± 0.025 mmol/g`** (**`0.26%`** from NIST experimental `8.170 mmol/g`) with zero manual parameters.
-- **Cross-MOF / Cross-Guest Generalization & MLIP Physics Audit**: Tested across **`Mg-MOF-74`, `Ni-MOF-74`, `Cu-BTC`, `IRMOF-1`** and **`CO₂` / `CH₄`** alongside **Widom** Henry-regime checks, diagnosing `MP0+D3` overbinding (`51%–57%` binding from D3 `-22.2` to `-24.0 kJ/mol`) and `r2SCAN` OOD artifacts on `IRMOF-1 + CH₄`.
-- **`4× RTX 3090` Multi-GPU Scaling**: `replica` parallelization achieves **`3.26×` pure MC kernel speedup** (`51.10 s → 15.69 s`, **`81.4%`** efficiency; **`1.90×`** end-to-end with 4× MACE loads); `pressure` queue mode achieves **`2.19×`** end-to-end (`131.23 s → 59.79 s`).
-- **Classical & `Pol-SCF` Baseline** (see [Classical Validation](docs/CLASSICAL_VALIDATION.md)): Matches `RASPA3 3.0.29` Tricubic within `≤ 0.54σ` at **`598,669 MC-steps/s`** (`153.2×`) and matches exact `36×36` matrix inversion in `Pol-SCF` to **`1.83e-08 K`**.
+All numbers come from the [technical report](docs/TECHNICAL_REPORT.md) and [`docs/results/phase2_phase3_summary.json`](docs/results/phase2_phase3_summary.json).
 
----
+- **Surrogate construction.** Each (framework, guest, MLIP) combination is fitted to 1,200 single-guest poses and 192 in-pore dimers in 56–210 s on one GPU. Across the seven caches used in production, the 1B hold-out R² is 0.975–0.990 and the MAE 1.27–2.44 kJ/mol.
+- **Sampling efficiency (Mg-MOF-74 + CO₂, 0.28 bar, same r2SCAN target).** Direct MLIP-GCMC reaches a box-averaged uptake of about 1.8 mmol/g after 300 s; a UFF proposer gives 2.9% outer acceptance. Our sampler converges to 6.32 ± 0.23 and 6.31 ± 0.17 mmol/g from empty and preloaded starts, with an efficiency comparable to the system-specific Mercado-2016 force field.
+- **Comparison with experiment.** Agreement is set mainly by the target MLIP. r2SCAN is close to experiment for Mg-MOF-74 at 1 bar (8.15 vs. 7.02–8.16 mmol/g) and IRMOF-1 at 5 bar (3.74 vs. 4.70), but underestimates Mg-MOF-74 at 0.012 bar by 8–14× and Ni-MOF-74 and Cu-BTC by about an order of magnitude. MP0+D3 overestimates Mg-MOF-74 by about 2.4×, with 51%–57% of its binding energy from D3.
+- **Convergence.** Six of 16 production points pass all criteria ($\hat{R}<1.01$, ESS ≥ 400, etc.). Failures, mostly in the steep part of isotherms and at high loading, are listed individually in the report.
+- **Multi-GPU.** On four RTX 3090s, replica sharding speeds up the MC phase by 3.26× and a pressure queue speeds up end-to-end runs by 2.19×.
+- **Classical and `Pol-SCF` baseline.** Mg-MOF-74 matches single-core `RASPA3 3.0.29` tricubic results within ≤ 0.54σ; the classical kernel runs at 598,669 MC-steps/s; `Pol-SCF` matches exact 36×36 matrix inversion to 1.83×10⁻⁸ K.
 
-## Core Architecture Modules
+![Experiment 1: Mg-MOF-74 + CO₂](assets/fig2_exp1_mgmof74.png)
 
-1. **Universal MOF & Multi-Site Guest Preprocessing** ([`scripts/qeq_charges.py`](scripts/qeq_charges.py), [`scripts/guests.py`](scripts/guests.py)): Expands all 230 space groups via ASE (`spacegroup_kinds`), falls back to screened Ewald QEq (`eps_eff = 1.50`), and supports rigid guests up to `12` sites with Peng–Robinson EOS fugacities.
-2. **Online `1B+2B` Self-Distillation & Zero-I/O CUDA Proposer** ([`scripts/mlip_distill.py`](scripts/mlip_distill.py), [`src/proposer_dll.cu`](src/proposer_dll.cu), [`include/proposer_api.h`](include/proposer_api.h)): Evaluates `O(h^4)` 3D tricubic grids and `2B` pore LUTs in GPU memory with 128-thread block-parallel Rosenbluth CBMC.
-3. **Exact Nested MC, Strict Convergence Gates & Multi-GPU Orchestration** ([`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py), [`scripts/mcmc_diagnostics.py`](scripts/mcmc_diagnostics.py), [`scripts/multi_gpu.py`](scripts/multi_gpu.py)): Pairs `FastMaceD3Target` with median $\Delta\varepsilon$ calibration, split/folded rank-normalized $\hat{R}$, bulk/tail ESS, fluctuation $Q_{\text{st}}$, SHA-256 checkpointing ([`scripts/run_metadata.py`](scripts/run_metadata.py)), and `pressure`/`replica` multi-GPU scheduling.
+## Code layout
 
----
+1. **Framework and guest preprocessing** ([`scripts/qeq_charges.py`](scripts/qeq_charges.py), [`scripts/guests.py`](scripts/guests.py)): ASE expands any space group and keeps CIF charges; uncharged frameworks fall back to screened periodic Ewald QEq; rigid guests have up to 12 sites, with Peng–Robinson fugacities.
+2. **Surrogate distillation and GPU proposer** ([`scripts/mlip_distill.py`](scripts/mlip_distill.py), [`src/proposer_dll.cu`](src/proposer_dll.cu), [`include/proposer_api.h`](include/proposer_api.h)): the 1B grids and 2B table stay in device memory, one thread block per box, with zero-copy exchange to Python through a C ABI.
+3. **Nested MC, convergence diagnostics and multi-GPU scheduling** ([`scripts/nested_mc_engine.py`](scripts/nested_mc_engine.py), [`scripts/mcmc_diagnostics.py`](scripts/mcmc_diagnostics.py), [`scripts/multi_gpu.py`](scripts/multi_gpu.py), [`scripts/run_metadata.py`](scripts/run_metadata.py)): batched MACE/D3 evaluation, Δε calibration, rank-normalized $\hat{R}$ and bulk/tail ESS, checkpointing with SHA-256 metadata checks, and `pressure` / `replica` multi-GPU modes.
 
-## Quickstart (Windows & Linux)
+## Quickstart
 
-### One-Click Setup & Self-Check (`fast_start.bat` / `fast_start.sh`)
+### Environment check and build
 
 ```powershell
-# Windows: check prerequisites / auto-build + self-test
+# Windows: check prerequisites only
 cmd /c fast_start.bat -CheckOnly
+# Windows: install what is missing, build and self-test
 cmd /c fast_start.bat
 ```
 
 ```bash
-# Linux: check prerequisites / auto-setup .venv-mlip + build + self-test
+# Linux
 ./fast_start.sh --check-only
 ./fast_start.sh --gpu 0
 ```
 
-### `Auto-MLIP + GPU-CBMC` Nested MC CLI ([`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py))
+### Nested MC ([`scripts/run_mlip_gcmc.py`](scripts/run_mlip_gcmc.py))
 
 ```bash
-# Mg-MOF-74 + CO2 @ 298 K (r2SCAN No-D3, 128-trial GPU-CBMC, multi-GPU + checkpoint extend)
 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
   --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298 \
   --pressures 0.012 0.15 0.28 1.0 --proposer auto_mlip --cbmc-k 128 \
@@ -62,15 +61,24 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts
   --distill-cache-dir build/distill_cache --gpus 0 1 2 3 --parallel-mode auto \
   --checkpoint-dir build/ckpt_mg74 --checkpoint-every 200 --resume-mode extend \
   --out-json build/mgmof74_co2_r2scan.json
+```
 
-# Widom Henry constant & MACE vs. D3 energy decomposition
+Widom insertion and energy decomposition:
+
+```bash
 PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/widom_mlip.py \
   --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298 \
   --model mace-matpes-r2scan-0 --dispersion off --n-samples 6000 \
   --out-json build/widom_mgmof74_r2scan.json
 ```
 
-### Classical & `Pol-SCF` Verification
+Regenerate the report figures:
+
+```bash
+.venv-mlip/bin/python scripts/plot_phase4_figures.py
+```
+
+### Classical and `Pol-SCF` regression tests
 
 ```powershell
 .\build\mof_gcmc_cli.exe --test-scf
@@ -78,24 +86,23 @@ PYTHONPATH=scripts .venv-mlip/bin/python -u scripts/widom_mlip.py \
 .\.venv-mlip\Scripts\python.exe -m pytest -v -m "not mlip"
 ```
 
----
+## Documentation
 
-## Documentation & Layout
-
-- [**MLIP Nested MC Technical Report (EN)**](docs/TECHNICAL_REPORT.md) | [**中文技术报告**](docs/TECHNICAL_REPORT.zh-CN.md)
-- [**Classical & Polarizable Validation (EN)**](docs/CLASSICAL_VALIDATION.md) | [**中文**](docs/CLASSICAL_VALIDATION.zh-CN.md)
-- [**Architecture & Validation Plan (ZH)**](PLAN.zh-CN.md) | [**Verified Benchmark JSON Archive**](docs/results/phase2_phase3_summary.json)
+- [Technical report (English)](docs/TECHNICAL_REPORT.md) · [技术报告（中文）](docs/TECHNICAL_REPORT.zh-CN.md)
+- [Classical and polarizable validation](docs/CLASSICAL_VALIDATION.md) · [中文](docs/CLASSICAL_VALIDATION.zh-CN.md)
+- [Design plan and stage gates (Chinese)](PLAN.zh-CN.md)
+- [Result summary JSON](docs/results/phase2_phase3_summary.json)
 
 ```text
 cuda-mof-gcmc/
-├── fast_start.bat / .sh  # One-click check, dependency install, build & self-test
-├── build.bat / .sh       # MSVC+CUDA / nvcc+g++ build wrappers
-├── configs/              # JSON presets for mof_gcmc_cli (UFF, Mercado, Flue Gas, Pol-SCF)
-├── data/                 # MOF CIFs, Mercado FF & NIST ISODB experimental isotherm CSVs
-├── docs/                 # Technical reports, classical validation docs & results/phase2_phase3_summary.json
-├── include/              # CUDA/C++17 headers & zero-I/O proposer C ABI (proposer_api.h)
-├── src/                  # GPU GCMC & 128-thread block-parallel GPU-CBMC kernels + src/legacy/
-├── scripts/              # run_mlip_gcmc, mlip_distill, widom_mlip, nested_mc_engine, multi_gpu, plot_phase4_figures
-├── tests/                # Pytest regression & unit tests (incl. test_phase1_distill_and_cbmc.py)
-└── assets/               # Architecture diagram & publication validation figures
+├── fast_start.bat / .sh  # environment check, dependency install, build and self-test
+├── build.bat / .sh       # MSVC+CUDA / nvcc+g++ build scripts
+├── configs/              # mof_gcmc_cli presets (UFF, Mercado, flue gas, Pol-SCF)
+├── data/                 # CIFs, Mercado force-field files, experimental isotherms
+├── docs/                 # technical reports, classical validation, results/
+├── include/              # CUDA/C++17 headers and the proposer C ABI
+├── src/                  # CUDA kernels and drivers; src/legacy/ holds older versions
+├── scripts/              # run_mlip_gcmc, mlip_distill, widom_mlip, nested_mc_engine, multi_gpu, plot_phase4_figures, ...
+├── tests/                # pytest suite
+└── assets/               # figures used in the reports and docs
 ```
