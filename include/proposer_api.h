@@ -113,6 +113,9 @@ PROPOSER_API int proposer_set_accepted_quat(
     const double* in_cx, const double* in_cy, const double* in_cz,
     const double* in_qw, const double* in_qx, const double* in_qy, const double* in_qz);
 
+PROPOSER_API int proposer_get_rng_states(void* handle, uint64_t* out_rng_n);
+PROPOSER_API int proposer_set_rng_states(void* handle, const uint64_t* in_rng_n);
+
 PROPOSER_API double proposer_eval_energy_quat(
     void* handle, int N,
     const double* cx, const double* cy, const double* cz,

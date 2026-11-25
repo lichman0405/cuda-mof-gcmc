@@ -10,10 +10,10 @@ import time
 from typing import Callable, List, Optional, Sequence, Tuple
 import numpy as np
 
+from mcmc_diagnostics import compute_independent_qst, evaluate_v2_convergence
 from nested_mc_engine import (
     K_TO_KJMOL,
     compute_ess_stats,
-    compute_pooled_jackknife_qst,
 )
 
 
@@ -98,6 +98,7 @@ def _init_worker_target(run_cfg: dict, verify_first: bool = False):
         guest=run_cfg["guest"],
         mace_chunk=run_cfg["mace_chunk"],
         uc_atoms=run_cfg["fw_data"]["uc"],
+        dtype=run_cfg.get("dtype", "float32"),
     )
     return target
 
@@ -122,14 +123,17 @@ def merge_replica_shard_results(
 
     box_moments = [m for s in shards for m in s["box_moments"]]
     box_uptakes = np.array([u for s in shards for u in s["box_uptakes_mmol_g"]], dtype=np.float64)
-    box_qst = [float(q) for s in shards for q in s["box_qst_kJ_mol"]]
+    box_qst = [None if q is None else float(q) for s in shards for q in s.get("box_qst_kJ_mol", [])]
 
     mean_up = float(np.mean(box_uptakes))
     sem_up = float(np.std(box_uptakes, ddof=1) / math.sqrt(total_boxes)) if total_boxes > 1 else 0.0
-    per_box_mean_qst = float(np.mean(box_qst))
-    per_box_sem_qst = float(np.std(box_qst, ddof=1) / math.sqrt(total_boxes)) if total_boxes > 1 else 0.0
+    valid_box_qst = [q for q in box_qst if q is not None]
+    per_box_mean_qst = float(np.mean(valid_box_qst)) if valid_box_qst else None
+    per_box_sem_qst = (
+        float(np.std(valid_box_qst, ddof=1) / math.sqrt(len(valid_box_qst)))
+        if len(valid_box_qst) > 1 else (0.0 if len(valid_box_qst) == 1 else None)
+    )
 
-    jack = compute_pooled_jackknife_qst(box_moments, float(T_K))
     prod_denom = max(1, prod_cycles)
     box_molar_bind = []
     box_molar_qst = []
@@ -142,30 +146,55 @@ def merge_replica_shard_results(
     mean_mq = float(np.mean(box_molar_qst))
     sem_mq = float(np.std(box_molar_qst, ddof=1) / math.sqrt(total_boxes)) if total_boxes > 1 else 0.0
 
+    def _concat_cyc(key: str, cast_fn):
+        if not all(key in s and len(s[key]) == prod_cycles for s in shards):
+            return []
+        return [[cast_fn(x) for s in shards for x in s[key][cyc]] for cyc in range(prod_cycles)]
+
     box_N_history = [
         [int(x) for s in shards for x in s["box_N_history"][cyc]]
         for cyc in range(tot_cycles)
-    ]
-    prod_N_history = [
-        [int(x) for s in shards for x in s["prod_N_history"][cyc]]
-        for cyc in range(prod_cycles)
-    ]
-    prod_U_history = [
-        [float(x) for s in shards for x in s["prod_U_history"][cyc]]
-        for cyc in range(prod_cycles)
-    ]
+    ] if all("box_N_history" in s and len(s["box_N_history"]) == tot_cycles for s in shards) else []
+    prod_N_history = _concat_cyc("prod_N_history", int)
+    prod_U_history = _concat_cyc("prod_U_history", float)
+    prod_U_ref_history = _concat_cyc("prod_U_ref_history", float)
+    prod_accepted_history = _concat_cyc("prod_accepted_history", int)
+    prod_dN_history = _concat_cyc("prod_dN_history", int)
+    prod_proposed_dN_history = _concat_cyc("prod_proposed_dN_history", int)
+    prod_oms_occ_history = _concat_cyc("prod_oms_occ_history", int)
 
+    prod_ins_att = int(sum(int(s["prod_ins_att"]) for s in shards))
+    prod_ins_acc = int(sum(int(s["prod_ins_acc"]) for s in shards))
+    prod_del_att = int(sum(int(s["prod_del_att"]) for s in shards))
+    prod_del_acc = int(sum(int(s["prod_del_acc"]) for s in shards))
+
+    qst_res = compute_independent_qst(
+        prod_N_history, prod_U_history, T_K=float(T_K),
+        prod_ins_acc=prod_ins_acc, prod_del_acc=prod_del_acc,
+    )
     ess_stats = compute_ess_stats(prod_N_history, prod_U_history, dt)
 
-    hist = np.array(box_N_history, dtype=np.float64) * float(conv_mmol_g)
-    prod_hist = hist[eq_cycles:]
-    if prod_hist.shape[0] >= 2:
-        half = prod_hist.shape[0] // 2
-        mean_h1 = float(np.mean(prod_hist[:half]))
-        mean_h2 = float(np.mean(prod_hist[half:]))
+    ab_keys = (
+        "total_trials", "rejected", "acc_empty_to_empty", "acc_identity_nonempty",
+        "acc_same_N_changed", "acc_dN_changed", "nested_trials", "nested_accepted",
+        "direct_trials", "direct_accepted",
+    )
+    if all(isinstance(s.get("acceptance_breakdown"), dict) for s in shards):
+        ab = {k: int(sum(int(s["acceptance_breakdown"].get(k, 0)) for s in shards)) for k in ab_keys}
+        ab["effective_move_acc_rate"] = float(
+            (ab["acc_same_N_changed"] + ab["acc_dN_changed"]) / max(1, ab["total_trials"])
+        )
+    else:
+        ab = {}
+
+    hist = np.array(prod_N_history, dtype=np.float64) * float(conv_mmol_g)
+    if hist.ndim == 2 and hist.shape[0] >= 2:
+        half = hist.shape[0] // 2
+        mean_h1 = float(np.mean(hist[:half]))
+        mean_h2 = float(np.mean(hist[half:]))
         drift = abs(mean_h2 - mean_h1)
-    elif prod_hist.shape[0] == 1:
-        mean_h1 = float(np.mean(prod_hist))
+    elif hist.ndim == 2 and hist.shape[0] == 1:
+        mean_h1 = float(np.mean(hist))
         mean_h2 = mean_h1
         drift = 0.0
     else:
@@ -187,9 +216,14 @@ def merge_replica_shard_results(
         "uptake_mmol_g": mean_up,
         "uptake_sem_mmol_g": sem_up,
         "box_uptakes_mmol_g": box_uptakes.tolist(),
-        "Qst_estimator": "pooled_jackknife",
-        "Qst_kJ_mol": float(jack["Qst_kJ_mol"]),
-        "Qst_sem_kJ_mol": float(jack["Qst_sem_kJ_mol"]),
+        "Qst_estimator": "independent_fluctuation",
+        "Qst_kJ_mol": qst_res["qst_fluctuation_kJ_mol"],
+        "Qst_sem_kJ_mol": qst_res["qst_fluctuation_sem_kJ_mol"],
+        "qst_status": qst_res["qst_status"],
+        "qst_reasons": qst_res["qst_reasons"],
+        "qst_chain_jackknife_sem_kJ_mol": qst_res.get("qst_chain_jackknife_sem_kJ_mol"),
+        "qst_block_jackknife_sem_kJ_mol": qst_res.get("qst_block_jackknife_sem_kJ_mol"),
+        "per_chain_qst_kJ_mol": qst_res.get("per_chain_qst_kJ_mol", []),
         "Qst_per_box_mean_kJ_mol": per_box_mean_qst,
         "Qst_per_box_sem_kJ_mol": per_box_sem_qst,
         "box_qst_kJ_mol": box_qst,
@@ -208,15 +242,21 @@ def merge_replica_shard_results(
         "dN_moves_per_s": ess_stats["dN_moves_per_s"],
         "outer_acc_rate": _box_weighted_mean("outer_acc_rate"),
         "prod_outer_acc_rate": _box_weighted_mean("prod_outer_acc_rate"),
-        "prod_ins_att": int(sum(int(s["prod_ins_att"]) for s in shards)),
-        "prod_ins_acc": int(sum(int(s["prod_ins_acc"]) for s in shards)),
-        "prod_del_att": int(sum(int(s["prod_del_att"]) for s in shards)),
-        "prod_del_acc": int(sum(int(s["prod_del_acc"]) for s in shards)),
+        "prod_ins_att": prod_ins_att,
+        "prod_ins_acc": prod_ins_acc,
+        "prod_del_att": prod_del_att,
+        "prod_del_acc": prod_del_acc,
+        "acceptance_breakdown": ab,
         "mean_inner_acc_per_burst": _box_weighted_mean("mean_inner_acc_per_burst"),
         "effective_mc_steps_per_target_eval": _box_weighted_mean("effective_mc_steps_per_target_eval"),
         "box_N_history": box_N_history,
         "prod_N_history": prod_N_history,
         "prod_U_history": prod_U_history,
+        "prod_U_ref_history": prod_U_ref_history,
+        "prod_accepted_history": prod_accepted_history,
+        "prod_dN_history": prod_dN_history,
+        "prod_proposed_dN_history": prod_proposed_dN_history,
+        "prod_oms_occ_history": prod_oms_occ_history,
         "trajectory": [],
         "final_states": [fs for s in shards for fs in s["final_states"]],
         "P_bar": float(shards[0]["P_bar"]),
@@ -230,10 +270,27 @@ def merge_replica_shard_results(
         "total_inner_steps": int(sum(int(s["total_inner_steps"]) for s in shards)),
         "parallel_mode": "replica",
     }
-    if diagnostics_fn is None:
+    if "metadata" in shards[0]:
+        merged["metadata"] = shards[0]["metadata"]
+    if diagnostics_fn is not None:
+        merged["diagnostics"] = diagnostics_fn(merged)
+    else:
+        merged["diagnostics"] = evaluate_v2_convergence(
+            prod_N_history=prod_N_history,
+            prod_U_history_kJ=prod_U_history,
+            conv_mmol_g=float(conv_mmol_g),
+            T_K=float(T_K),
+            prod_ins_acc=prod_ins_acc,
+            prod_del_acc=prod_del_acc,
+            prod_ins_att=prod_ins_att,
+            prod_del_att=prod_del_att,
+            prod_outer_acc_rate=merged["prod_outer_acc_rate"],
+            uptake_sem_mmol_g=sem_up,
+            acceptance_breakdown=ab,
+            oms_occ_history=prod_oms_occ_history or None,
+        )
         from run_mlip_gcmc import evaluate_convergence_diagnostics
-        diagnostics_fn = evaluate_convergence_diagnostics
-    merged["diagnostics"] = diagnostics_fn(merged)
+        merged["legacy_diagnostics"] = evaluate_convergence_diagnostics(merged)
     return merged
 
 
@@ -279,6 +336,13 @@ def _pressure_worker_main(
                 shift_override=run_cfg["shift_override"],
                 verify_consistency=(worker_rank == 0 and not consistency_checked),
                 device_id=0,
+                init_mode=run_cfg.get("init_mode", "auto"),
+                init_loading=float(run_cfg.get("init_loading", 8.0)),
+                checkpoint_dir=run_cfg.get("checkpoint_dir", ""),
+                checkpoint_every=int(run_cfg.get("checkpoint_every", 0)),
+                resume_mode=run_cfg.get("resume_mode", "none"),
+                snapshot_stride=int(run_cfg.get("snapshot_stride", 0)),
+                run_metadata=run_cfg.get("run_metadata"),
             )
             consistency_checked = True
             pt["gpu_id"] = int(gpu_id)
@@ -335,6 +399,14 @@ def _replica_worker_main(
                 shift_override=run_cfg["shift_override"],
                 verify_consistency=(shard_rank == 0 and not consistency_checked),
                 device_id=0,
+                init_mode=run_cfg.get("init_mode", "auto"),
+                init_loading=float(run_cfg.get("init_loading", 8.0)),
+                checkpoint_dir=run_cfg.get("checkpoint_dir", ""),
+                checkpoint_every=int(run_cfg.get("checkpoint_every", 0)),
+                checkpoint_tag=f"shard{shard_rank}",
+                resume_mode=run_cfg.get("resume_mode", "none"),
+                snapshot_stride=int(run_cfg.get("snapshot_stride", 0)),
+                run_metadata=run_cfg.get("run_metadata"),
             )
             consistency_checked = True
             result_q.put(("ok", shard_rank, gpu_id, idx, pt))
@@ -459,12 +531,17 @@ def run_replicas_parallel(
             merged["point_wall_s"] = point_wall_s
             merged["gpu_ids"] = [gid for gid, _ in shard_plan]
             diag = merged["diagnostics"]
+            q_str = (
+                f"{merged['Qst_kJ_mol']:.2f} +- {merged['Qst_sem_kJ_mol']:.2f}"
+                if merged.get("Qst_kJ_mol") is not None and merged.get("Qst_sem_kJ_mol") is not None
+                else f"N/A ({merged.get('qst_status', 'unknown')})"
+            )
             print(
                 f"\n  [4xGPU Replica Merged P={p_bar:.4g} bar] "
                 f"Uptake={merged['uptake_mmol_g']:.4f} +- {merged['uptake_sem_mmol_g']:.4f} mmol/g | "
-                f"Fluc Qst={merged['Qst_kJ_mol']:.2f} +- {merged['Qst_sem_kJ_mol']:.2f} | "
+                f"Fluc Qst={q_str} | "
                 f"tauN={merged['tau_int_N']:.1f} ESS/s={merged['ess_N_per_s']:.2f} | "
-                f"mc_wall={mc_wall_s:.1f}s point_wall={point_wall_s:.1f}s | conv={diag['converged']}"
+                f"mc_wall={mc_wall_s:.1f}s point_wall={point_wall_s:.1f}s | diag={diag.get('status', 'unknown')}"
             )
             results.append(merged)
             if on_point_done is not None:

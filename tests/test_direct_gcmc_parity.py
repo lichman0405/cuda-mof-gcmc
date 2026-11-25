@@ -87,37 +87,85 @@ def test_direct_gcmc_classical_zero_bias_irmof1_ch4():
 
 @pytest.mark.mlip
 def test_serial_ase_vs_fast_mace_d3_parity():
-    """SerialAseMaceD3Target matches FastMaceD3Target on Mg-MOF-74 + CO2 within < 0.1 K."""
+    """Verify FP64 exact parity with SerialASE, FP32(node64) within |err(log_alpha)|<=0.01, and D3 switch identity."""
     cif = str(DATA / "MgMOF-74.cif")
     fw_data = extract_framework_for_proposer(cif, charge_mode="auto")
     guest = load_guest("co2_epm2")
+    T_K = 298.0
 
     prop = CudaGcmcProposer.from_atoms(
         fw_data=fw_data, guest=guest, supercell=(1, 1, 2),
-        T_K=298.0, pressure_bar=0.05, ff_mode=1, pol_mode=0,
+        T_K=T_K, pressure_bar=0.05, ff_mode=1, pol_mode=0,
         grid_dims=(128, 128, 48), n_boxes=1, max_mol=64, seed=20260911,
     )
     try:
         prop.equilibrate(5000)
-        st = prop.get_accepted_quat()[0]
-        assert st["N"] > 0
+        st_multi = prop.get_accepted_quat()[0]
+        assert st_multi["N"] > 0
     finally:
         prop.close()
 
-    fast = FastMaceD3Target(
-        cif_path=cif, supercell=(1, 1, 2), model="small",
-        device="cuda", dispersion=True, dispersion_xc="pbe",
-        guest=guest, uc_atoms=fw_data["uc"],
-    )
-    serial = SerialAseMaceD3Target(
-        uc_atoms=fw_data["uc"], supercell=(1, 1, 2), model="small",
-        device="cuda", dispersion=True, dispersion_xc="pbe", guest=guest,
-    )
-    u_fast, ov_f = fast(st)
-    u_ser, ov_s = serial(st)
-    assert not ov_f and not ov_s
-    diff_K = abs(u_fast - u_ser)
-    rel_diff = diff_K / max(1.0, abs(u_ser))
-    assert diff_K < 100.0 and rel_diff < 5e-3, (
-        f"MACE FP32 energy mismatch: fast={u_fast:.4f} K vs serial={u_ser:.4f} K (diff={diff_K:.2f} K, rel={rel_diff:.4e})"
-    )
+    st_empty = {
+        "N": 0, "cx": np.zeros(0), "cy": np.zeros(0), "cz": np.zeros(0),
+        "qw": np.ones(0), "qx": np.zeros(0), "qy": np.zeros(0), "qz": np.zeros(0),
+    }
+    st_single = {
+        "N": 1,
+        "cx": np.array([st_multi["cx"][0]], dtype=np.float64),
+        "cy": np.array([st_multi["cy"][0]], dtype=np.float64),
+        "cz": np.array([st_multi["cz"][0]], dtype=np.float64),
+        "qw": np.array([st_multi["qw"][0]], dtype=np.float64),
+        "qx": np.array([st_multi["qx"][0]], dtype=np.float64),
+        "qy": np.array([st_multi["qy"][0]], dtype=np.float64),
+        "qz": np.array([st_multi["qz"][0]], dtype=np.float64),
+    }
+    st_del = {
+        "N": st_multi["N"] - 1,
+        "cx": st_multi["cx"][1:].copy(), "cy": st_multi["cy"][1:].copy(), "cz": st_multi["cz"][1:].copy(),
+        "qw": st_multi["qw"][1:].copy(), "qx": st_multi["qx"][1:].copy(),
+        "qy": st_multi["qy"][1:].copy(), "qz": st_multi["qz"][1:].copy(),
+    }
+    test_states = [st_empty, st_single, st_multi, st_del]
+
+    comps64 = {}
+    for disp in (False, True):
+        fast64 = FastMaceD3Target(
+            cif_path=cif, supercell=(1, 1, 2), model="mace-matpes-r2scan-0",
+            device="cuda", dispersion=disp, dispersion_xc="r2scan",
+            guest=guest, uc_atoms=fw_data["uc"], dtype="float64",
+        )
+        serial64 = SerialAseMaceD3Target(
+            uc_atoms=fw_data["uc"], supercell=(1, 1, 2), model="mace-matpes-r2scan-0",
+            device="cuda", dispersion=disp, dispersion_xc="r2scan", guest=guest, dtype="float64",
+        )
+        fast32 = FastMaceD3Target(
+            cif_path=cif, supercell=(1, 1, 2), model="mace-matpes-r2scan-0",
+            device="cuda", dispersion=disp, dispersion_xc="r2scan",
+            guest=guest, uc_atoms=fw_data["uc"], dtype="float32",
+        )
+        u64_list = [fast64(s)[0] for s in test_states]
+        u32_list = [u for u, _ in fast32.eval_batch(test_states, mace_chunk=2)]
+        for idx, s in enumerate(test_states):
+            u_ser, ov_s = serial64(s)
+            assert not ov_s
+            assert abs(u64_list[idx] - u_ser) < 1e-3, (
+                f"FP64 parity mismatch (disp={disp}, N={s['N']}): fast={u64_list[idx]:.6f} vs ser={u_ser:.6f}"
+            )
+            err_log_alpha = abs(u32_list[idx] - u64_list[idx]) / T_K
+            assert err_log_alpha <= 0.01, (
+                f"FP32(node64) state log_alpha error exceeds 0.01 (disp={disp}, N={s['N']}): {err_log_alpha:.5f}"
+            )
+        # Move pairs: empty->single and multi->del
+        for ia, ib in ((0, 1), (2, 3)):
+            du32 = u32_list[ib] - u32_list[ia]
+            du64 = u64_list[ib] - u64_list[ia]
+            move_err = abs(du32 - du64) / T_K
+            assert move_err <= 0.01, f"Move pair log_alpha error > 0.01 (disp={disp}): {move_err:.5f}"
+        comps64[disp] = [fast64.eval_components(s) for s in test_states]
+
+    # Fixed-config D3 switch identity in FP64
+    for idx, s in enumerate(test_states):
+        c_off = comps64[False][idx]
+        c_on = comps64[True][idx]
+        err_sw = abs((c_on["u_int_K"] - c_off["u_int_K"]) - c_on["u_d3_int_K"])
+        assert err_sw < 1e-4, f"FP64 D3 switch identity mismatch at N={s['N']}: {err_sw:.4e} K"

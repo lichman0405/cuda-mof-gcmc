@@ -1511,8 +1511,18 @@ double proposer_get_min_perp_width(void* handle) {
 int proposer_set_chem_pot_shift(void* handle, double delta_eps_K) {
     if (!handle) return -1;
     auto* ctx = static_cast<ProposerContext*>(handle);
+    if (!std::isfinite(delta_eps_K) || ctx->T_K <= 0.0) {
+        std::fprintf(stderr, "Error: non-finite delta_eps_K=%g or invalid T_K=%g.\n", delta_eps_K, ctx->T_K);
+        return -2;
+    }
+    double exponent = -delta_eps_K / ctx->T_K;
+    if (std::abs(exponent) > 40.0) {
+        std::fprintf(stderr,
+                     "Error: chemical-potential shift |delta_eps_K / T_K|=%.3f > 40.0 (delta_eps_K=%.3f, T_K=%.2f).\n",
+                     std::abs(exponent), delta_eps_K, ctx->T_K);
+        return -2;
+    }
     ctx->delta_eps_K = delta_eps_K;
-    double exponent = std::max(-40.0, std::min(40.0, -delta_eps_K / ctx->T_K));
     ctx->beta_f_V_ref = ctx->beta_f_V * std::exp(exponent);
     return 0;
 }
@@ -1671,6 +1681,20 @@ int proposer_set_accepted_quat(
         ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
+    return 0;
+}
+
+int proposer_get_rng_states(void* handle, uint64_t* out_rng_n) {
+    if (!handle || !out_rng_n) return -1;
+    auto* ctx = static_cast<ProposerContext*>(handle);
+    CUDA_CHECK_RET(cudaMemcpy(out_rng_n, ctx->dev.d_rng, (size_t)ctx->n_boxes * sizeof(uint64_t), cudaMemcpyDeviceToHost), -1);
+    return 0;
+}
+
+int proposer_set_rng_states(void* handle, const uint64_t* in_rng_n) {
+    if (!handle || !in_rng_n) return -1;
+    auto* ctx = static_cast<ProposerContext*>(handle);
+    CUDA_CHECK_RET(cudaMemcpy(ctx->dev.d_rng, in_rng_n, (size_t)ctx->n_boxes * sizeof(uint64_t), cudaMemcpyHostToDevice), -1);
     return 0;
 }
 

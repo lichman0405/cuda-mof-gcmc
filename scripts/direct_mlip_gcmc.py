@@ -156,10 +156,15 @@ class SerialAseMaceD3Target:
         dispersion: bool = True,
         dispersion_xc: str = "pbe",
         guest=None,
+        dtype: str = "float32",
     ):
         from ase import Atoms
         from mace.calculators import mace_mp
         from guests import load_guest
+
+        dtype_norm = str(dtype).strip().lower()
+        if dtype_norm not in ("float32", "float64"):
+            raise ValueError(f"Unsupported SerialAseMaceD3Target dtype={dtype!r}")
 
         self.Atoms = Atoms
         self.uc = uc_atoms.copy()
@@ -168,12 +173,13 @@ class SerialAseMaceD3Target:
         self.guest_local_pos = self.guest.real_local_positions()
         self.guest_symbols_unit = [s.symbol for s in self.guest.real_sites()]
         self.guest_n_real = len(self.guest_symbols_unit)
+        self.dtype = dtype_norm
 
         self.calc = mace_mp(
             model=model,
             dispersion=bool(dispersion),
             dispersion_xc=str(dispersion_xc),
-            default_dtype="float32",
+            default_dtype=self.dtype,
             device=device,
         )
         fw_copy = self.fw.copy()

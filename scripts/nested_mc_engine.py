@@ -5,12 +5,51 @@ import math
 import os
 import time
 from pathlib import Path
+from typing import Optional
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 K_TO_KJMOL = 8.31446261815324e-3
 EV_TO_K = 11604.51812155008
+KB_SI = 1.380649e-23
+
+
+def _rand_uniform_quat(rng: np.random.Generator):
+    """Shoemake (1992) uniform unit quaternion on SO(3)."""
+    u1, u2, u3 = rng.random(3)
+    u2 *= 2.0 * math.pi
+    u3 *= 2.0 * math.pi
+    s1 = math.sqrt(max(0.0, 1.0 - u1))
+    s2 = math.sqrt(max(0.0, u1))
+    return (
+        s2 * math.cos(u3),
+        s1 * math.sin(u2),
+        s1 * math.cos(u2),
+        s2 * math.sin(u3),
+    )
+
+
+def _rot_quat_small(rng: np.random.Generator, max_angle: float, qw: float, qx: float, qy: float, qz: float):
+    """Symmetric isotropic small-angle quaternion perturbation."""
+    z = 2.0 * rng.random() - 1.0
+    phi = 2.0 * math.pi * rng.random()
+    r_xy = math.sqrt(max(0.0, 1.0 - z * z))
+    kx = r_xy * math.cos(phi)
+    ky = r_xy * math.sin(phi)
+    kz = z
+
+    half = 0.5 * (2.0 * rng.random() - 1.0) * max_angle
+    sh = math.sin(half)
+    ch = math.cos(half)
+    dqw, dqx, dqy, dqz = ch, sh * kx, sh * ky, sh * kz
+
+    nqw = dqw * qw - dqx * qx - dqy * qy - dqz * qz
+    nqx = dqw * qx + dqx * qw + dqy * qz - dqz * qy
+    nqy = dqw * qy - dqx * qz + dqy * qw + dqz * qx
+    nqz = dqw * qz + dqx * qy - dqy * qx + dqz * qw
+    inv = 1.0 / math.sqrt(nqw * nqw + nqx * nqx + nqy * nqy + nqz * nqz)
+    return nqw * inv, nqx * inv, nqy * inv, nqz * inv
 
 
 def _register_dll_dirs():
@@ -282,6 +321,10 @@ class CudaGcmcProposer:
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
         ]
         L.proposer_set_accepted_quat.restype = ctypes.c_int
+        L.proposer_get_rng_states.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64)]
+        L.proposer_get_rng_states.restype = ctypes.c_int
+        L.proposer_set_rng_states.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64)]
+        L.proposer_set_rng_states.restype = ctypes.c_int
         L.proposer_eval_energy_quat.argtypes = [
             ctypes.c_void_p, ctypes.c_int,
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
@@ -307,10 +350,38 @@ class CudaGcmcProposer:
 
     def set_chem_pot_shift(self, delta_eps_kJ_mol: float):
         """Set inner-proposer chemical-potential bias delta_eps = <(U_tgt - U_ref)/N> (kJ/mol)."""
-        self.delta_eps_K = float(delta_eps_kJ_mol) / K_TO_KJMOL
-        rc = self.lib.proposer_set_chem_pot_shift(self.handle, self.delta_eps_K)
+        val_kJ = float(delta_eps_kJ_mol)
+        if not math.isfinite(val_kJ):
+            raise ValueError(f"delta_eps_kJ_mol must be finite, got {delta_eps_kJ_mol!r}")
+        delta_eps_K = val_kJ / K_TO_KJMOL
+        if self.T_K <= 0.0 or abs(delta_eps_K / self.T_K) > 40.0:
+            raise ValueError(
+                f"Chemical-potential shift |delta_eps_K / T_K|={abs(delta_eps_K / max(self.T_K, 1e-12)):.3f} "
+                f"exceeds safety bound 40.0 (delta_eps_kJ_mol={val_kJ}, T_K={self.T_K})"
+            )
+        rc = self.lib.proposer_set_chem_pot_shift(self.handle, delta_eps_K)
         if rc != 0:
             raise RuntimeError(f"proposer_set_chem_pot_shift failed with code {rc}")
+        self.delta_eps_K = delta_eps_K
+
+    def get_rng_states(self) -> np.ndarray:
+        buf = np.zeros(self.n_boxes, dtype=np.uint64)
+        rc = self.lib.proposer_get_rng_states(
+            self.handle, buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64))
+        )
+        if rc != 0:
+            raise RuntimeError(f"proposer_get_rng_states failed with code {rc}")
+        return buf
+
+    def set_rng_states(self, rng_states) -> None:
+        arr = np.ascontiguousarray(rng_states, dtype=np.uint64).reshape(-1)
+        if len(arr) != self.n_boxes:
+            raise ValueError(f"Expected {self.n_boxes} RNG states, got {len(arr)}")
+        rc = self.lib.proposer_set_rng_states(
+            self.handle, arr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64))
+        )
+        if rc != 0:
+            raise RuntimeError(f"proposer_set_rng_states failed with code {rc}")
 
     def equilibrate(self, n_steps: int):
         rc = self.lib.proposer_equilibrate(self.handle, int(n_steps))
@@ -614,6 +685,7 @@ class FastMaceD3Target:
         guest=None,
         mace_chunk: int = None,
         uc_atoms=None,
+        dtype: str = "float32",
     ):
         import torch
         from ase import Atoms
@@ -621,7 +693,12 @@ class FastMaceD3Target:
         from mace.calculators import mace_mp
         from mace import data as mace_data
         from mace.tools import torch_geometric, torch_tools
+        from mace.tools import utils as mace_utils
         from guests import load_guest
+
+        dtype_norm = str(dtype).strip().lower()
+        if dtype_norm not in ("float32", "float64"):
+            raise ValueError(f"Unsupported FastMaceD3Target dtype={dtype!r}; expected 'float32' or 'float64'.")
 
         self.torch = torch
         self.Atoms = Atoms
@@ -629,6 +706,9 @@ class FastMaceD3Target:
         self.torch_geometric = torch_geometric
         self.torch_tools = torch_tools
         self.device = torch.device(device)
+        self.dtype = dtype_norm
+        self.torch_dtype = torch.float64 if dtype_norm == "float64" else torch.float32
+        self.np_dtype = np.float64 if dtype_norm == "float64" else np.float32
         self.use_dispersion = bool(dispersion)
         self.dispersion_xc = str(dispersion_xc)
         self.guest = load_guest("co2") if guest is None else guest
@@ -646,7 +726,7 @@ class FastMaceD3Target:
         elif self.device.type == "cuda":
             tot_gb = torch.cuda.get_device_properties(self.device).total_memory / 1e9
             if tot_gb >= 20.0 and self.n_fw < 700:
-                self.default_mace_chunk = 4
+                self.default_mace_chunk = 2
             elif self.n_fw >= 550:
                 self.default_mace_chunk = 1
             else:
@@ -656,7 +736,7 @@ class FastMaceD3Target:
 
         calc = mace_mp(
             model=model, dispersion=self.use_dispersion, dispersion_xc=self.dispersion_xc,
-            default_dtype="float32", device=device
+            default_dtype=self.dtype, device=device
         )
         if self.use_dispersion:
             self.mace_calc = calc.mixer.calcs[0]
@@ -666,56 +746,119 @@ class FastMaceD3Target:
             self.d3_calc = None
         self.mace_model = self.mace_calc.models[0]
         self.mace_model.eval()
+        self.r_max = float(self.mace_calc.r_max)
+        self.model_file_path = None
+        for attr in ("model_paths", "model_path"):
+            val = getattr(self.mace_calc, attr, None)
+            if val:
+                self.model_file_path = str(val[0]) if isinstance(val, (list, tuple)) else str(val)
+                break
+        if self.model_file_path is None and os.path.exists(str(model)):
+            self.model_file_path = str(model)
         self.keyspec = mace_data.KeySpecification(
             info_keys=self.mace_calc.info_keys,
             arrays_keys=self.mace_calc.arrays_keys,
         )
 
-        # Precompute exact D3 periodic shifts and static rigid framework-framework edges once on GPU
+        # Always precompute static rigid framework tensors & MACE fw-fw periodic graph once on device
+        self.cell_np = np.array(self.fw.get_cell(), dtype=self.np_dtype)
+        self.cell_t = torch.tensor(self.cell_np, device=self.device, dtype=self.torch_dtype)
+        inv_cell = torch.linalg.inv(self.cell_t)
+        perp_w = 1.0 / torch.linalg.norm(inv_cell, dim=0)
+        self.fw_pos_t = torch.tensor(self.fw.get_positions(), device=self.device, dtype=self.torch_dtype)
+        self.fw_Z_t = torch.tensor(self.fw.get_atomic_numbers(), device=self.device, dtype=torch.long)
+        self.pbc_t = torch.tensor([True, True, True], device=self.device, dtype=torch.bool)
+        self.guest_Z_unit = torch.tensor(self.guest.real_atomic_numbers(), device=self.device, dtype=torch.long)
+
+        mace_n_rep = [int(math.ceil(self.r_max / float(w))) + 1 for w in perp_w]
+        m_S = torch.cartesian_prod(
+            torch.arange(-mace_n_rep[0], mace_n_rep[0] + 1, device=self.device),
+            torch.arange(-mace_n_rep[1], mace_n_rep[1] + 1, device=self.device),
+            torch.arange(-mace_n_rep[2], mace_n_rep[2] + 1, device=self.device),
+        ).to(self.torch_dtype)
+        self.mace_S_all = m_S
+        self.mace_shift_vecs = m_S @ self.cell_t
+        self.mace_zero_shift_idx = int(torch.nonzero((m_S.abs().sum(dim=1) == 0), as_tuple=False)[0].item())
+        self.mace_fw_ei, self.mace_fw_sh, self.mace_fw_ush = self._pair_edges_with_shifts_chunked(
+            self.fw_pos_t, self.fw_pos_t, self.r_max, self.mace_shift_vecs, self.mace_zero_shift_idx,
+            same_set=True, row_offset=0, col_offset=0, shift_chunk=8, S_all=self.mace_S_all,
+        )
+        num_z = len(self.mace_calc.z_table)
+        fw_idx = mace_utils.atomic_numbers_to_indices(self.fw.get_atomic_numbers(), z_table=self.mace_calc.z_table)
+        self.mace_fw_oh = torch.nn.functional.one_hot(
+            torch.tensor(fw_idx, dtype=torch.long, device=self.device), num_classes=num_z
+        ).to(self.torch_dtype)
+        g_idx = mace_utils.atomic_numbers_to_indices(self.guest.real_atomic_numbers(), z_table=self.mace_calc.z_table)
+        self.mace_g_oh_unit = torch.nn.functional.one_hot(
+            torch.tensor(g_idx, dtype=torch.long, device=self.device), num_classes=num_z
+        ).to(self.torch_dtype)
+        heads = list(getattr(self.mace_calc, "available_heads", None) or ["Default"])
+        cur_head = getattr(self.mace_calc, "head", None)
+        self.mace_head_idx = int(heads.index(cur_head)) if cur_head in heads else 0
+
+        # Precompute exact D3 periodic shifts and static rigid framework-framework D3 edges
         if self.use_dispersion:
             self.rc_d3 = float(self.d3_calc.cutoff)
-            self.cell_np = np.array(self.fw.get_cell(), dtype=np.float32)
-            self.cell_t = torch.tensor(self.cell_np, device=self.device, dtype=torch.float32)
-            inv_cell = torch.linalg.inv(self.cell_t)
-            perp_w = 1.0 / torch.linalg.norm(inv_cell, dim=0)
             n_rep = [int(math.ceil(self.rc_d3 / float(w))) + 1 for w in perp_w]
             s0 = torch.arange(-n_rep[0], n_rep[0] + 1, device=self.device)
             s1 = torch.arange(-n_rep[1], n_rep[1] + 1, device=self.device)
             s2 = torch.arange(-n_rep[2], n_rep[2] + 1, device=self.device)
-            S_all = torch.cartesian_prod(s0, s1, s2).to(torch.float32)
+            S_all = torch.cartesian_prod(s0, s1, s2).to(self.torch_dtype)
             self.S_all = S_all
             self.shift_vecs_d3 = S_all @ self.cell_t
             self.zero_shift_idx = int(torch.nonzero((S_all.abs().sum(dim=1) == 0), as_tuple=False)[0].item())
 
-            self.fw_pos_t = torch.tensor(self.fw.get_positions(), device=self.device, dtype=torch.float32)
-            self.fw_Z_t = torch.tensor(self.fw.get_atomic_numbers(), device=self.device, dtype=torch.long)
-            self.pbc_t = torch.tensor([True, True, True], device=self.device, dtype=torch.bool)
-            self.guest_Z_unit = torch.tensor(self.guest.real_atomic_numbers(), device=self.device, dtype=torch.long)
-
             self.fw_ei, self.fw_sp = self._pair_edges_chunked(
                 self.fw_pos_t, self.fw_pos_t, same_set=True, row_offset=0, col_offset=0
             )
+        else:
+            self.rc_d3 = None
 
-        # Reference isolated framework and isolated guest energies using identical evaluator
-        self.e_fw_eV = self._eval_raw_eV_batch([self.fw.copy()], [None])[0]
+        # Reference isolated framework and isolated guest energies using identical evaluator (FP64 node sum)
+        self.e_fw_mace_eV, self.e_fw_d3_eV = self._eval_components_raw_batch(None, [None])
+        self.e_fw_mace_eV = float(self.e_fw_mace_eV[0])
+        self.e_fw_d3_eV = float(self.e_fw_d3_eV[0])
+        self.e_fw_eV = self.e_fw_mace_eV + self.e_fw_d3_eV
         g_iso = self.guest.to_ase_atoms(box_A=30.0)
-        g_iso.calc = calc
-        self.e_guest_eV = float(g_iso.get_potential_energy())
+        self.e_guest_mace_eV = float(self._eval_mace_only_eV([g_iso])[0])
+        if self.use_dispersion:
+            g_iso.calc = self.d3_calc
+            self.e_guest_d3_eV = float(self.d3_calc.get_potential_energy(g_iso))
+            self.e_guest_eV = self.e_guest_mace_eV + self.e_guest_d3_eV
+        else:
+            self.e_guest_d3_eV = 0.0
+            self.e_guest_eV = self.e_guest_mace_eV
+        if not (math.isfinite(self.e_fw_eV) and math.isfinite(self.e_guest_eV)):
+            raise RuntimeError(f"Non-finite reference energies: e_fw={self.e_fw_eV}, e_guest={self.e_guest_eV}")
         self.e_co2_eV = self.e_guest_eV
         self.n_evals = 0
 
-    def _pair_edges_chunked(self, pos_row, pos_col, same_set: bool, row_offset: int, col_offset: int, shift_chunk: int = 16):
+    def _pair_edges_with_shifts_chunked(
+        self,
+        pos_row,
+        pos_col,
+        rc: float,
+        shift_vecs,
+        zero_shift_idx: int,
+        same_set: bool,
+        row_offset: int,
+        col_offset: int,
+        shift_chunk: int = 16,
+        S_all=None,
+    ):
         torch = self.torch
         nr, nc = pos_row.shape[0], pos_col.shape[0]
         if nr == 0 or nc == 0:
-            return (
-                torch.empty((2, 0), device=self.device, dtype=torch.long),
-                torch.empty((0, 3), device=self.device, dtype=torch.float32),
-            )
-        rc2 = self.rc_d3 * self.rc_d3
+            empty_ei = torch.empty((2, 0), device=self.device, dtype=torch.long)
+            empty_sh = torch.empty((0, 3), device=self.device, dtype=self.torch_dtype)
+            if S_all is not None:
+                return empty_ei, empty_sh, torch.empty((0, 3), device=self.device, dtype=self.torch_dtype)
+            return empty_ei, empty_sh
+        rc2 = float(rc) * float(rc)
         diff_base = pos_col.unsqueeze(0) - pos_row.unsqueeze(1)  # (nr, nc, 3)
-        M = self.shift_vecs_d3.shape[0]
+        M = shift_vecs.shape[0]
         srcs, dsts, shs = [], [], []
+        ushs = [] if S_all is not None else None
         self_diag = None
         if same_set:
             ii = torch.arange(nr, device=self.device).unsqueeze(1).expand(nr, nc)
@@ -723,23 +866,36 @@ class FastMaceD3Target:
             self_diag = (ii == jj)
         for s0 in range(0, M, shift_chunk):
             s1 = min(M, s0 + shift_chunk)
-            sv = self.shift_vecs_d3[s0:s1]  # (C, 3)
+            sv = shift_vecs[s0:s1]  # (C, 3)
             d = diff_base.unsqueeze(0) + sv.view(-1, 1, 1, 3)
             r2 = (d * d).sum(dim=-1)
             mask = r2 < rc2
-            if same_set and s0 <= self.zero_shift_idx < s1:
-                mask[self.zero_shift_idx - s0] &= (~self_diag)
+            if same_set and s0 <= zero_shift_idx < s1:
+                mask[zero_shift_idx - s0] &= (~self_diag)
             mm, rr, cc = torch.nonzero(mask, as_tuple=True)
             if mm.numel() > 0:
                 srcs.append(rr + row_offset)
                 dsts.append(cc + col_offset)
                 shs.append(sv[mm])
+                if S_all is not None:
+                    ushs.append(S_all[s0:s1][mm])
         if not srcs:
-            return (
-                torch.empty((2, 0), device=self.device, dtype=torch.long),
-                torch.empty((0, 3), device=self.device, dtype=torch.float32),
-            )
-        return torch.stack([torch.cat(srcs), torch.cat(dsts)], dim=0), torch.cat(shs, dim=0)
+            empty_ei = torch.empty((2, 0), device=self.device, dtype=torch.long)
+            empty_sh = torch.empty((0, 3), device=self.device, dtype=self.torch_dtype)
+            if S_all is not None:
+                return empty_ei, empty_sh, torch.empty((0, 3), device=self.device, dtype=self.torch_dtype)
+            return empty_ei, empty_sh
+        ei = torch.stack([torch.cat(srcs), torch.cat(dsts)], dim=0)
+        sh = torch.cat(shs, dim=0)
+        if S_all is not None:
+            return ei, sh, torch.cat(ushs, dim=0)
+        return ei, sh
+
+    def _pair_edges_chunked(self, pos_row, pos_col, same_set: bool, row_offset: int, col_offset: int, shift_chunk: int = 16):
+        return self._pair_edges_with_shifts_chunked(
+            pos_row, pos_col, self.rc_d3, self.shift_vecs_d3, self.zero_shift_idx,
+            same_set=same_set, row_offset=row_offset, col_offset=col_offset, shift_chunk=shift_chunk,
+        )
 
     def _guest_positions_from_state(self, state):
         n = int(state["N"])
@@ -756,11 +912,11 @@ class FastMaceD3Target:
         gp = (c[:, None, :] + offsets).reshape(n * self.guest_n_real, 3)
         return gp
 
-    def _eval_raw_eV_batch(self, atoms_list, guest_pos_list, mace_chunk: int = None):
+    def _eval_mace_only_eV(self, atoms_list, mace_chunk: int = None) -> np.ndarray:
+        """Evaluate MACE energy using FP64 per-graph summation of `node_energy` to prevent FP32 summation loss."""
         if mace_chunk is None:
             mace_chunk = self.default_mace_chunk
         torch = self.torch
-        # 1. Micro-batched MACE forward (no_grad, compute_force=False)
         graphs = []
         with self.torch_tools.default_dtype(self.mace_calc.default_dtype):
             for at in atoms_list:
@@ -779,9 +935,95 @@ class FastMaceD3Target:
         with torch.no_grad():
             for i0 in range(0, len(graphs), mace_chunk):
                 mb = self.torch_geometric.Batch.from_data_list(graphs[i0:i0 + mace_chunk]).to(self.device)
-                em = self.mace_model(mb.to_dict(), compute_force=False, compute_stress=False)["energy"]
-                e_mace_parts.append(em.detach().cpu().numpy().astype(np.float64))
-        e_mace_np = np.concatenate(e_mace_parts, axis=0)
+                out = self.mace_model(mb.to_dict(), compute_force=False, compute_stress=False)
+                if out.get("node_energy") is not None:
+                    ne = out["node_energy"].to(torch.float64)
+                    es = torch.zeros(int(mb.num_graphs), device=self.device, dtype=torch.float64)
+                    es.index_add_(0, mb.batch, ne)
+                    e_mace_parts.append(es.detach().cpu().numpy())
+                else:
+                    e_mace_parts.append(out["energy"].detach().cpu().numpy().astype(np.float64))
+        return np.concatenate(e_mace_parts, axis=0)
+
+    def _eval_mace_gpu_graphs_eV(self, guest_pos_list, mace_chunk: int = None) -> np.ndarray:
+        """Evaluate MACE energy via cached rigid framework graph + GPU dynamic guest edges (FP64 node sum)."""
+        if mace_chunk is None:
+            mace_chunk = self.default_mace_chunk
+        torch = self.torch
+        e_mace_parts = []
+        with torch.no_grad():
+            for i0 in range(0, len(guest_pos_list), mace_chunk):
+                chunk_gps = guest_pos_list[i0:i0 + mace_chunk]
+                pos_list, na_list, ei_list, sh_list, ush_list, batch_list = [], [], [], [], [], []
+                ptr = [0]
+                node_off = 0
+                for g_idx, gp_np in enumerate(chunk_gps):
+                    if gp_np is None or len(gp_np) == 0:
+                        pos = self.fw_pos_t
+                        na = self.mace_fw_oh
+                        ei, sh, ush = self.mace_fw_ei, self.mace_fw_sh, self.mace_fw_ush
+                    else:
+                        n_mol = len(gp_np) // self.guest_n_real
+                        g_pos_t = torch.tensor(gp_np, device=self.device, dtype=self.torch_dtype)
+                        pos = torch.cat([self.fw_pos_t, g_pos_t], dim=0)
+                        na = torch.cat([self.mace_fw_oh, self.mace_g_oh_unit.repeat(n_mol, 1)], dim=0)
+                        ei_fg, sh_fg, ush_fg = self._pair_edges_with_shifts_chunked(
+                            self.fw_pos_t, g_pos_t, self.r_max, self.mace_shift_vecs, self.mace_zero_shift_idx,
+                            same_set=False, row_offset=0, col_offset=self.n_fw, shift_chunk=8, S_all=self.mace_S_all,
+                        )
+                        ei_gf = torch.stack([ei_fg[1], ei_fg[0]], dim=0)
+                        sh_gf, ush_gf = -sh_fg, -ush_fg
+                        ei_gg, sh_gg, ush_gg = self._pair_edges_with_shifts_chunked(
+                            g_pos_t, g_pos_t, self.r_max, self.mace_shift_vecs, self.mace_zero_shift_idx,
+                            same_set=True, row_offset=self.n_fw, col_offset=self.n_fw, shift_chunk=8, S_all=self.mace_S_all,
+                        )
+                        ei = torch.cat([self.mace_fw_ei, ei_fg, ei_gf, ei_gg], dim=1)
+                        sh = torch.cat([self.mace_fw_sh, sh_fg, sh_gf, sh_gg], dim=0)
+                        ush = torch.cat([self.mace_fw_ush, ush_fg, ush_gf, ush_gg], dim=0)
+                    n_nodes = pos.shape[0]
+                    pos_list.append(pos)
+                    na_list.append(na)
+                    ei_list.append(ei + node_off)
+                    sh_list.append(sh)
+                    ush_list.append(ush)
+                    batch_list.append(torch.full((n_nodes,), g_idx, device=self.device, dtype=torch.long))
+                    node_off += n_nodes
+                    ptr.append(node_off)
+
+                n_g = len(chunk_gps)
+                batch_t = torch.cat(batch_list, dim=0)
+                data_dict = {
+                    "positions": torch.cat(pos_list, dim=0),
+                    "node_attrs": torch.cat(na_list, dim=0),
+                    "edge_index": torch.cat(ei_list, dim=1),
+                    "shifts": torch.cat(sh_list, dim=0),
+                    "unit_shifts": torch.cat(ush_list, dim=0),
+                    "cell": self.cell_t.repeat(n_g, 1),
+                    "batch": batch_t,
+                    "ptr": torch.tensor(ptr, device=self.device, dtype=torch.long),
+                    "head": torch.full((n_g,), self.mace_head_idx, device=self.device, dtype=torch.long),
+                    "weight": torch.ones(n_g, device=self.device, dtype=self.torch_dtype),
+                    "energy_weight": torch.ones(n_g, device=self.device, dtype=self.torch_dtype),
+                    "forces_weight": torch.zeros(n_g, device=self.device, dtype=self.torch_dtype),
+                    "stress_weight": torch.zeros(n_g, device=self.device, dtype=self.torch_dtype),
+                    "virials_weight": torch.zeros(n_g, device=self.device, dtype=self.torch_dtype),
+                }
+                out = self.mace_model(data_dict, compute_force=False, compute_stress=False)
+                if out.get("node_energy") is not None:
+                    ne = out["node_energy"].to(torch.float64)
+                    es = torch.zeros(n_g, device=self.device, dtype=torch.float64)
+                    es.index_add_(0, batch_t, ne)
+                    e_mace_parts.append(es.detach().cpu().numpy())
+                else:
+                    e_mace_parts.append(out["energy"].detach().cpu().numpy().astype(np.float64))
+        return np.concatenate(e_mace_parts, axis=0)
+
+    def _eval_components_raw_batch(self, atoms_list, guest_pos_list, mace_chunk: int = None):
+        if mace_chunk is None:
+            mace_chunk = self.default_mace_chunk
+        torch = self.torch
+        # 1. GPU-cached rigid-framework MACE forward (no_grad, compute_force=False, FP64 node-energy accumulation)
+        e_mace_np = self._eval_mace_gpu_graphs_eV(guest_pos_list, mace_chunk=mace_chunk)
         if not self.use_dispersion:
             if self.device.type == "cuda":
                 tot_mem = float(torch.cuda.get_device_properties(self.device).total_memory)
@@ -789,10 +1031,10 @@ class FastMaceD3Target:
                 alloc_mem = float(torch.cuda.memory_allocated(self.device))
                 if res_mem > 0.50 * tot_mem or (res_mem > 3.5e9 and res_mem > 2.5 * alloc_mem):
                     torch.cuda.empty_cache()
-            return e_mace_np
+            return e_mace_np, np.zeros_like(e_mace_np)
 
         # 2. Exact GPU D3(BJ) via cached fw-fw edges + vectorized dynamic edges
-        e_d3_np = np.zeros(len(atoms_list), dtype=np.float64)
+        e_d3_np = np.zeros(len(guest_pos_list), dtype=np.float64)
         for g_idx, gp_np in enumerate(guest_pos_list):
             if gp_np is None or len(gp_np) == 0:
                 Z_tot = self.fw_Z_t
@@ -802,7 +1044,7 @@ class FastMaceD3Target:
             else:
                 n_g = gp_np.shape[0]
                 n_mol = n_g // self.guest_n_real
-                g_pos_t = torch.tensor(gp_np, device=self.device, dtype=torch.float32)
+                g_pos_t = torch.tensor(gp_np, device=self.device, dtype=self.torch_dtype)
                 g_Z_t = self.guest_Z_unit.repeat(n_mol)
                 Z_tot = torch.cat([self.fw_Z_t, g_Z_t], dim=0)
                 pos_tot = torch.cat([self.fw_pos_t, g_pos_t], dim=0)
@@ -829,30 +1071,59 @@ class FastMaceD3Target:
             if res_mem > 0.50 * tot_mem or (res_mem > 3.5e9 and res_mem > 2.5 * alloc_mem):
                 torch.cuda.empty_cache()
 
+        return e_mace_np, e_d3_np
+
+    def _eval_raw_eV_batch(self, atoms_list, guest_pos_list, mace_chunk: int = None):
+        e_mace_np, e_d3_np = self._eval_components_raw_batch(atoms_list, guest_pos_list, mace_chunk=mace_chunk)
         return e_mace_np + e_d3_np
 
-    def eval_batch(self, states):
+    def eval_components(self, state, mace_chunk: int = None) -> dict:
+        n = int(state["N"])
+        if n == 0:
+            return {
+                "N": 0, "u_int_K": 0.0, "u_mace_int_K": 0.0, "u_d3_int_K": 0.0,
+                "e_tot_eV": self.e_fw_eV, "e_mace_eV": self.e_fw_mace_eV, "e_d3_eV": self.e_fw_d3_eV,
+            }
+        gp = self._guest_positions_from_state(state)
+        e_mace, e_d3 = self._eval_components_raw_batch(None, [gp], mace_chunk=mace_chunk)
+        em = float(e_mace[0])
+        ed = float(e_d3[0])
+        if not (math.isfinite(em) and math.isfinite(ed)):
+            raise RuntimeError(f"Non-finite component energy: e_mace={em}, e_d3={ed}")
+        u_mace_int_K = (em - self.e_fw_mace_eV - n * self.e_guest_mace_eV) * EV_TO_K
+        u_d3_int_K = (ed - self.e_fw_d3_eV - n * self.e_guest_d3_eV) * EV_TO_K
+        return {
+            "N": n,
+            "u_int_K": u_mace_int_K + u_d3_int_K,
+            "u_mace_int_K": u_mace_int_K,
+            "u_d3_int_K": u_d3_int_K,
+            "e_tot_eV": em + ed,
+            "e_mace_eV": em,
+            "e_d3_eV": ed,
+        }
+
+    def eval_batch(self, states, mace_chunk: int = None):
         non_empty_idx = []
-        atoms_list = []
         guest_pos_list = []
         for idx, st in enumerate(states):
             n = int(st["N"])
             if n == 0:
                 continue
             gp = self._guest_positions_from_state(st)
-            sys_at = self.fw.copy() + self.Atoms(self.guest_symbols_unit * n, positions=gp)
             non_empty_idx.append(idx)
-            atoms_list.append(sys_at)
             guest_pos_list.append(gp)
 
         results = [(0.0, False)] * len(states)
         if not non_empty_idx:
             return results
-        e_tot = self._eval_raw_eV_batch(atoms_list, guest_pos_list)
+        e_tot = self._eval_raw_eV_batch(None, guest_pos_list, mace_chunk=mace_chunk)
         self.n_evals += len(non_empty_idx)
         for k, idx in enumerate(non_empty_idx):
             n = int(states[idx]["N"])
-            u_int_K = (float(e_tot[k]) - self.e_fw_eV - n * self.e_guest_eV) * EV_TO_K
+            et = float(e_tot[k])
+            if not math.isfinite(et):
+                raise RuntimeError(f"Non-finite MACE/D3 energy evaluated for batch item {idx} (N={n}): {et}")
+            u_int_K = (et - self.e_fw_eV - n * self.e_guest_eV) * EV_TO_K
             results[idx] = (u_int_K, False)
         return results
 
@@ -932,9 +1203,17 @@ def verify_proposer_target_consistency(
     }
 
 
-def _qst_from_sums(n_samples: int, sN: float, sN2: float, sU: float, sUN: float, T_K: float) -> float:
+def _qst_from_sums(
+    n_samples: int,
+    sN: float,
+    sN2: float,
+    sU: float,
+    sUN: float,
+    T_K: float,
+    allow_molar_fallback: bool = False,
+) -> Optional[float]:
     if n_samples <= 0:
-        return 0.0
+        return None if not allow_molar_fallback else 0.0
     inv_m = 1.0 / float(n_samples)
     mN = sN * inv_m
     mN2 = sN2 * inv_m
@@ -943,16 +1222,17 @@ def _qst_from_sums(n_samples: int, sN: float, sN2: float, sU: float, sUN: float,
     varN = mN2 - mN * mN
     if varN > 1e-12:
         return float((T_K - (mUN - mU * mN) / varN) * K_TO_KJMOL)
-    if mN > 1e-12:
+    if allow_molar_fallback and mN > 1e-12:
         return float((T_K - mU / mN) * K_TO_KJMOL)
-    return 0.0
+    return None if not allow_molar_fallback else 0.0
 
 
-def compute_pooled_jackknife_qst(box_moments, T_K: float) -> dict:
+def compute_pooled_jackknife_qst(box_moments, T_K: float, allow_molar_fallback: bool = False) -> dict:
     """Compute pooled fluctuation Qst and leave-one-box-out Jackknife SEM from per-box raw moments."""
     n_b = len(box_moments)
     if n_b == 0:
-        return {"Qst_kJ_mol": 0.0, "Qst_sem_kJ_mol": 0.0, "Qst_loo_kJ_mol": []}
+        val = 0.0 if allow_molar_fallback else None
+        return {"Qst_kJ_mol": val, "Qst_sem_kJ_mol": val, "Qst_loo_kJ_mol": []}
 
     tot_m = sum(int(m["n_samples"]) for m in box_moments)
     tot_sN = sum(float(m["sum_N"]) for m in box_moments)
@@ -960,27 +1240,112 @@ def compute_pooled_jackknife_qst(box_moments, T_K: float) -> dict:
     tot_sU = sum(float(m["sum_U"]) for m in box_moments)
     tot_sUN = sum(float(m["sum_UN"]) for m in box_moments)
 
-    q_pooled = _qst_from_sums(tot_m, tot_sN, tot_sN2, tot_sU, tot_sUN, float(T_K))
+    q_pooled = _qst_from_sums(
+        tot_m, tot_sN, tot_sN2, tot_sU, tot_sUN, float(T_K), allow_molar_fallback=allow_molar_fallback
+    )
+    if q_pooled is None:
+        return {"Qst_kJ_mol": None, "Qst_sem_kJ_mol": None, "Qst_loo_kJ_mol": []}
     if n_b <= 1:
-        return {"Qst_kJ_mol": q_pooled, "Qst_sem_kJ_mol": 0.0, "Qst_loo_kJ_mol": [q_pooled] if n_b == 1 else []}
+        return {"Qst_kJ_mol": q_pooled, "Qst_sem_kJ_mol": 0.0, "Qst_loo_kJ_mol": [q_pooled]}
 
     q_loo = []
     for m in box_moments:
-        q_loo.append(
-            _qst_from_sums(
-                tot_m - int(m["n_samples"]),
-                tot_sN - float(m["sum_N"]),
-                tot_sN2 - float(m["sum_N2"]),
-                tot_sU - float(m["sum_U"]),
-                tot_sUN - float(m["sum_UN"]),
-                float(T_K),
-            )
+        q_i = _qst_from_sums(
+            tot_m - int(m["n_samples"]),
+            tot_sN - float(m["sum_N"]),
+            tot_sN2 - float(m["sum_N2"]),
+            tot_sU - float(m["sum_U"]),
+            tot_sUN - float(m["sum_UN"]),
+            float(T_K),
+            allow_molar_fallback=allow_molar_fallback,
         )
+        q_loo.append(q_i)
+    if any(x is None for x in q_loo):
+        return {"Qst_kJ_mol": q_pooled, "Qst_sem_kJ_mol": None, "Qst_loo_kJ_mol": q_loo}
     q_arr = np.asarray(q_loo, dtype=np.float64)
     mean_loo = float(np.mean(q_arr))
     var_jack = ((n_b - 1.0) / n_b) * float(np.sum((q_arr - mean_loo) ** 2))
     sem_jack = math.sqrt(max(0.0, var_jack))
     return {"Qst_kJ_mol": q_pooled, "Qst_sem_kJ_mol": sem_jack, "Qst_loo_kJ_mol": q_loo}
+
+
+def count_oms_occupied(
+    state: dict,
+    oms_metal_pos: np.ndarray,
+    oms_cell_rows: np.ndarray,
+    guest_local_pos: Optional[np.ndarray] = None,
+    cutoff_A: float = 2.60,
+    inv_cell_rows: Optional[np.ndarray] = None,
+) -> int:
+    """Count guest molecules having at least one real atom within `cutoff_A` of any open metal site."""
+    n = int(state["N"])
+    if n == 0 or oms_metal_pos is None or len(oms_metal_pos) == 0:
+        return 0
+    c = np.stack([state["cx"], state["cy"], state["cz"]], axis=1)
+    if guest_local_pos is not None and len(guest_local_pos) > 0:
+        if "qw" in state:
+            offs = quat_rotate_batch(
+                state["qw"], state["qx"], state["qy"], state["qz"], guest_local_pos
+            )
+            pts = (c[:, None, :] + offs).reshape(n, len(guest_local_pos), 3)
+        elif "ux" in state:
+            u = np.stack([state["ux"], state["uy"], state["uz"]], axis=1)
+            offs = u[:, None, :] * guest_local_pos[None, :, 0:1]
+            pts = (c[:, None, :] + offs).reshape(n, len(guest_local_pos), 3)
+        else:
+            pts = c[:, None, :]
+    else:
+        pts = c[:, None, :]
+
+    inv_h = np.linalg.inv(oms_cell_rows) if inv_cell_rows is None else inv_cell_rows
+    df = (pts[:, :, None, :] - oms_metal_pos[None, None, :, :]) @ inv_h
+    df -= np.round(df)
+    dr = df @ oms_cell_rows
+    d2 = np.sum(dr * dr, axis=-1)  # (n, n_sites, n_metals)
+    min_d2_per_mol = np.min(d2, axis=(1, 2))
+    return int(np.sum(min_d2_per_mol < (cutoff_A * cutoff_A)))
+
+
+def _serialize_box_states(states_list) -> list:
+    out = []
+    for st in states_list:
+        d_st = {
+            "N": int(st["N"]),
+            "U_ref_K": float(st.get("U_ref_K", 0.0)),
+            "cx": np.asarray(st["cx"], dtype=np.float64).tolist(),
+            "cy": np.asarray(st["cy"], dtype=np.float64).tolist(),
+            "cz": np.asarray(st["cz"], dtype=np.float64).tolist(),
+        }
+        if "qw" in st:
+            d_st["qw"] = np.asarray(st["qw"], dtype=np.float64).tolist()
+            d_st["qx"] = np.asarray(st["qx"], dtype=np.float64).tolist()
+            d_st["qy"] = np.asarray(st["qy"], dtype=np.float64).tolist()
+            d_st["qz"] = np.asarray(st["qz"], dtype=np.float64).tolist()
+        elif "ux" in st:
+            d_st["ux"] = np.asarray(st["ux"], dtype=np.float64).tolist()
+            d_st["uy"] = np.asarray(st["uy"], dtype=np.float64).tolist()
+            d_st["uz"] = np.asarray(st["uz"], dtype=np.float64).tolist()
+        out.append(d_st)
+    return out
+
+
+def _states_equal(a: dict, b: dict, atol: float = 1e-12) -> bool:
+    if int(a["N"]) != int(b["N"]):
+        return False
+    if int(a["N"]) == 0:
+        return True
+    for k in ("cx", "cy", "cz"):
+        if not np.allclose(a[k], b[k], atol=atol, rtol=0.0):
+            return False
+    if "qw" in a and "qw" in b:
+        for k in ("qw", "qx", "qy", "qz"):
+            if not np.allclose(a[k], b[k], atol=atol, rtol=0.0):
+                return False
+    elif "ux" in a and "ux" in b:
+        for k in ("ux", "uy", "uz"):
+            if not np.allclose(a[k], b[k], atol=atol, rtol=0.0):
+                return False
+    return True
 
 
 def _integrated_autocorr_time(series_list) -> float:
@@ -1062,68 +1427,239 @@ def run_nested_mc(
     seed: int = 20261124,
     log_every: int = 0,
     batch_target_fn=None,
+    oms_metal_pos: Optional[np.ndarray] = None,
+    oms_cell_rows: Optional[np.ndarray] = None,
+    oms_cutoff_A: float = 2.60,
+    guest_local_pos: Optional[np.ndarray] = None,
+    snapshot_stride: int = 0,
+    resume_state: Optional[dict] = None,
+    checkpoint_fn=None,
+    checkpoint_every: int = 0,
+    grid_only: bool = False,
 ):
-    """Exact Grand-Canonical Nested Monte Carlo loop (with optional chemical-potential shift & batching)."""
+    """Exact Grand-Canonical Nested MC loop (with optional grid-only ablation mode) and bit-exact resume."""
     rng = np.random.default_rng(seed)
     n_b = proposer.n_boxes
     T_K = proposer.T_K
-    delta_eps_K = float(getattr(proposer, "delta_eps_K", 0.0))
+    delta_eps_K = 0.0 if grid_only else float(getattr(proposer, "delta_eps_K", 0.0))
     conv_mmol_g = 1000.0 / proposer.fw_mass_gmol
     use_quat = hasattr(proposer, "propose_k_quat") and hasattr(proposer, "get_accepted_quat")
+    total_cycles = int(eq_cycles) + int(prod_cycles)
 
-    curr = proposer.get_accepted_quat() if use_quat else proposer.get_accepted()
-    U_tgt_curr = np.zeros(n_b, dtype=np.float64)
-    U_ref_curr = np.zeros(n_b, dtype=np.float64)
-    N_curr = np.zeros(n_b, dtype=np.int32)
-    if batch_target_fn is not None:
-        init_evals = batch_target_fn(curr)
+    oms_inv_cell = None
+    if oms_metal_pos is not None and oms_cell_rows is not None and len(oms_metal_pos) > 0:
+        oms_metal_pos = np.asarray(oms_metal_pos, dtype=np.float64)
+        oms_cell_rows = np.asarray(oms_cell_rows, dtype=np.float64)
+        oms_inv_cell = np.linalg.inv(oms_cell_rows)
     else:
-        init_evals = [target_fn(curr[b]) for b in range(n_b)]
-    for b in range(n_b):
-        ut, ov = init_evals[b]
-        if ov:
-            raise RuntimeError(f"Initial warm-started state of box {b} has target overlap")
-        U_tgt_curr[b] = ut
-        U_ref_curr[b] = curr[b]["U_ref_K"]
-        N_curr[b] = curr[b]["N"]
+        oms_metal_pos = None
 
-    total_cycles = eq_cycles + prod_cycles
-    acc_outer = np.zeros(n_b, dtype=np.int64)
-    prod_acc_outer = np.zeros(n_b, dtype=np.int64)
-    inner_acc_tot = np.zeros(n_b, dtype=np.int64)
-    prod_ins_att = 0
-    prod_ins_acc = 0
-    prod_del_att = 0
-    prod_del_acc = 0
+    if resume_state is not None:
+        if int(resume_state["n_boxes"]) != n_b:
+            raise ValueError(f"Resume state n_boxes={resume_state['n_boxes']} != {n_b}")
+        if abs(float(resume_state["delta_eps_K"]) - delta_eps_K) > 1e-9:
+            raise ValueError(f"Resume state delta_eps_K={resume_state['delta_eps_K']} != {delta_eps_K}")
+        if bool(resume_state.get("grid_only", False)) != bool(grid_only):
+            raise ValueError(f"Resume state grid_only={resume_state.get('grid_only', False)} != {grid_only}")
+        if int(resume_state["eq_cycles"]) != int(eq_cycles):
+            raise ValueError(f"Resume state eq_cycles={resume_state['eq_cycles']} != {eq_cycles}")
+        if not use_quat:
+            raise RuntimeError("True checkpoint resume requires quaternion proposer API")
+        rng.bit_generator.state = resume_state["py_rng_state"]
+        restored_states = []
+        for st in resume_state["curr_states"]:
+            restored_states.append({
+                "N": int(st["N"]),
+                "cx": np.asarray(st["cx"], dtype=np.float64),
+                "cy": np.asarray(st["cy"], dtype=np.float64),
+                "cz": np.asarray(st["cz"], dtype=np.float64),
+                "qw": np.asarray(st["qw"], dtype=np.float64),
+                "qx": np.asarray(st["qx"], dtype=np.float64),
+                "qy": np.asarray(st["qy"], dtype=np.float64),
+                "qz": np.asarray(st["qz"], dtype=np.float64),
+            })
+        proposer.set_accepted_quat(restored_states)
+        proposer.set_rng_states(resume_state["cuda_rng_states"])
+        curr = proposer.get_accepted_quat()
+        U_tgt_curr = np.asarray(resume_state["U_tgt_curr"], dtype=np.float64).copy()
+        U_ref_curr = np.asarray(resume_state["U_ref_curr"], dtype=np.float64).copy()
+        N_curr = np.asarray(resume_state["N_curr"], dtype=np.int32).copy()
+        for b in range(n_b):
+            if int(curr[b]["N"]) != int(N_curr[b]):
+                raise RuntimeError(f"Resume N mismatch in box {b}: {curr[b]['N']} vs {N_curr[b]}")
+            if abs(float(curr[b]["U_ref_K"]) - float(U_ref_curr[b])) > 1e-6:
+                raise RuntimeError(
+                    f"Resume U_ref_K mismatch in box {b}: {curr[b]['U_ref_K']} vs {U_ref_curr[b]}"
+                )
+        start_cyc = int(resume_state["completed_cycles"])
+        acc_outer = np.asarray(resume_state["acc_outer"], dtype=np.int64).copy()
+        prod_acc_outer = np.asarray(resume_state["prod_acc_outer"], dtype=np.int64).copy()
+        inner_acc_tot = np.asarray(resume_state["inner_acc_tot"], dtype=np.int64).copy()
+        prod_ins_att = int(resume_state["prod_ins_att"])
+        prod_ins_acc = int(resume_state["prod_ins_acc"])
+        prod_del_att = int(resume_state["prod_del_att"])
+        prod_del_acc = int(resume_state["prod_del_acc"])
+        acc_empty_to_empty = int(resume_state["acc_empty_to_empty"])
+        acc_identity_nonempty = int(resume_state["acc_identity_nonempty"])
+        acc_same_N_changed = int(resume_state["acc_same_N_changed"])
+        acc_dN_changed = int(resume_state["acc_dN_changed"])
+        prod_rejected = int(resume_state["prod_rejected"])
+        prod_total_trials = int(resume_state["prod_total_trials"])
+        nested_trials = int(resume_state.get("nested_trials", prod_total_trials))
+        nested_accepted = int(resume_state.get("nested_accepted", int(np.sum(prod_acc_outer))))
+        sum_N = np.asarray(resume_state["sum_N"], dtype=np.float64).copy()
+        sum_N2 = np.asarray(resume_state["sum_N2"], dtype=np.float64).copy()
+        sum_U = np.asarray(resume_state["sum_U"], dtype=np.float64).copy()
+        sum_UN = np.asarray(resume_state["sum_UN"], dtype=np.float64).copy()
+        trajectory = list(resume_state.get("trajectory", []))
+        box_N_history = [list(row) for row in resume_state["box_N_history"]]
+        prod_N_history = [list(row) for row in resume_state["prod_N_history"]]
+        prod_U_history = [list(row) for row in resume_state["prod_U_history"]]
+        prod_U_ref_history = [list(row) for row in resume_state["prod_U_ref_history"]]
+        prod_accepted_history = [list(row) for row in resume_state["prod_accepted_history"]]
+        prod_dN_history = [list(row) for row in resume_state["prod_dN_history"]]
+        prod_proposed_dN_history = [list(row) for row in resume_state["prod_proposed_dN_history"]]
+        prod_oms_occ_history = [list(row) for row in resume_state.get("prod_oms_occ_history", [])]
+        prod_snapshots = list(resume_state.get("prod_snapshots", []))
+        elapsed_prior = float(resume_state.get("elapsed_s", 0.0))
+    else:
+        curr = proposer.get_accepted_quat() if use_quat else proposer.get_accepted()
+        U_tgt_curr = np.zeros(n_b, dtype=np.float64)
+        U_ref_curr = np.zeros(n_b, dtype=np.float64)
+        N_curr = np.zeros(n_b, dtype=np.int32)
+        if grid_only:
+            init_evals = [(float(curr[b]["U_ref_K"]), False) for b in range(n_b)]
+        elif batch_target_fn is not None:
+            init_evals = batch_target_fn(curr)
+        else:
+            init_evals = [target_fn(curr[b]) for b in range(n_b)]
+        for b in range(n_b):
+            ut, ov = init_evals[b]
+            if not math.isfinite(float(ut)):
+                raise RuntimeError(f"Non-finite initial target energy in box {b}: {ut}")
+            if not math.isfinite(float(curr[b]["U_ref_K"])):
+                raise RuntimeError(f"Non-finite initial reference energy in box {b}: {curr[b]['U_ref_K']}")
+            if ov:
+                raise RuntimeError(f"Initial warm-started state of box {b} has target overlap")
+            U_tgt_curr[b] = float(ut)
+            U_ref_curr[b] = float(curr[b]["U_ref_K"])
+            N_curr[b] = curr[b]["N"]
 
-    sum_N = np.zeros(n_b, dtype=np.float64)
-    sum_N2 = np.zeros(n_b, dtype=np.float64)
-    sum_U = np.zeros(n_b, dtype=np.float64)
-    sum_UN = np.zeros(n_b, dtype=np.float64)
+        start_cyc = 0
+        acc_outer = np.zeros(n_b, dtype=np.int64)
+        prod_acc_outer = np.zeros(n_b, dtype=np.int64)
+        inner_acc_tot = np.zeros(n_b, dtype=np.int64)
+        prod_ins_att = 0
+        prod_ins_acc = 0
+        prod_del_att = 0
+        prod_del_acc = 0
+        acc_empty_to_empty = 0
+        acc_identity_nonempty = 0
+        acc_same_N_changed = 0
+        acc_dN_changed = 0
+        prod_rejected = 0
+        prod_total_trials = 0
+        nested_trials = 0
+        nested_accepted = 0
 
-    trajectory = []
-    box_N_history = []
-    prod_N_history = []
-    prod_U_history = []
+        sum_N = np.zeros(n_b, dtype=np.float64)
+        sum_N2 = np.zeros(n_b, dtype=np.float64)
+        sum_U = np.zeros(n_b, dtype=np.float64)
+        sum_UN = np.zeros(n_b, dtype=np.float64)
+
+        trajectory = []
+        box_N_history = []
+        prod_N_history = []
+        prod_U_history = []
+        prod_U_ref_history = []
+        prod_accepted_history = []
+        prod_dN_history = []
+        prod_proposed_dN_history = []
+        prod_oms_occ_history = []
+        prod_snapshots = []
+        elapsed_prior = 0.0
+
     t0 = time.perf_counter()
 
-    for cyc in range(total_cycles):
+    def _build_ckpt(completed_cyc: int) -> dict:
+        cuda_rng = proposer.get_rng_states().tolist() if hasattr(proposer, "get_rng_states") else []
+        return {
+            "completed_cycles": int(completed_cyc),
+            "eq_cycles": int(eq_cycles),
+            "prod_cycles": int(prod_cycles),
+            "n_boxes": int(n_b),
+            "delta_eps_K": float(delta_eps_K),
+            "grid_only": bool(grid_only),
+            "py_rng_state": rng.bit_generator.state,
+            "cuda_rng_states": [int(x) for x in cuda_rng],
+            "curr_states": _serialize_box_states(curr),
+            "U_tgt_curr": [float(x) for x in U_tgt_curr],
+            "U_ref_curr": [float(x) for x in U_ref_curr],
+            "N_curr": [int(x) for x in N_curr],
+            "acc_outer": [int(x) for x in acc_outer],
+            "prod_acc_outer": [int(x) for x in prod_acc_outer],
+            "inner_acc_tot": [int(x) for x in inner_acc_tot],
+            "prod_ins_att": int(prod_ins_att),
+            "prod_ins_acc": int(prod_ins_acc),
+            "prod_del_att": int(prod_del_att),
+            "prod_del_acc": int(prod_del_acc),
+            "acc_empty_to_empty": int(acc_empty_to_empty),
+            "acc_identity_nonempty": int(acc_identity_nonempty),
+            "acc_same_N_changed": int(acc_same_N_changed),
+            "acc_dN_changed": int(acc_dN_changed),
+            "prod_rejected": int(prod_rejected),
+            "prod_total_trials": int(prod_total_trials),
+            "nested_trials": int(nested_trials),
+            "nested_accepted": int(nested_accepted),
+            "sum_N": [float(x) for x in sum_N],
+            "sum_N2": [float(x) for x in sum_N2],
+            "sum_U": [float(x) for x in sum_U],
+            "sum_UN": [float(x) for x in sum_UN],
+            "box_N_history": box_N_history,
+            "prod_N_history": prod_N_history,
+            "prod_U_history": prod_U_history,
+            "prod_U_ref_history": prod_U_ref_history,
+            "prod_accepted_history": prod_accepted_history,
+            "prod_dN_history": prod_dN_history,
+            "prod_proposed_dN_history": prod_proposed_dN_history,
+            "prod_oms_occ_history": prod_oms_occ_history,
+            "prod_snapshots": prod_snapshots,
+            "trajectory": trajectory,
+            "elapsed_s": float(elapsed_prior + (time.perf_counter() - t0)),
+        }
+
+    for cyc in range(start_cyc, total_cycles):
+        mask = np.zeros(n_b, dtype=np.int32)
+        cyc_prop_dN = [0] * n_b
+        cyc_net_dN = [0] * n_b
+
         trials = proposer.propose_k_quat(k_steps) if use_quat else proposer.propose_k(k_steps)
-        if batch_target_fn is not None:
+        if grid_only:
+            tri_evals = [(float(trials[b]["U_ref_K"]), False) for b in range(n_b)]
+        elif batch_target_fn is not None:
             tri_evals = batch_target_fn(trials)
         else:
             tri_evals = [target_fn(trials[b]) for b in range(n_b)]
 
-        mask = np.zeros(n_b, dtype=np.int32)
         for b in range(n_b):
             inner_acc_tot[b] += trials[b]["inner_acc"]
+            if not math.isfinite(float(trials[b]["U_ref_K"])):
+                raise RuntimeError(f"Non-finite trial reference energy at cycle {cyc}, box {b}: {trials[b]['U_ref_K']}")
+            n_prev = int(N_curr[b])
             dU_ref = trials[b]["U_ref_K"] - U_ref_curr[b]
-            dN = int(trials[b]["N"]) - int(N_curr[b])
+            dN = int(trials[b]["N"]) - n_prev
+            cyc_prop_dN[b] = dN
             u_tgt_tri, ov = tri_evals[b]
+            if not ov and not math.isfinite(float(u_tgt_tri)):
+                raise RuntimeError(f"Non-finite trial target energy at cycle {cyc}, box {b}: {u_tgt_tri}")
             accepted = False
-            if not ov:
+            if grid_only:
+                accepted = True
+            elif not ov:
                 dU_tgt = u_tgt_tri - U_tgt_curr[b]
                 ddU = dU_tgt - dU_ref - delta_eps_K * float(dN)
+                if not math.isfinite(float(ddU)):
+                    raise RuntimeError(f"Non-finite Nested MC ddU at cycle {cyc}, box {b}: {ddU}")
                 if ddU <= 0.0:
                     accepted = True
                 else:
@@ -1131,6 +1667,9 @@ def run_nested_mc(
                     if arg > -50.0 and rng.random() < math.exp(arg):
                         accepted = True
             if cyc >= eq_cycles:
+                nested_trials += 1
+                same_cfg = _states_equal(trials[b], curr[b])
+                prod_total_trials += 1
                 if dN > 0:
                     prod_ins_att += 1
                     if accepted:
@@ -1139,20 +1678,52 @@ def run_nested_mc(
                     prod_del_att += 1
                     if accepted:
                         prod_del_acc += 1
+                if not accepted:
+                    prod_rejected += 1
+                elif n_prev == 0 and int(trials[b]["N"]) == 0:
+                    acc_empty_to_empty += 1
+                elif same_cfg:
+                    acc_identity_nonempty += 1
+                elif dN == 0:
+                    acc_same_N_changed += 1
+                else:
+                    acc_dN_changed += 1
+
             if accepted:
                 mask[b] = 1
                 U_tgt_curr[b] = u_tgt_tri
                 U_ref_curr[b] = trials[b]["U_ref_K"]
                 N_curr[b] = trials[b]["N"]
+                curr[b] = trials[b]
+                cyc_net_dN[b] = dN
                 acc_outer[b] += 1
                 if cyc >= eq_cycles:
                     prod_acc_outer[b] += 1
+                    nested_accepted += 1
 
         proposer.commit(mask)
 
         if cyc >= eq_cycles:
             prod_N_history.append([int(x) for x in N_curr])
             prod_U_history.append([float(U_tgt_curr[b] * K_TO_KJMOL) for b in range(n_b)])
+            prod_U_ref_history.append([float(U_ref_curr[b] * K_TO_KJMOL) for b in range(n_b)])
+            prod_accepted_history.append([int(mask[b]) for b in range(n_b)])
+            prod_dN_history.append(cyc_net_dN)
+            prod_proposed_dN_history.append(cyc_prop_dN)
+            if oms_metal_pos is not None:
+                prod_oms_occ_history.append([
+                    count_oms_occupied(
+                        curr[b], oms_metal_pos, oms_cell_rows,
+                        guest_local_pos=guest_local_pos, cutoff_A=oms_cutoff_A, inv_cell_rows=oms_inv_cell,
+                    )
+                    for b in range(n_b)
+                ])
+            prod_step = cyc - eq_cycles + 1
+            if snapshot_stride > 0 and (prod_step % snapshot_stride == 0 or cyc == total_cycles - 1):
+                prod_snapshots.append({
+                    "prod_cycle": int(prod_step),
+                    "states": _serialize_box_states(curr),
+                })
             for b in range(n_b):
                 dn = float(N_curr[b])
                 du = float(U_tgt_curr[b])
@@ -1172,15 +1743,21 @@ def run_nested_mc(
                 "U_ref_kJ": float(U_ref_curr[0] * K_TO_KJMOL),
                 "accepted": bool(mask[0]),
             })
+        if checkpoint_fn is not None and checkpoint_every > 0 and ((cyc + 1) % checkpoint_every == 0):
+            checkpoint_fn(_build_ckpt(cyc + 1))
         if log_every > 0 and ((cyc + 1) % log_every == 0):
-            elapsed = time.perf_counter() - t0
+            elapsed = elapsed_prior + (time.perf_counter() - t0)
             mean_up_now = float(np.mean(N_curr) * conv_mmol_g)
             print(
                 f"  [NestedMC cyc {cyc+1:4d}/{total_cycles}] N={N_curr.tolist()} ({mean_up_now:.2f} mmol/g) "
                 f"Acc={np.mean(acc_outer)/(cyc+1)*100:5.1f}% ({elapsed:.1f}s)"
             )
 
-    dt = time.perf_counter() - t0
+    dt = elapsed_prior + (time.perf_counter() - t0)
+    final_ckpt = _build_ckpt(total_cycles)
+    if checkpoint_fn is not None and total_cycles > start_cyc:
+        checkpoint_fn(final_ckpt)
+
     prod_denom = max(1, prod_cycles)
     tot_denom = max(1, total_cycles)
     box_uptakes = (sum_N / prod_denom) * conv_mmol_g if prod_cycles > 0 else np.zeros(n_b, dtype=np.float64)
@@ -1199,16 +1776,18 @@ def run_nested_mc(
         box_molar_qst.append(mq)
         if varN > 1e-12:
             q_K = T_K - (mUN - mU * mN) / varN
-            box_qst.append(q_K * K_TO_KJMOL)
-        elif mN > 0:
-            box_qst.append((T_K - mU / mN) * K_TO_KJMOL)
+            box_qst.append(float(q_K * K_TO_KJMOL))
         else:
-            box_qst.append(0.0)
+            box_qst.append(None)
 
     mean_up = float(np.mean(box_uptakes))
     sem_up = float(np.std(box_uptakes, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
-    per_box_mean_qst = float(np.mean(box_qst))
-    per_box_sem_qst = float(np.std(box_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
+    valid_box_qst = [q for q in box_qst if q is not None]
+    per_box_mean_qst = float(np.mean(valid_box_qst)) if valid_box_qst else None
+    per_box_sem_qst = (
+        float(np.std(valid_box_qst, ddof=1) / math.sqrt(len(valid_box_qst)))
+        if len(valid_box_qst) > 1 else (0.0 if len(valid_box_qst) == 1 else None)
+    )
     box_moments = [
         {
             "n_samples": int(prod_cycles),
@@ -1219,38 +1798,38 @@ def run_nested_mc(
         }
         for b in range(n_b)
     ]
-    jack = compute_pooled_jackknife_qst(box_moments, T_K)
-    mean_qst = float(jack["Qst_kJ_mol"])
-    sem_qst = float(jack["Qst_sem_kJ_mol"])
+
+    from mcmc_diagnostics import compute_independent_qst
+    qst_res = compute_independent_qst(
+        prod_N_history, prod_U_history, T_K=T_K,
+        prod_ins_acc=prod_ins_acc, prod_del_acc=prod_del_acc,
+    )
+    mean_qst = qst_res["qst_fluctuation_kJ_mol"]
+    sem_qst = qst_res["qst_fluctuation_sem_kJ_mol"]
     mean_mb = float(np.mean(box_molar_bind))
     mean_mq = float(np.mean(box_molar_qst))
     sem_mq = float(np.std(box_molar_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
 
+    acceptance_breakdown = {
+        "total_trials": int(prod_total_trials),
+        "rejected": int(prod_rejected),
+        "acc_empty_to_empty": int(acc_empty_to_empty),
+        "acc_identity_nonempty": int(acc_identity_nonempty),
+        "acc_same_N_changed": int(acc_same_N_changed),
+        "acc_dN_changed": int(acc_dN_changed),
+        "effective_move_acc_rate": float((acc_same_N_changed + acc_dN_changed) / max(1, prod_total_trials)),
+        "nested_trials": int(nested_trials),
+        "nested_accepted": int(nested_accepted),
+    }
+
     ess_stats = compute_ess_stats(prod_N_history, prod_U_history, dt)
     final_acc = proposer.get_accepted_quat() if use_quat else proposer.get_accepted()
-    final_states = []
-    for st in final_acc:
-        d_st = {
-            "N": int(st["N"]),
-            "U_ref_K": float(st["U_ref_K"]),
-            "cx": st["cx"].tolist(),
-            "cy": st["cy"].tolist(),
-            "cz": st["cz"].tolist(),
-        }
-        if "qw" in st:
-            d_st["qw"] = st["qw"].tolist()
-            d_st["qx"] = st["qx"].tolist()
-            d_st["qy"] = st["qy"].tolist()
-            d_st["qz"] = st["qz"].tolist()
-        else:
-            d_st["ux"] = st["ux"].tolist()
-            d_st["uy"] = st["uy"].tolist()
-            d_st["uz"] = st["uz"].tolist()
-        final_states.append(d_st)
+    final_states = _serialize_box_states(final_acc)
 
     return {
         "n_boxes": n_b,
         "k_steps": k_steps,
+        "grid_only": bool(grid_only),
         "eq_cycles": eq_cycles,
         "prod_cycles": prod_cycles,
         "delta_eps_kJ_mol": float(delta_eps_K * K_TO_KJMOL),
@@ -1258,9 +1837,14 @@ def run_nested_mc(
         "uptake_mmol_g": mean_up,
         "uptake_sem_mmol_g": sem_up,
         "box_uptakes_mmol_g": box_uptakes.tolist(),
-        "Qst_estimator": "pooled_jackknife",
+        "Qst_estimator": "independent_fluctuation",
         "Qst_kJ_mol": mean_qst,
         "Qst_sem_kJ_mol": sem_qst,
+        "qst_status": qst_res["qst_status"],
+        "qst_reasons": qst_res["qst_reasons"],
+        "qst_chain_jackknife_sem_kJ_mol": qst_res.get("qst_chain_jackknife_sem_kJ_mol"),
+        "qst_block_jackknife_sem_kJ_mol": qst_res.get("qst_block_jackknife_sem_kJ_mol"),
+        "per_chain_qst_kJ_mol": qst_res.get("per_chain_qst_kJ_mol", []),
         "Qst_per_box_mean_kJ_mol": per_box_mean_qst,
         "Qst_per_box_sem_kJ_mol": per_box_sem_qst,
         "box_qst_kJ_mol": box_qst,
@@ -1283,11 +1867,19 @@ def run_nested_mc(
         "prod_ins_acc": int(prod_ins_acc),
         "prod_del_att": int(prod_del_att),
         "prod_del_acc": int(prod_del_acc),
+        "acceptance_breakdown": acceptance_breakdown,
         "mean_inner_acc_per_burst": float(np.mean(inner_acc_tot) / tot_denom),
         "effective_mc_steps_per_target_eval": float(k_steps * np.mean(acc_outer) / tot_denom),
         "box_N_history": box_N_history,
         "prod_N_history": prod_N_history,
         "prod_U_history": prod_U_history,
+        "prod_U_ref_history": prod_U_ref_history,
+        "prod_accepted_history": prod_accepted_history,
+        "prod_dN_history": prod_dN_history,
+        "prod_proposed_dN_history": prod_proposed_dN_history,
+        "prod_oms_occ_history": prod_oms_occ_history,
+        "prod_snapshots": prod_snapshots,
         "trajectory": trajectory,
         "final_states": final_states,
+        "final_cuda_rng_states": final_ckpt["cuda_rng_states"],
     }
