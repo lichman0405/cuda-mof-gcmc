@@ -453,6 +453,7 @@ def _solve_1b_model(
     n_rad: int,
     active_q_modes: bool,
     seed: int = 123,
+    env_sigs: Optional[list] = None,
 ) -> dict:
     """Fit constrained 1-body surrogate and report honest held-out validation metrics."""
     from scipy.linalg import null_space
@@ -474,18 +475,42 @@ def _solve_1b_model(
     X_full = np.hstack([X_sr, X_ew]) if n_q_modes > 0 else X_sr
     n_params = X_full.shape[1]
 
-    # Bounds: core exponent weights (k == 0) >= 25.0 K to guarantee short-range repulsive wall;
-    # non-core RBF splines bounded within [-2500, +6000] to avoid multi-site collinear cancellation (e.g., CH4 C/H)
-    lb = np.full(n_params, -2500.0, dtype=np.float64)
-    ub = np.full(n_params, +6000.0, dtype=np.float64)
+    nonmetal_zs = {1, 5, 6, 7, 8, 9, 14, 15, 16, 17, 34, 35, 53}
+    is_metal_env = [
+        (int(env_sigs[e][0]) not in nonmetal_zs) if (env_sigs is not None and e < len(env_sigs)) else True
+        for e in range(n_env)
+    ]
+
+    # Bounds & distance-aware Tikhonov regularization:
+    # prevent multi-site collinear cancellation (e.g., tetrahedral CH4 C vs 4*H) while preserving OMS depth
+    lb = np.full(n_params, -350.0, dtype=np.float64)
+    ub = np.full(n_params, +600.0, dtype=np.float64)
+    reg_diag = np.full(n_params, max(40.0, 0.25 * N), dtype=np.float64)
     for c in range(n_chan):
         for e in range(n_env):
-            col_core = (c * n_env + e) * n_rad
-            lb[col_core] = 25.0
-            ub[col_core] = 5.0e4
+            base = (c * n_env + e) * n_rad
+            # k == 0: short-range repulsive core
+            lb[base] = 50.0
+            ub[base] = 5.0e4
+            reg_diag[base] = 1.0e-3
+            for k in range(1, n_rad):
+                col = base + k
+                if k <= 3:  # mu <= 2.22 A (inner wall transition)
+                    lb[col] = -2000.0 if is_metal_env[e] else -150.0
+                    ub[col] = 6000.0
+                    reg_diag[col] = max(2.0, 0.015 * N) if is_metal_env[e] else max(5.0, 0.03 * N)
+                elif k <= 5:  # mu = 2.46, 2.72 A (vdW / OMS pocket)
+                    lb[col] = -2000.0 if is_metal_env[e] else -400.0
+                    ub[col] = 2500.0 if is_metal_env[e] else 1000.0
+                    reg_diag[col] = max(2.0, 0.015 * N) if is_metal_env[e] else max(8.0, 0.05 * N)
+                else:  # mu >= 3.00 A (tail; high ridge suppresses cross-site constant offsets)
+                    lb[col] = -350.0
+                    ub[col] = 500.0
+                    reg_diag[col] = max(40.0, 0.25 * N)
     for m in range(n_q_modes):
         lb[n_sr + m] = -5.0
         ub[n_sr + m] = +5.0
+        reg_diag[n_sr + m] = 2.0e2
 
     # Boltzmann-inspired weights: emphasize OMS pockets & binding minima, prevent high-wall outliers from skewing pocket
     y_kJ = y_K * K_TO_KJMOL
@@ -498,14 +523,6 @@ def _solve_1b_model(
             1.0 / (1.0 + np.maximum(0.0, y_kJ - 15.0) / 15.0),
         ),
     )
-
-    # Regularization matrix (moderate Tikhonov on splines prevents polyatomic collinearity, stronger on Ewald modes)
-    reg_diag = np.full(n_params, 2.0, dtype=np.float64)
-    for c in range(n_chan):
-        for e in range(n_env):
-            reg_diag[(c * n_env + e) * n_rad] = 1.0e-4
-    if n_q_modes > 0:
-        reg_diag[n_sr:] = 2.0e2
 
     def _fit_subset(idx_sub: np.ndarray) -> np.ndarray:
         sw = np.sqrt(w_sample[idx_sub])[:, None]
@@ -961,6 +978,7 @@ def distill_mlip_surrogate(
         X_rad, X_phi, y_1b, mol_dmin, env_info["env_counts"],
         n_chan=n_chan, n_env=n_env, n_rad=n_rad,
         active_q_modes=active_q_modes, seed=distill_seed + 11,
+        env_sigs=env_info["unique_sigs"],
     )
 
     # 2. Pore-confined 2-body sampling (reusing evaluated 1-body poses + supercell lattice translations)
