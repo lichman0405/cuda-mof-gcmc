@@ -474,9 +474,10 @@ def _solve_1b_model(
     X_full = np.hstack([X_sr, X_ew]) if n_q_modes > 0 else X_sr
     n_params = X_full.shape[1]
 
-    # Bounds: core exponent weights (k == 0) >= 25.0 K to guarantee short-range repulsive wall
-    lb = np.full(n_params, -2.0e5, dtype=np.float64)
-    ub = np.full(n_params, +2.0e5, dtype=np.float64)
+    # Bounds: core exponent weights (k == 0) >= 25.0 K to guarantee short-range repulsive wall;
+    # non-core RBF splines bounded within [-2500, +6000] to avoid multi-site collinear cancellation (e.g., CH4 C/H)
+    lb = np.full(n_params, -2500.0, dtype=np.float64)
+    ub = np.full(n_params, +6000.0, dtype=np.float64)
     for c in range(n_chan):
         for e in range(n_env):
             col_core = (c * n_env + e) * n_rad
@@ -498,8 +499,8 @@ def _solve_1b_model(
         ),
     )
 
-    # Regularization matrix (light Tikhonov on splines, moderate on Ewald modes)
-    reg_diag = np.full(n_params, 1.0e-2, dtype=np.float64)
+    # Regularization matrix (moderate Tikhonov on splines prevents polyatomic collinearity, stronger on Ewald modes)
+    reg_diag = np.full(n_params, 2.0, dtype=np.float64)
     for c in range(n_chan):
         for e in range(n_env):
             reg_diag[(c * n_env + e) * n_rad] = 1.0e-4
@@ -697,7 +698,7 @@ def _render_unit_cell_grids(
             val = rad_2d @ w_sr_flat[c] + chan_q[c] * phi_term
             r_hard = 1.20 if chan_Z[c] == 1 else 1.48
             ovl = (dmin_pts < r_hard) | (val > 1.0e5)
-            grids_flat[c, g0:g1] = np.where(ovl, 1.0e6, np.clip(val, -2.0e5, 1.0e5)).astype(np.float32)
+            grids_flat[c, g0:g1] = np.where(ovl, 1.0e6, np.clip(val, -2.0e4, 1.0e5)).astype(np.float32)
 
     return np.ascontiguousarray(grids_flat.reshape(n_chan, nz, ny, nx), dtype=np.float32)
 

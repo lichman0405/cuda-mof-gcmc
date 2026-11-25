@@ -477,7 +477,7 @@ def _evaluate_shift_stage(states, target_evals, low_cap: float, high_cap: float,
             raw_per_box.append(None)
     valid = [v for v in raw_per_box if v is not None]
     if valid:
-        raw_mean = float(np.mean(valid))
+        raw_mean = float(np.median(valid)) if len(valid) >= 3 else float(np.mean(valid))
         clamped = float(max(low_cap, min(high_cap, raw_mean)))
         hit_upper = bool(raw_mean > high_cap)
         hit_lower = bool(raw_mean < low_cap)
