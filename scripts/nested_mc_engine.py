@@ -151,6 +151,8 @@ class CudaGcmcProposer:
         max_mol: int = 128,
         seed: int = 20261123,
         device_id: int = 0,
+        cbmc_k: int = 128,
+        p_ins_del: float = 0.60,
     ):
         obj = cls.__new__(cls)
         _register_dll_dirs()
@@ -201,6 +203,53 @@ class CudaGcmcProposer:
         if not obj.handle:
             raise RuntimeError("proposer_create_from_data returned NULL")
         obj._init_after_handle()
+        obj.set_mc_params(cbmc_k=int(cbmc_k), p_ins_del_total=float(p_ins_del))
+        return obj
+
+    @classmethod
+    def from_distilled(
+        cls,
+        fw_data: dict,
+        guest,
+        distill_res: dict,
+        supercell=(1, 1, 2),
+        T_K: float = 298.0,
+        pressure_bar: float = 0.15,
+        n_boxes: int = 1,
+        max_mol: int = 128,
+        seed: int = 20261123,
+        device_id: int = 0,
+        cbmc_k: int = 128,
+        p_ins_del: float = 0.60,
+    ):
+        grids = np.ascontiguousarray(distill_res["grids_u_lj"], dtype=np.float32)
+        if grids.ndim != 4:
+            raise ValueError(f"Expected 4D grids (n_lj, nz, ny, nx), got shape {grids.shape}")
+        grid_dims = (int(grids.shape[3]), int(grids.shape[2]), int(grids.shape[1]))
+        obj = cls.from_atoms(
+            fw_data=fw_data,
+            guest=guest,
+            supercell=tuple(supercell),
+            T_K=float(T_K),
+            pressure_bar=float(pressure_bar),
+            ff_mode=2,
+            pol_mode=0,
+            grid_dims=grid_dims,
+            n_boxes=int(n_boxes),
+            max_mol=int(max_mol),
+            seed=int(seed),
+            device_id=int(device_id),
+            cbmc_k=int(cbmc_k),
+            p_ins_del=float(p_ins_del),
+        )
+        obj.set_external_grids(grids)
+        obj.set_gg_lut(
+            gg_q_scale=float(distill_res.get("gg_q_scale", 1.0)),
+            gg_lj_scale=float(distill_res.get("gg_lj_scale", 1.0)),
+            r_min_A=float(distill_res.get("gg_lut_rmin_A", 2.0)),
+            r_max_A=float(distill_res.get("gg_lut_rmax_A", 10.0)),
+            gg_com_lut_K=distill_res.get("gg_com_lut_K"),
+        )
         return obj
 
     def _init_after_handle(self):
@@ -339,6 +388,67 @@ class CudaGcmcProposer:
             ctypes.POINTER(ctypes.c_double),
         ]
         L.proposer_run_direct_benchmark.restype = ctypes.c_int
+        L.proposer_set_external_grids.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+        ]
+        L.proposer_set_external_grids.restype = ctypes.c_int
+        L.proposer_set_gg_lut.argtypes = [
+            ctypes.c_void_p, ctypes.c_double, ctypes.c_double,
+            ctypes.c_double, ctypes.c_double, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        L.proposer_set_gg_lut.restype = ctypes.c_int
+        L.proposer_set_mc_params.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double]
+        L.proposer_set_mc_params.restype = ctypes.c_int
+
+    def set_external_grids(self, grids_u_lj: np.ndarray, phi_elec: Optional[np.ndarray] = None) -> None:
+        arr = np.ascontiguousarray(grids_u_lj, dtype=np.float32)
+        if arr.ndim != 4:
+            raise ValueError(f"grids_u_lj must have shape (n_lj, nz, ny, nx), got {arr.shape}")
+        n_lj, nz, ny, nx = [int(x) for x in arr.shape]
+        phi_ptr = ctypes.POINTER(ctypes.c_float)()
+        if phi_elec is not None:
+            phi_arr = np.ascontiguousarray(phi_elec, dtype=np.float32)
+            if phi_arr.shape != (nz, ny, nx):
+                raise ValueError(f"phi_elec shape {phi_arr.shape} != {(nz, ny, nx)}")
+            phi_ptr = phi_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        rc = self.lib.proposer_set_external_grids(
+            self.handle, nx, ny, nz, n_lj,
+            arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            phi_ptr,
+        )
+        if rc != 0:
+            raise RuntimeError(f"proposer_set_external_grids failed with code {rc}")
+
+    def set_gg_lut(
+        self,
+        gg_q_scale: float = 1.0,
+        gg_lj_scale: float = 1.0,
+        r_min_A: float = 2.0,
+        r_max_A: float = 10.0,
+        gg_com_lut_K: Optional[np.ndarray] = None,
+    ) -> None:
+        if gg_com_lut_K is not None and len(gg_com_lut_K) >= 2:
+            lut_arr = np.ascontiguousarray(gg_com_lut_K, dtype=np.float32).reshape(-1)
+            n_bins = int(len(lut_arr))
+            lut_ptr = lut_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        else:
+            n_bins = 0
+            lut_ptr = ctypes.POINTER(ctypes.c_float)()
+        rc = self.lib.proposer_set_gg_lut(
+            self.handle, float(gg_q_scale), float(gg_lj_scale),
+            float(r_min_A), float(r_max_A), n_bins, lut_ptr,
+        )
+        if rc != 0:
+            raise RuntimeError(f"proposer_set_gg_lut failed with code {rc}")
+
+    def set_mc_params(self, cbmc_k: int = 128, p_ins_del_total: float = 0.60) -> None:
+        rc = self.lib.proposer_set_mc_params(self.handle, int(cbmc_k), float(p_ins_del_total))
+        if rc != 0:
+            raise RuntimeError(f"proposer_set_mc_params failed with code {rc}")
+        self.cbmc_k = int(cbmc_k)
+        self.p_ins_del = float(p_ins_del_total)
 
     def close(self):
         if getattr(self, "handle", None):

@@ -21,10 +21,17 @@ import numpy as np
 from multi_gpu import (
     parse_gpu_ids,
     resolve_worker_cuda_visible_devices,
+    run_distill_on_gpu,
     run_pressures_parallel,
     run_replicas_parallel,
 )
 from mcmc_diagnostics import evaluate_v2_convergence
+from mlip_distill import (
+    compute_distill_cache_key,
+    distill_mlip_surrogate,
+    load_distill_cache,
+    make_distilled_guest_spec,
+)
 from nested_mc_engine import (
     CudaGcmcProposer,
     FastMaceD3Target,
@@ -38,9 +45,10 @@ from qeq_charges import extract_framework_for_proposer
 from run_metadata import collect_run_metadata, validate_resume_metadata
 
 PROPOSER_MAP = {
-    "uff": (0, 0),       # Generic UFF + REPEAT (0 charge supported) + TraPPE CO2
-    "pol3site": (0, 2),  # UFF + 3-site framework E-field polarization + Thole
-    "mercado": (1, 0),   # Mercado 2016 DFT-FF + EPM2 CO2
+    "auto_mlip": (2, 0),  # On-the-fly 1B+2B self-distilled MLIP grid + 2B LUT
+    "uff": (0, 0),        # Generic UFF + REPEAT (0 charge supported) + TraPPE CO2
+    "pol3site": (0, 2),   # UFF + 3-site framework E-field polarization + Thole
+    "mercado": (1, 0),    # Mercado 2016 DFT-FF + EPM2 CO2
 }
 
 
@@ -52,7 +60,7 @@ def parse_args():
     p.add_argument("--pressures", nargs="+", type=float, required=True, help="Pressures in bar")
     p.add_argument("--guest", default="co2", help="Rigid guest preset (co2, ch4, n2, h2, ar, h2o, nh3)")
     p.add_argument("--guest-json", default="", help="Optional custom rigid guest JSON path")
-    p.add_argument("--proposer", choices=["uff", "pol3site", "mercado"], default="mercado", help="Inner GPU classical proposer")
+    p.add_argument("--proposer", choices=["auto_mlip", "uff", "pol3site", "mercado"], default="auto_mlip", help="Inner GPU proposer")
     p.add_argument("--charge-mode", choices=["auto", "cif", "qeq", "zero"], default="auto", help="Inner framework charge mode")
     p.add_argument("--model", default="medium", help="MACE foundation model name or checkpoint path")
     p.add_argument("--dispersion", choices=["on", "off"], default="on", help="Enable TorchDFTD3 D3(BJ)")
@@ -65,9 +73,15 @@ def parse_args():
     p.add_argument("--boxes", type=int, default=4, help="Parallel simulation replicas")
     p.add_argument("--max-mol", type=int, default=128, help="Max guest molecules per supercell")
     p.add_argument("--k-steps", type=int, default=25, help="Inner GPU GCMC steps per outer Nested MC cycle")
+    p.add_argument("--cbmc-k", type=int, default=128, help="Block-parallel GPU CBMC trial poses per inner insert/delete (1..128)")
+    p.add_argument("--p-ins-del", type=float, default=0.60, help="Total insertion+deletion move fraction inside GPU proposer")
+    p.add_argument("--distill-samples-1b", type=int, default=960, help="Single-molecule MACE evaluations for auto_mlip 1B distillation")
+    p.add_argument("--distill-samples-2b", type=int, default=192, help="Pore dimer MACE evaluations for auto_mlip 2B distillation")
+    p.add_argument("--distill-cache-dir", default="build/distill_cache", help="Disk cache directory for distilled 1B+2B grids")
+    p.add_argument("--grid-only", action="store_true", help="Run pure GPU surrogate grid GCMC without outer MLIP reweighting (ablation mode)")
     p.add_argument("--eq-cycles", type=int, default=120, help="Outer equilibration cycles")
     p.add_argument("--prod-cycles", type=int, default=320, help="Outer production cycles")
-    p.add_argument("--pilot-cycles", type=int, default=60, help="Target-ensemble pilot burn-in cycles for Stage-3 shift calibration (0 disables)")
+    p.add_argument("--pilot-cycles", type=int, default=40, help="Target-ensemble pilot burn-in cycles for Stage-3 shift calibration (0 disables)")
     p.add_argument("--shift-override", type=float, default=None, help="Optional fixed chem-pot shift (kJ/mol) overriding auto calibration")
     p.add_argument("--init-mode", choices=["auto", "empty", "high_loading"], default="auto", help="Initial state prepared right before target equilibration (detached from shift calibration)")
     p.add_argument("--init-loading", type=float, default=8.0, help="Target loading (mmol/g) when --init-mode high_loading")
@@ -575,24 +589,47 @@ def run_pressure_point(
     snapshot_stride: int = 0,
     run_metadata: dict | None = None,
     grid_only: bool = False,
+    cbmc_k: int = 128,
+    p_ins_del: float = 0.60,
+    distill_res: dict | None = None,
 ):
     t_prop0 = time.perf_counter()
-    prop = CudaGcmcProposer.from_atoms(
-        fw_data=fw_data,
-        guest=guest,
-        supercell=tuple(supercell),
-        T_K=T_K,
-        pressure_bar=P_bar,
-        ff_mode=ff_mode,
-        pol_mode=pol_mode,
-        grid_dims=tuple(grid_dims),
-        n_boxes=n_boxes,
-        max_mol=max_mol,
-        seed=seed,
-        device_id=device_id,
-    )
+    if int(ff_mode) == 2:
+        if distill_res is None:
+            raise ValueError("ff_mode=2 (auto_mlip) requires distill_res")
+        prop = CudaGcmcProposer.from_distilled(
+            fw_data=fw_data,
+            guest=guest,
+            distill_res=distill_res,
+            supercell=tuple(supercell),
+            T_K=T_K,
+            pressure_bar=P_bar,
+            n_boxes=n_boxes,
+            max_mol=max_mol,
+            seed=seed,
+            device_id=device_id,
+            cbmc_k=int(cbmc_k),
+            p_ins_del=float(p_ins_del),
+        )
+    else:
+        prop = CudaGcmcProposer.from_atoms(
+            fw_data=fw_data,
+            guest=guest,
+            supercell=tuple(supercell),
+            T_K=T_K,
+            pressure_bar=P_bar,
+            ff_mode=ff_mode,
+            pol_mode=pol_mode,
+            grid_dims=tuple(grid_dims),
+            n_boxes=n_boxes,
+            max_mol=max_mol,
+            seed=seed,
+            device_id=device_id,
+            cbmc_k=int(cbmc_k),
+            p_ins_del=float(p_ins_del),
+        )
     prop_grid_wall_s = float(time.perf_counter() - t_prop0)
-    if verify_consistency:
+    if verify_consistency and target is not None:
         cons = verify_proposer_target_consistency(prop, target)
         print(
             f"  [Consistency OK] unit={cons['n_unit_atoms']} super={cons['n_super_atoms']} "
@@ -601,11 +638,14 @@ def run_pressure_point(
         )
     conv_mmol_g = 1000.0 / prop.fw_mass_gmol
 
-    has_fw = getattr(target, "fw", None) is not None
-    fw_pos = np.asarray(target.fw.get_positions(), dtype=np.float64) if has_fw else None
-    oms_metal_pos = extract_oms_metal_positions(target.fw) if has_fw else None
-    oms_cell_rows = np.asarray(target.fw.get_cell(), dtype=np.float64) if oms_metal_pos is not None else None
-    guest_local_pos = getattr(target, "guest_local_pos", None)
+    if target is not None and getattr(target, "fw", None) is not None:
+        fw_super = target.fw
+    else:
+        fw_super = fw_data["uc"].repeat(tuple(supercell))
+    fw_pos = np.asarray(fw_super.get_positions(), dtype=np.float64)
+    oms_metal_pos = extract_oms_metal_positions(fw_super)
+    oms_cell_rows = np.asarray(fw_super.get_cell(), dtype=np.float64) if len(oms_metal_pos) > 0 else None
+    guest_local_pos = guest.real_local_positions() if hasattr(guest, "real_local_positions") else getattr(target, "guest_local_pos", None)
 
     ckpt_path = None
     if checkpoint_dir:
@@ -629,7 +669,13 @@ def run_pressure_point(
     else:
         t_calib0 = time.perf_counter()
         shift_calib = {"mode": "override" if shift_override is not None else str(shift_mode)}
-        if shift_override is not None:
+        if grid_only:
+            de_final = 0.0
+            prop.set_chem_pot_shift(0.0)
+            if init_mode == "auto":
+                prop.equilibrate(30000)
+            shift_calib = {"mode": "grid_only", "final_kJ_mol": 0.0}
+        elif shift_override is not None:
             de_final = float(shift_override)
             prop.set_chem_pot_shift(de_final)
             if init_mode == "auto":
@@ -641,7 +687,8 @@ def run_pressure_point(
             prop.equilibrate(20000)
             cal1_st = prop.get_accepted_quat()
             boosts_tried = []
-            if np.mean([s["N"] for s in cal1_st]) < 4.0:
+            mean_n1 = float(np.mean([s["N"] for s in cal1_st]))
+            if mean_n1 < 4.0:
                 for boost in (-4.0, -8.0, -12.0, -16.0):
                     boosts_tried.append(boost)
                     prop.set_chem_pot_shift(boost)
@@ -649,8 +696,16 @@ def run_pressure_point(
                     cal1_st = prop.get_accepted_quat()
                     if np.mean([s["N"] for s in cal1_st]) >= 4.0:
                         break
+            elif mean_n1 > 0.85 * float(max_mol):
+                for boost in (4.0, 8.0, 12.0):
+                    boosts_tried.append(boost)
+                    prop.set_chem_pot_shift(boost)
+                    prop.equilibrate(15000)
+                    cal1_st = prop.get_accepted_quat()
+                    if np.mean([s["N"] for s in cal1_st]) <= 0.85 * float(max_mol):
+                        break
             cal1_u = target.eval_batch(cal1_st)
-            de1, s1_info = _evaluate_shift_stage(cal1_st, cal1_u, -24.0, 2.0, 0.0)
+            de1, s1_info = _evaluate_shift_stage(cal1_st, cal1_u, -24.0, 24.0, 0.0)
             s1_info["boosts_tried_kJ_mol"] = boosts_tried
             shift_calib["stage1"] = s1_info
             prop.set_chem_pot_shift(de1)
@@ -658,7 +713,7 @@ def run_pressure_point(
 
             cal2_st = prop.get_accepted_quat()
             cal2_u = target.eval_batch(cal2_st)
-            de2, s2_info = _evaluate_shift_stage(cal2_st, cal2_u, -24.0, 2.0, de1)
+            de2, s2_info = _evaluate_shift_stage(cal2_st, cal2_u, -24.0, 24.0, de1)
             shift_calib["stage2"] = s2_info
             prop.set_chem_pot_shift(de2)
             prop.equilibrate(20000)
@@ -675,7 +730,7 @@ def run_pressure_point(
                         oms_metal_pos=oms_metal_pos, oms_cell_rows=oms_cell_rows,
                         guest_local_pos=guest_local_pos,
                     )
-                    de3a, s3a_info = _evaluate_shift_stage_from_trace(r3a, -24.0, 4.0, de2)
+                    de3a, s3a_info = _evaluate_shift_stage_from_trace(r3a, -24.0, 24.0, de2)
                     shift_calib["stage3a"] = s3a_info
                     prop.set_chem_pot_shift(de3a)
                     if abs(de3a - de2) > 1.0:
@@ -688,7 +743,7 @@ def run_pressure_point(
                         oms_metal_pos=oms_metal_pos, oms_cell_rows=oms_cell_rows,
                         guest_local_pos=guest_local_pos,
                     )
-                    de_final, s3b_info = _evaluate_shift_stage_from_trace(r3b, -24.0, 4.0, de3a)
+                    de_final, s3b_info = _evaluate_shift_stage_from_trace(r3b, -24.0, 24.0, de3a)
                     shift_calib["stage3b"] = s3b_info
                     prop.set_chem_pot_shift(de_final)
                     if init_mode == "auto" and abs(de_final - de3a) > 1.0:
@@ -702,7 +757,7 @@ def run_pressure_point(
                         oms_metal_pos=oms_metal_pos, oms_cell_rows=oms_cell_rows,
                         guest_local_pos=guest_local_pos,
                     )
-                    de_final, s3_info = _evaluate_shift_stage_from_trace(r3, -24.0, 4.0, de2)
+                    de_final, s3_info = _evaluate_shift_stage_from_trace(r3, -24.0, 24.0, de2)
                     shift_calib["stage3"] = s3_info
                     prop.set_chem_pot_shift(de_final)
                     if init_mode == "auto":
@@ -780,13 +835,14 @@ def run_pressure_point(
             "mc_state": mc_state,
         })
 
-    target.n_evals = 0
+    if target is not None:
+        target.n_evals = 0
     res = run_nested_mc(
         prop, None,
         k_steps=k_steps, eq_cycles=eq_cycles, prod_cycles=prod_cycles,
         seed=seed + 17, log_every=max(50, (eq_cycles + prod_cycles) // 5),
-        batch_target_fn=target.eval_batch,
-        oms_metal_pos=oms_metal_pos,
+        batch_target_fn=None if grid_only else target.eval_batch,
+        oms_metal_pos=oms_metal_pos if len(oms_metal_pos) > 0 else None,
         oms_cell_rows=oms_cell_rows,
         guest_local_pos=guest_local_pos,
         snapshot_stride=snapshot_stride,
@@ -819,8 +875,10 @@ def run_pressure_point(
     res["first_half_uptake_mmol_g"] = mean_h1
     res["second_half_uptake_mmol_g"] = mean_h2
     res["stationarity_drift_mmol_g"] = drift
-    res["mlip_evals"] = int(target.n_evals)
+    res["mlip_evals"] = 0 if (grid_only or target is None) else int(target.n_evals)
     res["total_inner_steps"] = int(n_boxes * k_steps * (eq_cycles + prod_cycles))
+    res["cbmc_k"] = int(cbmc_k)
+    res["p_ins_del"] = float(p_ins_del)
     res["prop_grid_wall_s"] = prop_grid_wall_s
     res["shift_calib_wall_s"] = shift_calib_wall_s
     res["shift_calibration"] = shift_calib
@@ -895,7 +953,9 @@ def main():
     guest = load_guest(name=args.guest, guest_json=args.guest_json, proposer=args.proposer)
     guest_label = Path(args.guest_json).stem if args.guest_json else args.guest.strip().lower()
     if ff_mode == 1 and guest.formula != "CO2":
-        raise ValueError(f"--proposer mercado only supports CO2; use --proposer uff for '{guest.name}'.")
+        raise ValueError(f"--proposer mercado only supports CO2; use --proposer auto_mlip or uff for '{guest.name}'.")
+    if ff_mode == 2:
+        guest = make_distilled_guest_spec(guest)
 
     t_init0 = time.perf_counter()
     fw_data = extract_framework_for_proposer(args.cif, charge_mode=args.charge_mode)
@@ -909,13 +969,41 @@ def main():
         else:
             eff_mode = args.parallel_mode
 
-    run_metadata = collect_run_metadata(args=args, fw_data=fw_data, guest=guest, grid_dims=grid_dims)
+    distill_cache_path = None
+    distill_sha256 = None
+    distill_res = None
+    if ff_mode == 2:
+        model_file_guess = str(args.model) if Path(str(args.model)).is_file() else None
+        distill_sha256 = compute_distill_cache_key(
+            cif_path=args.cif,
+            supercell=tuple(args.supercell),
+            guest=guest,
+            grid_dims=grid_dims,
+            model_name=args.model,
+            model_file_path=model_file_guess,
+            dispersion=use_disp,
+            dispersion_xc=args.xc,
+            dtype=args.dtype,
+            n_1b=int(args.distill_samples_1b),
+            n_2b=int(args.distill_samples_2b),
+            distill_seed=int(args.seed) + 50001,
+        )
+        cand_npz = Path(args.distill_cache_dir) / f"distill_{distill_sha256[:16]}.npz"
+        cand_json = cand_npz.with_suffix(".json")
+        if cand_npz.exists() and cand_json.exists():
+            distill_res = load_distill_cache(str(cand_npz))
+            distill_cache_path = str(cand_npz)
+
+    run_metadata = collect_run_metadata(
+        args=args, fw_data=fw_data, guest=guest, grid_dims=grid_dims,
+        prop_info={"distill_sha256": distill_sha256},
+    )
 
     print(
         f"=== Hybrid GPU-GCMC + MLIP Engine ===\n"
         f"  CIF={args.cif} supercell={args.supercell} T={args.temp} K Pressures={args.pressures}\n"
         f"  Guest={guest.name} ({guest.formula}, {len(guest.sites)} sites) | Grid={grid_dims} | Charges={fw_data['charge_source']}\n"
-        f"  Proposer={args.proposer} (ff={ff_mode}, pol={pol_mode}, init={args.init_mode}) | "
+        f"  Proposer={args.proposer} (ff={ff_mode}, pol={pol_mode}, cbmc_k={args.cbmc_k}, grid_only={bool(args.grid_only)}, init={args.init_mode}) | "
         f"MLIP={args.model} (dtype={args.dtype}, dispersion={use_disp}, xc={args.xc})\n"
         f"  GPUs={gpu_ids if gpu_ids else [device_id]} | ParallelMode={eff_mode} | ResumeMode={resume_mode}"
     )
@@ -928,6 +1016,9 @@ def main():
         "charge_mode": args.charge_mode,
         "charge_source": fw_data["charge_source"],
         "proposer": args.proposer,
+        "cbmc_k": int(args.cbmc_k),
+        "p_ins_del": float(args.p_ins_del),
+        "grid_only": bool(args.grid_only),
         "init_mode": args.init_mode,
         "model": args.model,
         "dtype": args.dtype,
@@ -939,6 +1030,8 @@ def main():
         "metadata": run_metadata,
         "points": [],
     }
+    if distill_res is not None:
+        payload["distillation"] = distill_res["summary"]
 
     if resume_mode in ("skip", "extend") and out_json.exists():
         existing = json.loads(out_json.read_text(encoding="utf-8"))
@@ -1002,6 +1095,33 @@ def main():
 
     if pending:
         if len(gpu_ids) > 1:
+            if ff_mode == 2 and distill_res is None:
+                distill_res = run_distill_on_gpu(
+                    gpu_ids[0],
+                    {
+                        "cif_path": str(args.cif),
+                        "fw_data": fw_data,
+                        "guest": guest,
+                        "supercell": tuple(args.supercell),
+                        "grid_dims": grid_dims,
+                        "n_1b": int(args.distill_samples_1b),
+                        "n_2b": int(args.distill_samples_2b),
+                        "distill_seed": int(args.seed) + 50001,
+                        "cache_dir": args.distill_cache_dir,
+                        "model": args.model,
+                        "dtype": args.dtype,
+                        "dispersion": use_disp,
+                        "dispersion_xc": args.xc,
+                        "mace_chunk": args.mace_chunk,
+                        "worker_threads": int(args.worker_threads),
+                    },
+                )
+                distill_cache_path = distill_res["cache_npz_path"]
+                distill_sha256 = distill_res["distill_sha256"]
+                payload["distillation"] = distill_res["summary"]
+                run_metadata["distill_sha256"] = distill_sha256
+                payload["metadata"] = run_metadata
+
             run_cfg = {
                 "cif_path": str(args.cif),
                 "fw_data": fw_data,
@@ -1014,6 +1134,10 @@ def main():
                 "n_boxes": int(args.boxes),
                 "max_mol": int(args.max_mol),
                 "k_steps": int(args.k_steps),
+                "cbmc_k": int(args.cbmc_k),
+                "p_ins_del": float(args.p_ins_del),
+                "grid_only": bool(args.grid_only),
+                "distill_cache_path": distill_cache_path,
                 "eq_cycles": int(args.eq_cycles),
                 "prod_cycles": int(args.prod_cycles),
                 "base_seed": int(args.seed),
@@ -1040,27 +1164,53 @@ def main():
             else:
                 run_replicas_parallel(pending, gpu_ids, run_cfg, on_point_done=_upsert_point)
         else:
-            t_str = str(max(1, int(args.worker_threads)))
-            for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-                os.environ.setdefault(var, t_str)
-            t_load0 = time.perf_counter()
-            target = FastMaceD3Target(
-                cif_path=args.cif,
-                supercell=tuple(args.supercell),
-                model=args.model,
-                device=args.device,
-                dispersion=use_disp,
-                dispersion_xc=args.xc,
-                guest=guest,
-                mace_chunk=args.mace_chunk,
-                uc_atoms=fw_data["uc"],
-                dtype=args.dtype,
-            )
-            target.torch.set_num_threads(max(1, int(args.worker_threads)))
-            model_load_wall_s = float(time.perf_counter() - t_load0)
+            need_target = (not bool(args.grid_only)) or (ff_mode == 2 and distill_res is None)
+            target = None
+            model_load_wall_s = 0.0
+            if need_target:
+                t_str = str(max(1, int(args.worker_threads)))
+                for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+                    os.environ.setdefault(var, t_str)
+                t_load0 = time.perf_counter()
+                target = FastMaceD3Target(
+                    cif_path=args.cif,
+                    supercell=tuple(args.supercell),
+                    model=args.model,
+                    device=args.device,
+                    dispersion=use_disp,
+                    dispersion_xc=args.xc,
+                    guest=guest,
+                    mace_chunk=args.mace_chunk,
+                    uc_atoms=fw_data["uc"],
+                    dtype=args.dtype,
+                )
+                target.torch.set_num_threads(max(1, int(args.worker_threads)))
+                model_load_wall_s = float(time.perf_counter() - t_load0)
             payload["model_load_wall_s"] = model_load_wall_s
+
+            if ff_mode == 2 and distill_res is None:
+                distill_res = distill_mlip_surrogate(
+                    cif_path=args.cif,
+                    fw_data=fw_data,
+                    guest=guest,
+                    supercell=tuple(args.supercell),
+                    target=target,
+                    grid_dims=grid_dims,
+                    n_1b=int(args.distill_samples_1b),
+                    n_2b=int(args.distill_samples_2b),
+                    distill_seed=int(args.seed) + 50001,
+                    cache_dir=args.distill_cache_dir,
+                    model_name=args.model,
+                    dispersion=use_disp,
+                    dispersion_xc=args.xc,
+                    dtype=args.dtype,
+                )
+                payload["distillation"] = distill_res["summary"]
+                distill_sha256 = distill_res["distill_sha256"]
+
             run_metadata = collect_run_metadata(
-                args=args, fw_data=fw_data, guest=guest, grid_dims=grid_dims, target=target
+                args=args, fw_data=fw_data, guest=guest, grid_dims=grid_dims,
+                target=target, prop_info={"distill_sha256": distill_sha256},
             )
             payload["metadata"] = run_metadata
 
@@ -1084,10 +1234,10 @@ def main():
                     prod_cycles=args.prod_cycles,
                     seed=args.seed + i * 100,
                     shift_mode=args.shift_mode,
-                    target=target,
+                    target=None if args.grid_only else target,
                     pilot_cycles=args.pilot_cycles,
                     shift_override=args.shift_override,
-                    verify_consistency=(not consistency_checked),
+                    verify_consistency=(not consistency_checked and target is not None),
                     device_id=device_id,
                     init_mode=args.init_mode,
                     init_loading=args.init_loading,
@@ -1096,6 +1246,10 @@ def main():
                     resume_mode=resume_mode,
                     snapshot_stride=args.snapshot_stride,
                     run_metadata=run_metadata,
+                    grid_only=bool(args.grid_only),
+                    cbmc_k=int(args.cbmc_k),
+                    p_ins_del=float(args.p_ins_del),
+                    distill_res=distill_res,
                 )
                 pt["point_wall_s"] = float(time.perf_counter() - t_pt)
                 pt["model_load_wall_s"] = model_load_wall_s

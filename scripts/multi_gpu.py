@@ -208,6 +208,9 @@ def merge_replica_shard_results(
     merged = {
         "n_boxes": int(total_boxes),
         "k_steps": k_steps,
+        "cbmc_k": int(shards[0].get("cbmc_k", 128)),
+        "p_ins_del": float(shards[0].get("p_ins_del", 0.60)),
+        "grid_only": bool(shards[0].get("grid_only", False)),
         "eq_cycles": int(eq_cycles),
         "prod_cycles": prod_cycles,
         "delta_eps_kJ_mol": _box_weighted_mean("delta_eps_kJ_mol"),
@@ -294,6 +297,64 @@ def merge_replica_shard_results(
     return merged
 
 
+def _distill_worker_main(gpu_id: int, parent_cvd: Optional[str], req: dict, result_q):
+    try:
+        _configure_worker_env(gpu_id, parent_cvd, req.get("worker_threads", 4))
+        import torch
+        from mlip_distill import distill_mlip_surrogate
+        from nested_mc_engine import FastMaceD3Target
+
+        torch.set_num_threads(max(1, int(req.get("worker_threads", 4))))
+        target = FastMaceD3Target(
+            cif_path=req["cif_path"],
+            supercell=tuple(req["supercell"]),
+            model=req["model"],
+            device="cuda:0",
+            dispersion=bool(req["dispersion"]),
+            dispersion_xc=req["dispersion_xc"],
+            guest=req["guest"],
+            mace_chunk=req.get("mace_chunk"),
+            uc_atoms=req["fw_data"]["uc"],
+            dtype=req.get("dtype", "float32"),
+        )
+        res = distill_mlip_surrogate(
+            cif_path=req["cif_path"],
+            fw_data=req["fw_data"],
+            guest=req["guest"],
+            supercell=tuple(req["supercell"]),
+            target=target,
+            grid_dims=tuple(req["grid_dims"]),
+            n_1b=int(req["n_1b"]),
+            n_2b=int(req["n_2b"]),
+            distill_seed=int(req["distill_seed"]),
+            cache_dir=req["cache_dir"],
+            model_name=req["model"],
+            dispersion=bool(req["dispersion"]),
+            dispersion_xc=req["dispersion_xc"],
+            dtype=req.get("dtype", "float32"),
+        )
+        result_q.put(("ok", res["cache_npz_path"]))
+    except BaseException as exc:
+        import traceback
+        result_q.put(("err", f"[Distill GPU {gpu_id}] {exc}\n{traceback.format_exc()}"))
+
+
+def run_distill_on_gpu(gpu_id: int, req: dict) -> dict:
+    """Run one-time MLIP 1B+2B distillation in an isolated spawn subprocess before multi-GPU dispatch."""
+    from mlip_distill import load_distill_cache
+
+    parent_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    ctx = mp.get_context("spawn")
+    result_q = ctx.Queue()
+    p = ctx.Process(target=_distill_worker_main, args=(int(gpu_id), parent_cvd, req, result_q))
+    p.start()
+    msg = result_q.get()
+    p.join(timeout=30.0)
+    if msg[0] == "err":
+        raise RuntimeError(msg[1])
+    return load_distill_cache(msg[1])
+
+
 def _pressure_worker_main(
     worker_rank: int,
     gpu_id: int,
@@ -304,9 +365,16 @@ def _pressure_worker_main(
 ):
     try:
         visible = _configure_worker_env(gpu_id, parent_cvd, run_cfg.get("worker_threads", 4))
+        from mlip_distill import load_distill_cache
         from run_mlip_gcmc import run_pressure_point
 
-        target = _init_worker_target(run_cfg)
+        grid_only = bool(run_cfg.get("grid_only", False))
+        target = None if grid_only else _init_worker_target(run_cfg)
+        distill_res = (
+            load_distill_cache(run_cfg["distill_cache_path"])
+            if run_cfg.get("distill_cache_path")
+            else None
+        )
         consistency_checked = False
         while True:
             item = task_q.get()
@@ -334,7 +402,7 @@ def _pressure_worker_main(
                 target=target,
                 pilot_cycles=run_cfg["pilot_cycles"],
                 shift_override=run_cfg["shift_override"],
-                verify_consistency=(worker_rank == 0 and not consistency_checked),
+                verify_consistency=(worker_rank == 0 and not consistency_checked and target is not None),
                 device_id=0,
                 init_mode=run_cfg.get("init_mode", "auto"),
                 init_loading=float(run_cfg.get("init_loading", 8.0)),
@@ -343,6 +411,10 @@ def _pressure_worker_main(
                 resume_mode=run_cfg.get("resume_mode", "none"),
                 snapshot_stride=int(run_cfg.get("snapshot_stride", 0)),
                 run_metadata=run_cfg.get("run_metadata"),
+                grid_only=grid_only,
+                cbmc_k=int(run_cfg.get("cbmc_k", 128)),
+                p_ins_del=float(run_cfg.get("p_ins_del", 0.60)),
+                distill_res=distill_res,
             )
             consistency_checked = True
             pt["gpu_id"] = int(gpu_id)
@@ -365,9 +437,16 @@ def _replica_worker_main(
 ):
     try:
         visible = _configure_worker_env(gpu_id, parent_cvd, run_cfg.get("worker_threads", 4))
+        from mlip_distill import load_distill_cache
         from run_mlip_gcmc import run_pressure_point
 
-        target = _init_worker_target(run_cfg)
+        grid_only = bool(run_cfg.get("grid_only", False))
+        target = None if grid_only else _init_worker_target(run_cfg)
+        distill_res = (
+            load_distill_cache(run_cfg["distill_cache_path"])
+            if run_cfg.get("distill_cache_path")
+            else None
+        )
         consistency_checked = False
         while True:
             item = cmd_q.get()
@@ -397,7 +476,7 @@ def _replica_worker_main(
                 target=target,
                 pilot_cycles=run_cfg["pilot_cycles"],
                 shift_override=run_cfg["shift_override"],
-                verify_consistency=(shard_rank == 0 and not consistency_checked),
+                verify_consistency=(shard_rank == 0 and not consistency_checked and target is not None),
                 device_id=0,
                 init_mode=run_cfg.get("init_mode", "auto"),
                 init_loading=float(run_cfg.get("init_loading", 8.0)),
@@ -407,6 +486,10 @@ def _replica_worker_main(
                 resume_mode=run_cfg.get("resume_mode", "none"),
                 snapshot_stride=int(run_cfg.get("snapshot_stride", 0)),
                 run_metadata=run_cfg.get("run_metadata"),
+                grid_only=grid_only,
+                cbmc_k=int(run_cfg.get("cbmc_k", 128)),
+                p_ins_del=float(run_cfg.get("p_ins_del", 0.60)),
+                distill_res=distill_res,
             )
             consistency_checked = True
             result_q.put(("ok", shard_rank, gpu_id, idx, pt))

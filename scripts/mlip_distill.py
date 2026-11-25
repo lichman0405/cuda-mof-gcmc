@@ -793,14 +793,15 @@ def distill_mlip_surrogate(
 
     t0 = time.perf_counter()
     dist_guest = make_distilled_guest_spec(guest)
-    model_file = getattr(target, "model_file_path", None) if target is not None else None
+    key_model_file = str(model_name) if Path(str(model_name)).is_file() else None
+    resolved_model_file = getattr(target, "model_file_path", None) if target is not None else key_model_file
     cache_key = compute_distill_cache_key(
         cif_path=cif_path,
         supercell=tuple(supercell),
         guest=dist_guest,
         grid_dims=tuple(grid_dims),
         model_name=model_name,
-        model_file_path=model_file,
+        model_file_path=key_model_file,
         dispersion=dispersion,
         dispersion_xc=dispersion_xc,
         dtype=dtype,
@@ -1045,6 +1046,7 @@ def distill_mlip_surrogate(
         "supercell": [int(x) for x in supercell],
         "guest_name": dist_guest.name,
         "model": str(model_name),
+        "model_sha256": sha256_file(resolved_model_file) if resolved_model_file else None,
         "dispersion": bool(dispersion),
         "dispersion_xc": str(dispersion_xc),
         "dtype": str(dtype),
