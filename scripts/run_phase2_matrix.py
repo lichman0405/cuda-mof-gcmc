@@ -153,6 +153,7 @@ def _run_direct_worker(args):
                 "points": pts,
             },
             indent=2,
+            default=lambda o: o.tolist() if isinstance(o, np.ndarray) else str(o),
         ),
         encoding="utf-8",
     )
