@@ -1507,6 +1507,7 @@ def derive_only_1b_cache_from_full(
         guest=guest,
         grid_dims=grid_dims,
         model_name=model_name,
+        model_file_path=None,
         model_sha256=m_sha,
         dispersion=dispersion,
         dispersion_xc=dispersion_xc,
