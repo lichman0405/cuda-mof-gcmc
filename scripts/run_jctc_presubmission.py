@@ -326,8 +326,6 @@ def _init_states_worker(gpu_id: int, parent_cvd: str | None, worker_threads: int
         guest_local_pos = guest.real_local_positions()
         H_unit_cols = np.ascontiguousarray(fw_data["H_unit_cols"], dtype=np.float64)
         fw_unit_frac = np.ascontiguousarray(np.mod(np.asarray(fw_data["frac"], dtype=np.float64), 1.0))
-        unit_Z = np.ascontiguousarray(fw_data["Z"], dtype=np.int32)
-        g_c = guest.to_c_arrays()
 
         results_by_rep = {}
         for rep_seed in rep_seeds:
@@ -354,8 +352,7 @@ def _init_states_worker(gpu_id: int, parent_cvd: str | None, worker_threads: int
                 u_ref_list = []
                 for b, st in enumerate(four_boxes):
                     ov_cpp = check_hard_core_state_cpp(
-                        H_unit_cols, SUPERCELL, fw_unit_frac, unit_Z,
-                        g_c["lxyz"], g_c["Z"], bool(guest.is_isotropic), st, MAX_MOL,
+                        H_unit_cols, SUPERCELL, fw_unit_frac, guest, st, max_mol=MAX_MOL,
                     )
                     u_cu, ov_cu = prop.eval_energy_quat(st)
                     if ov_cpp or ov_cu or not math.isfinite(float(u_cu)):
@@ -363,6 +360,10 @@ def _init_states_worker(gpu_id: int, parent_cvd: str | None, worker_threads: int
                     u_ref_list.append(float(u_cu))
 
                 by_p[p_key] = [_serialize_single_box_state(st) for st in four_boxes]
+                print(
+                    f"  [InitStates rep={rep_seed} P={p_key} bar] "
+                    f"N={[int(st['N']) for st in four_boxes]} oms={[0, 0] + list(hl_sum['init_oms_occ_per_box'] or [0, 0])}"
+                )
                 summary_by_p[p_key] = {
                     "P_bar": float(p_bar),
                     "hl_seed": hl_seed,
