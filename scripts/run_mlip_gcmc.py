@@ -11,6 +11,7 @@ Example:
 
 import argparse
 import csv
+import inspect
 import json
 import math
 import os
@@ -23,6 +24,7 @@ from multi_gpu import (
     resolve_worker_cuda_visible_devices,
     run_distill_on_gpu,
     run_pressures_parallel,
+    run_remc_parallel,
     run_replicas_parallel,
 )
 from mcmc_diagnostics import evaluate_v2_convergence
@@ -36,13 +38,26 @@ from nested_mc_engine import (
     CudaGcmcProposer,
     FastMaceD3Target,
     K_TO_KJMOL,
+    _mad_filtered_median,
     count_oms_occupied,
     run_nested_mc,
+    run_remc_isotherm,
     verify_proposer_target_consistency,
 )
 from guests import load_guest
 from qeq_charges import extract_framework_for_proposer
 from run_metadata import collect_run_metadata, validate_resume_metadata
+
+
+def _attach_only_1b_kwarg(fn, kwargs: dict, only_1b: bool) -> dict:
+    """Attach `only_1b` kwarg if supported by `mlip_distill` function signature."""
+    out = dict(kwargs)
+    if "only_1b" in inspect.signature(fn).parameters:
+        out["only_1b"] = bool(only_1b)
+    elif only_1b:
+        raise RuntimeError(f"{fn.__name__} does not support only_1b=True in this version of mlip_distill.py")
+    return out
+
 
 PROPOSER_MAP = {
     "auto_mlip": (2, 0),  # On-the-fly 1B+2B self-distilled MLIP grid + 2B LUT
@@ -52,7 +67,7 @@ PROPOSER_MAP = {
 }
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Hybrid GPU-GCMC + MLIP Nested Monte Carlo Engine")
     p.add_argument("--cif", required=True, help="Path to MOF CIF file")
     p.add_argument("--supercell", nargs=3, type=int, default=[1, 1, 2], help="Supercell replicas na nb nc")
@@ -77,18 +92,24 @@ def parse_args():
     p.add_argument("--p-ins-del", type=float, default=0.50, help="Total insertion+deletion move fraction inside GPU proposer")
     p.add_argument("--distill-samples-1b", type=int, default=1200, help="Single-molecule MACE evaluations for auto_mlip 1B distillation")
     p.add_argument("--distill-samples-2b", type=int, default=192, help="Pore dimer MACE evaluations for auto_mlip 2B distillation")
+    p.add_argument("--distill-1b-only", action="store_true", help="Run 1B-only distilled surrogate without 2B LUT (2B ablation)")
     p.add_argument("--distill-cache-dir", default="build/distill_cache", help="Disk cache directory for distilled 1B+2B grids")
     p.add_argument("--grid-only", action="store_true", help="Run pure GPU surrogate grid GCMC without outer MLIP reweighting (ablation mode)")
     p.add_argument("--eq-cycles", type=int, default=120, help="Outer equilibration cycles")
     p.add_argument("--prod-cycles", type=int, default=320, help="Outer production cycles")
     p.add_argument("--pilot-cycles", type=int, default=40, help="Target-ensemble pilot burn-in cycles for Stage-3 shift calibration (0 disables)")
     p.add_argument("--shift-override", type=float, default=None, help="Optional fixed chem-pot shift (kJ/mol) overriding auto calibration")
+    p.add_argument("--adapt-shift", choices=["on", "off"], default="on", help="Equilibration-only Robbins-Monro shift adaptation (strictly frozen after first half of eq)")
+    p.add_argument("--adapt-k", choices=["on", "off"], default="on", help="Equilibration-only adaptive k_steps in [k-min, k-max] (strictly frozen after first half of eq)")
+    p.add_argument("--k-min", type=int, default=2, help="Minimum inner k_steps when --adapt-k on")
+    p.add_argument("--k-max", type=int, default=24, help="Maximum inner k_steps when --adapt-k on")
+    p.add_argument("--remc-swap-every", type=int, default=2, help="Swap interval in outer cycles when --parallel-mode remc")
     p.add_argument("--init-mode", choices=["auto", "empty", "high_loading"], default="auto", help="Initial state prepared right before target equilibration (detached from shift calibration)")
     p.add_argument("--init-loading", type=float, default=8.0, help="Target loading (mmol/g) when --init-mode high_loading")
     p.add_argument("--seed", type=int, default=20261400, help="Base PRNG seed")
     p.add_argument("--shift-mode", choices=["auto", "none"], default="auto", help="Multi-stage self-consistent chem-pot shift")
     p.add_argument("--gpus", nargs="+", default=None, help="GPU IDs for multi-GPU execution (e.g. --gpus 0 1 2 3 or 0,1,2,3)")
-    p.add_argument("--parallel-mode", choices=["auto", "pressure", "replica"], default="auto", help="Multi-GPU parallel strategy")
+    p.add_argument("--parallel-mode", choices=["auto", "pressure", "replica", "remc"], default="auto", help="Parallel / REMC strategy")
     p.add_argument("--worker-threads", type=int, default=4, help="CPU threads per multi-GPU worker process")
     p.add_argument("--resume", action="store_true", help="Alias for --resume-mode skip when --resume-mode is not specified")
     p.add_argument("--resume-mode", choices=["none", "skip", "extend", "fresh"], default="none", help="Task/checkpoint resume policy")
@@ -97,7 +118,7 @@ def parse_args():
     p.add_argument("--snapshot-stride", type=int, default=0, help="Save production configuration snapshots every N prod cycles")
     p.add_argument("--out-json", required=True, help="Output JSON path")
     p.add_argument("--out-csv", default="", help="Optional summary CSV path")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def compute_grid_dims(uc_atoms, grid_spacing: float = 0.11):
@@ -313,7 +334,7 @@ def build_legal_dispersed_high_loading_states(
             prev_c = np.stack([bd["cx"], bd["cy"], bd["cz"]], axis=1) if bd["cx"] else None
             box_cands = []
             box_u_refs = []
-            spacings = (float(min_gg_A), max(2.6, float(min_gg_A) - 0.4))
+            spacings = (float(min_gg_A), max(2.6, float(min_gg_A) - 0.4), max(2.6, float(min_gg_A) - 0.6))
             for spacing_try in spacings:
                 pos_p, q_p = _sample_pos_quat_batch(512)
                 if prev_c is not None:
@@ -327,7 +348,7 @@ def build_legal_dispersed_high_loading_states(
                 if len(pos_p) == 0:
                     continue
                 scored = []
-                for idx_p in range(min(64, len(pos_p))):
+                for idx_p in range(min(128, len(pos_p))):
                     c_try = pos_p[idx_p]
                     q_try = q_p[idx_p]
                     cand = {
@@ -475,19 +496,21 @@ def _evaluate_shift_stage(states, target_evals, low_cap: float, high_cap: float,
             raw_per_box.append(float((float(u_t) - float(st["U_ref_K"])) * K_TO_KJMOL / n))
         else:
             raw_per_box.append(None)
-    valid = [v for v in raw_per_box if v is not None]
+    valid = [v for v in raw_per_box if v is not None and math.isfinite(v)]
     if valid:
-        raw_mean = float(np.median(valid)) if len(valid) >= 3 else float(np.mean(valid))
+        raw_mean, n_out = _mad_filtered_median(valid)
         clamped = float(max(low_cap, min(high_cap, raw_mean)))
         hit_upper = bool(raw_mean > high_cap)
         hit_lower = bool(raw_mean < low_cap)
     else:
         raw_mean = None
+        n_out = 0
         clamped = float(fallback_shift)
         hit_upper = False
         hit_lower = False
     info = {
         "n_active_boxes": int(len(valid)),
+        "n_outliers": int(n_out),
         "box_N": box_N,
         "raw_per_box_kJ_mol": raw_per_box,
         "raw_mean_kJ_mol": raw_mean,
@@ -502,37 +525,166 @@ def _evaluate_shift_stage(states, target_evals, low_cap: float, high_cap: float,
     return clamped, info
 
 
-def _evaluate_shift_stage_from_trace(res_pilot: dict, low_cap: float, high_cap: float, fallback_shift: float):
+def _evaluate_shift_stage_from_trace(
+    res_pilot: dict,
+    low_cap: float,
+    high_cap: float,
+    fallback_shift: float,
+    max_step_kJ_mol: float = 3.5,
+):
+    """Robust Stage-3 shift estimator using MAD-filtered marginal (dU_tgt - dU_ref)/dN + per-frame median & trust-region clamp."""
     n_arr = np.asarray(res_pilot["prod_N_history"], dtype=np.float64)
     ut_arr = np.asarray(res_pilot["prod_U_history"], dtype=np.float64)
     ur_arr = np.asarray(res_pilot["prod_U_ref_history"], dtype=np.float64)
-    mask = n_arr > 0.0
-    per_box_means = []
-    for b in range(n_arr.shape[1]):
+    if n_arr.ndim != 2 or n_arr.shape[0] == 0 or n_arr.shape[1] == 0:
+        return float(fallback_shift), {
+            "estimator": "fallback_empty",
+            "n_nonzero_samples": 0,
+            "n_total_samples": 0,
+            "raw_per_box_kJ_mol": [],
+            "raw_mean_kJ_mol": None,
+            "clamped_kJ_mol": float(fallback_shift),
+            "low_cap_kJ_mol": float(low_cap),
+            "high_cap_kJ_mol": float(high_cap),
+            "max_step_kJ_mol": float(max_step_kJ_mol),
+            "hit_trust_region": False,
+            "hit_upper_cap": False,
+            "hit_lower_cap": False,
+            "end_box_N": [],
+            "end_box_U_tgt_kJ": [],
+            "end_box_U_ref_kJ": [],
+        }
+
+    n_cyc, n_b = n_arr.shape
+    mask = (n_arr > 0.0) & np.isfinite(ut_arr) & np.isfinite(ur_arr)
+
+    # 1. Per-frame (U_tgt - U_ref)/N MAD-filtered median per box, then across boxes
+    per_box_frame_meds = []
+    for b in range(n_b):
         mb = mask[:, b]
         if np.any(mb):
-            per_box_means.append(float(np.mean((ut_arr[mb, b] - ur_arr[mb, b]) / n_arr[mb, b])))
+            diffs_b = (ut_arr[mb, b] - ur_arr[mb, b]) / n_arr[mb, b]
+            med_b, _ = _mad_filtered_median(diffs_b)
+            per_box_frame_meds.append(med_b)
         else:
-            per_box_means.append(None)
-    if np.any(mask):
-        all_diffs = (ut_arr[mask] - ur_arr[mask]) / n_arr[mask]
-        raw_mean = float(np.mean(all_diffs))
-        clamped = float(max(low_cap, min(high_cap, raw_mean)))
-        hit_upper = bool(raw_mean > high_cap)
-        hit_lower = bool(raw_mean < low_cap)
+            per_box_frame_meds.append(None)
+
+    valid_frame_boxes = [v for v in per_box_frame_meds if v is not None and math.isfinite(v)]
+    if len(valid_frame_boxes) >= 3:
+        frame_est, n_frame_out = _mad_filtered_median(valid_frame_boxes)
+    elif np.any(mask):
+        frame_est, n_frame_out = _mad_filtered_median((ut_arr[mask] - ur_arr[mask]) / n_arr[mask])
     else:
-        raw_mean = None
+        frame_est, n_frame_out = None, 0
+
+    # 2. Marginal transition estimates (dU_tgt - dU_ref)/dN for all dN != 0
+    per_box_marg_meds = []
+    all_marg_samples = []
+    n_marg_samples = 0
+    trial_marg_opt = res_pilot.get("prod_trial_marginal_per_box_kJ_mol")
+    trial_marg_cnts = res_pilot.get("prod_trial_marginal_counts")
+
+    for b in range(n_b):
+        margs_b = []
+        if n_cyc >= 2:
+            dN_b = np.diff(n_arr[:, b])
+            dUt_b = np.diff(ut_arr[:, b])
+            dUr_b = np.diff(ur_arr[:, b])
+            nz = (np.abs(dN_b) >= 1.0) & np.isfinite(dUt_b) & np.isfinite(dUr_b)
+            if np.any(nz):
+                vals = (dUt_b[nz] - dUr_b[nz]) / dN_b[nz]
+                vals = vals[np.isfinite(vals)]
+                if vals.size > 0:
+                    margs_b.extend(vals.tolist())
+        if len(margs_b) >= 2:
+            mb_med, _ = _mad_filtered_median(margs_b)
+            per_box_marg_meds.append(mb_med)
+            all_marg_samples.extend(margs_b)
+            n_marg_samples += len(margs_b)
+        elif (
+            isinstance(trial_marg_opt, (list, tuple))
+            and b < len(trial_marg_opt)
+            and trial_marg_opt[b] is not None
+            and math.isfinite(float(trial_marg_opt[b]))
+        ):
+            per_box_marg_meds.append(float(trial_marg_opt[b]))
+            cnt_b = int(trial_marg_cnts[b]) if (isinstance(trial_marg_cnts, (list, tuple)) and b < len(trial_marg_cnts)) else 2
+            n_marg_samples += max(2, cnt_b)
+        elif len(margs_b) == 1:
+            per_box_marg_meds.append(float(margs_b[0]))
+            all_marg_samples.extend(margs_b)
+            n_marg_samples += 1
+        else:
+            per_box_marg_meds.append(None)
+
+    valid_marg_boxes = [v for v in per_box_marg_meds if v is not None and math.isfinite(v)]
+    if len(valid_marg_boxes) >= 3:
+        marg_est, _ = _mad_filtered_median(valid_marg_boxes)
+    elif len(all_marg_samples) >= 4:
+        marg_est, _ = _mad_filtered_median(all_marg_samples)
+    elif len(valid_marg_boxes) >= 1 and n_marg_samples >= 4:
+        marg_est, _ = _mad_filtered_median(valid_marg_boxes)
+    else:
+        marg_est = None
+
+    if marg_est is not None and frame_est is not None:
+        if n_marg_samples >= 8 and len(valid_marg_boxes) >= min(3, n_b):
+            raw_est = float(marg_est)
+            estimator = "marginal_mad_median"
+        else:
+            w_m = min(1.0, max(0.25, float(n_marg_samples) / 8.0))
+            raw_est = float(w_m * marg_est + (1.0 - w_m) * frame_est)
+            estimator = "blended_marginal_frame_mad_median"
+    elif marg_est is not None:
+        raw_est = float(marg_est)
+        estimator = "marginal_mad_median"
+    elif frame_est is not None:
+        raw_est = float(frame_est)
+        estimator = "frame_mad_median"
+    else:
+        raw_est = None
+        estimator = "fallback"
+
+    unfiltered_mean = (
+        float(np.mean((ut_arr[mask] - ur_arr[mask]) / n_arr[mask])) if np.any(mask) else None
+    )
+
+    if raw_est is not None and math.isfinite(raw_est):
+        max_step = abs(float(max_step_kJ_mol))
+        step_lo = float(fallback_shift) - max_step
+        step_hi = float(fallback_shift) + max_step
+        trust_clamped = float(max(step_lo, min(step_hi, raw_est)))
+        clamped = float(max(low_cap, min(high_cap, trust_clamped)))
+        hit_trust = bool(abs(raw_est - float(fallback_shift)) > max_step)
+        hit_upper = bool(trust_clamped > high_cap)
+        hit_lower = bool(trust_clamped < low_cap)
+    else:
+        raw_est = None
         clamped = float(fallback_shift)
+        hit_trust = False
         hit_upper = False
         hit_lower = False
+
     info = {
+        "estimator": estimator,
         "n_nonzero_samples": int(np.sum(mask)),
         "n_total_samples": int(mask.size),
-        "raw_per_box_kJ_mol": per_box_means,
-        "raw_mean_kJ_mol": raw_mean,
+        "n_marginal_samples": int(n_marg_samples),
+        "n_marginal_boxes": int(len(valid_marg_boxes)),
+        "n_frame_outliers": int(n_frame_out),
+        "raw_per_box_kJ_mol": per_box_frame_meds,
+        "marginal_per_box_kJ_mol": per_box_marg_meds,
+        "marginal_est_kJ_mol": marg_est,
+        "frame_est_kJ_mol": frame_est,
+        "raw_unfiltered_mean_kJ_mol": unfiltered_mean,
+        "raw_robust_kJ_mol": raw_est,
+        "raw_mean_kJ_mol": raw_est,
         "clamped_kJ_mol": clamped,
+        "fallback_shift_kJ_mol": float(fallback_shift),
+        "max_step_kJ_mol": float(max_step_kJ_mol),
         "low_cap_kJ_mol": float(low_cap),
         "high_cap_kJ_mol": float(high_cap),
+        "hit_trust_region": hit_trust,
         "hit_upper_cap": hit_upper,
         "hit_lower_cap": hit_lower,
         "end_box_N": [int(x) for x in n_arr[-1].tolist()] if len(n_arr) else [],
@@ -559,7 +711,7 @@ def _cif_matches(old_cif: str, new_cif: str) -> bool:
     return p_old.name == p_new.name
 
 
-def run_pressure_point(
+def prepare_pressure_proposer(
     fw_data: dict,
     guest,
     supercell,
@@ -571,8 +723,6 @@ def run_pressure_point(
     n_boxes: int,
     max_mol: int,
     k_steps: int,
-    eq_cycles: int,
-    prod_cycles: int,
     seed: int,
     shift_mode: str,
     target: FastMaceD3Target,
@@ -582,17 +732,13 @@ def run_pressure_point(
     device_id: int = 0,
     init_mode: str = "auto",
     init_loading: float = 8.0,
-    checkpoint_dir: str = "",
-    checkpoint_every: int = 0,
-    checkpoint_tag: str = "",
-    resume_mode: str = "none",
-    snapshot_stride: int = 0,
-    run_metadata: dict | None = None,
     grid_only: bool = False,
     cbmc_k: int = 128,
     p_ins_del: float = 0.50,
     distill_res: dict | None = None,
-):
+    skip_calibration: bool = False,
+) -> dict:
+    """Create CudaGcmcProposer, run Stage-1/2/3 shift calibration, and prepare initial box states."""
     t_prop0 = time.perf_counter()
     if int(ff_mode) == 2:
         if distill_res is None:
@@ -647,26 +793,12 @@ def run_pressure_point(
     oms_cell_rows = np.asarray(fw_super.get_cell(), dtype=np.float64) if len(oms_metal_pos) > 0 else None
     guest_local_pos = guest.real_local_positions() if hasattr(guest, "real_local_positions") else getattr(target, "guest_local_pos", None)
 
-    ckpt_path = None
-    if checkpoint_dir:
-        tag_suf = f"_{checkpoint_tag}" if checkpoint_tag else ""
-        ckpt_path = Path(checkpoint_dir) / f"ckpt_P{float(P_bar):.6g}{tag_suf}.json"
+    de_final = 0.0
+    shift_calib = {}
+    init_state_summary = {"init_mode": init_mode}
+    shift_calib_wall_s = 0.0
 
-    loaded_ckpt = None
-    if resume_mode == "extend" and ckpt_path is not None and ckpt_path.exists():
-        loaded_ckpt = json.loads(ckpt_path.read_text(encoding="utf-8"))
-        if run_metadata is not None and "metadata" in loaded_ckpt:
-            validate_resume_metadata(loaded_ckpt["metadata"], run_metadata, allow_extend_prod=True)
-        de_final = float(loaded_ckpt["delta_eps_kJ_mol"])
-        prop.set_chem_pot_shift(de_final)
-        shift_calib = loaded_ckpt.get("shift_calibration", {"mode": "resumed"})
-        init_state_summary = loaded_ckpt.get("init_state_summary", {"init_mode": init_mode})
-        shift_calib_wall_s = 0.0
-        print(
-            f"  [P={P_bar:.4g} bar RESUME-EXTEND] Loaded checkpoint at "
-            f"{loaded_ckpt['mc_state']['completed_cycles']} cycles (delta_eps={de_final:.2f} kJ/mol)"
-        )
-    else:
+    if not skip_calibration:
         t_calib0 = time.perf_counter()
         eq_fast = 15000 if int(cbmc_k) >= 32 else 30000
         eq_mid = 12000 if int(cbmc_k) >= 32 else 20000
@@ -818,12 +950,135 @@ def run_pressure_point(
                 "init_min_gg_A": None,
             }
 
-    warm_st = prop.get_accepted_quat()
-    init_state_summary["init_U_ref_K"] = [float(s["U_ref_K"]) for s in warm_st]
-    print(
-        f"  [P={P_bar:.4g} bar] Init({init_mode}) N={[s['N'] for s in warm_st]} "
-        f"({[round(s['N']*conv_mmol_g, 2) for s in warm_st]} mmol/g)"
+        warm_st = prop.get_accepted_quat()
+        init_state_summary["init_U_ref_K"] = [float(s["U_ref_K"]) for s in warm_st]
+        print(
+            f"  [P={P_bar:.4g} bar] Init({init_mode}) N={[s['N'] for s in warm_st]} "
+            f"({[round(s['N']*conv_mmol_g, 2) for s in warm_st]} mmol/g)"
+        )
+
+    return {
+        "prop": prop,
+        "conv_mmol_g": conv_mmol_g,
+        "fw_pos": fw_pos,
+        "oms_metal_pos": oms_metal_pos,
+        "oms_cell_rows": oms_cell_rows,
+        "guest_local_pos": guest_local_pos,
+        "de_final": de_final,
+        "shift_calib": shift_calib,
+        "init_state_summary": init_state_summary,
+        "prop_grid_wall_s": prop_grid_wall_s,
+        "shift_calib_wall_s": shift_calib_wall_s,
+    }
+
+
+def run_pressure_point(
+    fw_data: dict,
+    guest,
+    supercell,
+    T_K: float,
+    P_bar: float,
+    ff_mode: int,
+    pol_mode: int,
+    grid_dims,
+    n_boxes: int,
+    max_mol: int,
+    k_steps: int,
+    eq_cycles: int,
+    prod_cycles: int,
+    seed: int,
+    shift_mode: str,
+    target: FastMaceD3Target,
+    pilot_cycles: int = 60,
+    shift_override=None,
+    verify_consistency: bool = False,
+    device_id: int = 0,
+    init_mode: str = "auto",
+    init_loading: float = 8.0,
+    checkpoint_dir: str = "",
+    checkpoint_every: int = 0,
+    checkpoint_tag: str = "",
+    resume_mode: str = "none",
+    snapshot_stride: int = 0,
+    run_metadata: dict | None = None,
+    grid_only: bool = False,
+    cbmc_k: int = 128,
+    p_ins_del: float = 0.50,
+    distill_res: dict | None = None,
+    adapt_shift_frac: float = 0.0,
+    adapt_k_frac: float = 0.0,
+    k_min: int = 2,
+    k_max: int = 24,
+    target_outer_acc: float = 0.35,
+    adapt_window: int = 20,
+):
+    ckpt_path = None
+    if checkpoint_dir:
+        tag_suf = f"_{checkpoint_tag}" if checkpoint_tag else ""
+        ckpt_path = Path(checkpoint_dir) / f"ckpt_P{float(P_bar):.6g}{tag_suf}.json"
+
+    loaded_ckpt = None
+    if resume_mode == "extend" and ckpt_path is not None and ckpt_path.exists():
+        loaded_ckpt = json.loads(ckpt_path.read_text(encoding="utf-8"))
+        if run_metadata is not None and "metadata" in loaded_ckpt:
+            validate_resume_metadata(loaded_ckpt["metadata"], run_metadata, allow_extend_prod=True)
+
+    prep = prepare_pressure_proposer(
+        fw_data=fw_data,
+        guest=guest,
+        supercell=supercell,
+        T_K=T_K,
+        P_bar=P_bar,
+        ff_mode=ff_mode,
+        pol_mode=pol_mode,
+        grid_dims=grid_dims,
+        n_boxes=n_boxes,
+        max_mol=max_mol,
+        k_steps=k_steps,
+        seed=seed,
+        shift_mode=shift_mode,
+        target=target,
+        pilot_cycles=pilot_cycles,
+        shift_override=shift_override,
+        verify_consistency=verify_consistency,
+        device_id=device_id,
+        init_mode=init_mode,
+        init_loading=init_loading,
+        grid_only=grid_only,
+        cbmc_k=cbmc_k,
+        p_ins_del=p_ins_del,
+        distill_res=distill_res,
+        skip_calibration=(loaded_ckpt is not None),
     )
+    prop = prep["prop"]
+    conv_mmol_g = prep["conv_mmol_g"]
+    oms_metal_pos = prep["oms_metal_pos"]
+    oms_cell_rows = prep["oms_cell_rows"]
+    guest_local_pos = prep["guest_local_pos"]
+    prop_grid_wall_s = prep["prop_grid_wall_s"]
+
+    k_steps_run = int(k_steps)
+    if loaded_ckpt is not None:
+        de_final = float(loaded_ckpt["delta_eps_kJ_mol"])
+        k_steps_run = int(loaded_ckpt.get("k_steps", k_steps))
+        prop.set_chem_pot_shift(de_final)
+        shift_calib = loaded_ckpt.get("shift_calibration", {"mode": "resumed"})
+        init_state_summary = loaded_ckpt.get("init_state_summary", {"init_mode": init_mode})
+        shift_calib_wall_s = 0.0
+        warm_st = prop.get_accepted_quat()
+        init_state_summary["init_U_ref_K"] = [float(s["U_ref_K"]) for s in warm_st]
+        print(
+            f"  [P={P_bar:.4g} bar RESUME-EXTEND] Loaded checkpoint at "
+            f"{loaded_ckpt['mc_state']['completed_cycles']} cycles (delta_eps={de_final:.2f} kJ/mol, k={k_steps_run})"
+        )
+    else:
+        de_final = prep["de_final"]
+        shift_calib = prep["shift_calib"]
+        init_state_summary = prep["init_state_summary"]
+        shift_calib_wall_s = prep["shift_calib_wall_s"]
+
+    eff_adapt_shift = 0.0 if (grid_only or shift_override is not None) else float(adapt_shift_frac)
+    eff_adapt_k = 0.0 if grid_only else float(adapt_k_frac)
 
     def _ckpt_cb(mc_state: dict):
         if ckpt_path is None:
@@ -831,7 +1086,8 @@ def run_pressure_point(
         _write_ckpt_json(ckpt_path, {
             "P_bar": float(P_bar),
             "T_K": float(T_K),
-            "delta_eps_kJ_mol": float(de_final),
+            "delta_eps_kJ_mol": float(mc_state["delta_eps_K"] * K_TO_KJMOL),
+            "k_steps": int(mc_state.get("k_steps", k_steps_run)),
             "shift_calibration": shift_calib,
             "init_state_summary": init_state_summary,
             "metadata": run_metadata or {},
@@ -842,7 +1098,7 @@ def run_pressure_point(
         target.n_evals = 0
     res = run_nested_mc(
         prop, None,
-        k_steps=k_steps, eq_cycles=eq_cycles, prod_cycles=prod_cycles,
+        k_steps=k_steps_run, eq_cycles=eq_cycles, prod_cycles=prod_cycles,
         seed=seed + 17, log_every=max(50, (eq_cycles + prod_cycles) // 5),
         batch_target_fn=None if grid_only else target.eval_batch,
         oms_metal_pos=oms_metal_pos if len(oms_metal_pos) > 0 else None,
@@ -853,6 +1109,12 @@ def run_pressure_point(
         checkpoint_fn=_ckpt_cb if ckpt_path is not None else None,
         checkpoint_every=checkpoint_every,
         grid_only=bool(grid_only),
+        adapt_shift_frac=eff_adapt_shift,
+        adapt_k_frac=eff_adapt_k,
+        k_min=int(k_min),
+        k_max=int(k_max),
+        target_outer_acc=float(target_outer_acc),
+        adapt_window=int(adapt_window),
     )
 
     hist = np.array(res["box_N_history"], dtype=np.float64) * conv_mmol_g
@@ -879,7 +1141,7 @@ def run_pressure_point(
     res["second_half_uptake_mmol_g"] = mean_h2
     res["stationarity_drift_mmol_g"] = drift
     res["mlip_evals"] = 0 if (grid_only or target is None) else int(target.n_evals)
-    res["total_inner_steps"] = int(n_boxes * k_steps * (eq_cycles + prod_cycles))
+    res["total_inner_steps"] = int(res.get("total_inner_steps", n_boxes * res["k_steps"] * (eq_cycles + prod_cycles)))
     res["cbmc_k"] = int(cbmc_k)
     res["p_ins_del"] = float(p_ins_del)
     res["prop_grid_wall_s"] = prop_grid_wall_s
@@ -887,7 +1149,10 @@ def run_pressure_point(
     res["shift_calibration"] = shift_calib
     res["init_state_summary"] = init_state_summary
     if run_metadata is not None:
-        res["metadata"] = run_metadata
+        meta_copy = dict(run_metadata)
+        if target is not None and getattr(target, "model_sha256", None) and not meta_copy.get("model_sha256"):
+            meta_copy["model_sha256"] = target.model_sha256
+        res["metadata"] = meta_copy
 
     v2_diag = evaluate_v2_convergence(
         prod_N_history=res["prod_N_history"],
@@ -919,7 +1184,8 @@ def run_pressure_point(
         f"  [P={P_bar:.4g} bar DONE] Uptake={res['uptake_mmol_g']:.4f} +- {res['uptake_sem_mmol_g']:.4f} mmol/g | "
         f"Fluc Qst={q_str} | Molar Qst={res['mean_molar_qst_kJ_mol']:.2f} +- {res['mean_molar_qst_sem_kJ_mol']:.2f} kJ/mol | "
         f"Ins={res['prod_ins_acc']}/{res['prod_ins_att']} Del={res['prod_del_acc']}/{res['prod_del_att']} | "
-        f"Acc={res['outer_acc_rate']*100:.1f}% | Rhat={r_str} ESS(b/t)={eb_n:.0f}/{et_n:.0f} | "
+        f"Acc={res['outer_acc_rate']*100:.1f}% k={res['k_steps']} dEps={res['delta_eps_kJ_mol']:+.2f} | "
+        f"Rhat={r_str} ESS(b/t)={eb_n:.0f}/{et_n:.0f} | "
         f"diag={v2_diag['status']} | {res['elapsed_s']:.1f}s"
     )
     if v2_diag["status"] != "pass":
@@ -966,31 +1232,44 @@ def main():
     init_wall_s = float(time.perf_counter() - t_init0)
 
     eff_mode = "single"
-    if len(gpu_ids) > 1:
+    if args.parallel_mode == "remc":
+        if len(args.pressures) < 2:
+            raise ValueError("--parallel-mode remc requires at least 2 pressures")
+        eff_mode = "remc"
+    elif len(gpu_ids) > 1:
         if args.parallel_mode == "auto":
             eff_mode = "pressure" if len(args.pressures) >= 2 else ("replica" if args.boxes >= 2 else "pressure")
         else:
             eff_mode = args.parallel_mode
+
+    adapt_shift_frac = 0.5 if args.adapt_shift == "on" else 0.0
+    adapt_k_frac = 0.5 if args.adapt_k == "on" else 0.0
+    only_1b = bool(args.distill_1b_only)
 
     distill_cache_path = None
     distill_sha256 = None
     distill_res = None
     if ff_mode == 2:
         model_file_guess = str(args.model) if Path(str(args.model)).is_file() else None
-        distill_sha256 = compute_distill_cache_key(
-            cif_path=args.cif,
-            supercell=tuple(args.supercell),
-            guest=guest,
-            grid_dims=grid_dims,
-            model_name=args.model,
-            model_file_path=model_file_guess,
-            dispersion=use_disp,
-            dispersion_xc=args.xc,
-            dtype=args.dtype,
-            n_1b=int(args.distill_samples_1b),
-            n_2b=int(args.distill_samples_2b),
-            distill_seed=int(args.seed) + 50001,
+        key_kwargs = _attach_only_1b_kwarg(
+            compute_distill_cache_key,
+            dict(
+                cif_path=args.cif,
+                supercell=tuple(args.supercell),
+                guest=guest,
+                grid_dims=grid_dims,
+                model_name=args.model,
+                model_file_path=model_file_guess,
+                dispersion=use_disp,
+                dispersion_xc=args.xc,
+                dtype=args.dtype,
+                n_1b=int(args.distill_samples_1b),
+                n_2b=int(args.distill_samples_2b),
+                distill_seed=int(args.seed) + 50001,
+            ),
+            only_1b=only_1b,
         )
+        distill_sha256 = compute_distill_cache_key(**key_kwargs)
         cand_npz = Path(args.distill_cache_dir) / f"distill_{distill_sha256[:16]}.npz"
         cand_json = cand_npz.with_suffix(".json")
         if cand_npz.exists() and cand_json.exists():
@@ -1006,9 +1285,10 @@ def main():
         f"=== Hybrid GPU-GCMC + MLIP Engine ===\n"
         f"  CIF={args.cif} supercell={args.supercell} T={args.temp} K Pressures={args.pressures}\n"
         f"  Guest={guest.name} ({guest.formula}, {len(guest.sites)} sites) | Grid={grid_dims} | Charges={fw_data['charge_source']}\n"
-        f"  Proposer={args.proposer} (ff={ff_mode}, pol={pol_mode}, cbmc_k={args.cbmc_k}, grid_only={bool(args.grid_only)}, init={args.init_mode}) | "
-        f"MLIP={args.model} (dtype={args.dtype}, dispersion={use_disp}, xc={args.xc})\n"
-        f"  GPUs={gpu_ids if gpu_ids else [device_id]} | ParallelMode={eff_mode} | ResumeMode={resume_mode}"
+        f"  Proposer={args.proposer} (ff={ff_mode}, pol={pol_mode}, cbmc_k={args.cbmc_k}, grid_only={bool(args.grid_only)}, "
+        f"1b_only={only_1b}, init={args.init_mode}) | MLIP={args.model} (dtype={args.dtype}, dispersion={use_disp}, xc={args.xc})\n"
+        f"  Adapt(shift={args.adapt_shift}, k={args.adapt_k} [{args.k_min},{args.k_max}]) | "
+        f"GPUs={gpu_ids if gpu_ids else [device_id]} | ParallelMode={eff_mode} | ResumeMode={resume_mode}"
     )
 
     payload = {
@@ -1022,6 +1302,12 @@ def main():
         "cbmc_k": int(args.cbmc_k),
         "p_ins_del": float(args.p_ins_del),
         "grid_only": bool(args.grid_only),
+        "distill_1b_only": only_1b,
+        "adapt_shift": str(args.adapt_shift),
+        "adapt_k": str(args.adapt_k),
+        "k_min": int(args.k_min),
+        "k_max": int(args.k_max),
+        "remc_swap_every": int(args.remc_swap_every),
         "init_mode": args.init_mode,
         "model": args.model,
         "dtype": args.dtype,
@@ -1087,6 +1373,13 @@ def main():
 
     def _upsert_point(pt: dict):
         p_val = float(pt["P_bar"])
+        pt_meta = pt.get("metadata")
+        if (
+            isinstance(pt_meta, dict)
+            and pt_meta.get("model_sha256")
+            and not payload["metadata"].get("model_sha256")
+        ):
+            payload["metadata"]["model_sha256"] = pt_meta["model_sha256"]
         payload["points"] = [
             old for old in payload["points"]
             if not math.isclose(float(old["P_bar"]), p_val, rel_tol=1e-6, abs_tol=1e-9)
@@ -1109,6 +1402,7 @@ def main():
                         "grid_dims": grid_dims,
                         "n_1b": int(args.distill_samples_1b),
                         "n_2b": int(args.distill_samples_2b),
+                        "only_1b": only_1b,
                         "distill_seed": int(args.seed) + 50001,
                         "cache_dir": args.distill_cache_dir,
                         "model": args.model,
@@ -1140,6 +1434,7 @@ def main():
                 "cbmc_k": int(args.cbmc_k),
                 "p_ins_del": float(args.p_ins_del),
                 "grid_only": bool(args.grid_only),
+                "distill_1b_only": only_1b,
                 "distill_cache_path": distill_cache_path,
                 "eq_cycles": int(args.eq_cycles),
                 "prod_cycles": int(args.prod_cycles),
@@ -1147,6 +1442,11 @@ def main():
                 "shift_mode": args.shift_mode,
                 "pilot_cycles": int(args.pilot_cycles),
                 "shift_override": args.shift_override,
+                "adapt_shift_frac": adapt_shift_frac,
+                "adapt_k_frac": adapt_k_frac,
+                "k_min": int(args.k_min),
+                "k_max": int(args.k_max),
+                "remc_swap_every": int(args.remc_swap_every),
                 "init_mode": args.init_mode,
                 "init_loading": float(args.init_loading),
                 "checkpoint_dir": args.checkpoint_dir,
@@ -1162,7 +1462,12 @@ def main():
                 "worker_threads": int(args.worker_threads),
             }
 
-            if eff_mode == "pressure":
+            if eff_mode == "remc":
+                if len(pending) >= 2:
+                    run_remc_parallel(pending, gpu_ids, run_cfg, on_point_done=_upsert_point)
+                else:
+                    run_pressures_parallel(pending, gpu_ids, run_cfg, on_point_done=_upsert_point)
+            elif eff_mode == "pressure":
                 run_pressures_parallel(pending, gpu_ids, run_cfg, on_point_done=_upsert_point)
             else:
                 run_replicas_parallel(pending, gpu_ids, run_cfg, on_point_done=_upsert_point)
@@ -1192,22 +1497,27 @@ def main():
             payload["model_load_wall_s"] = model_load_wall_s
 
             if ff_mode == 2 and distill_res is None:
-                distill_res = distill_mlip_surrogate(
-                    cif_path=args.cif,
-                    fw_data=fw_data,
-                    guest=guest,
-                    supercell=tuple(args.supercell),
-                    target=target,
-                    grid_dims=grid_dims,
-                    n_1b=int(args.distill_samples_1b),
-                    n_2b=int(args.distill_samples_2b),
-                    distill_seed=int(args.seed) + 50001,
-                    cache_dir=args.distill_cache_dir,
-                    model_name=args.model,
-                    dispersion=use_disp,
-                    dispersion_xc=args.xc,
-                    dtype=args.dtype,
+                distill_kwargs = _attach_only_1b_kwarg(
+                    distill_mlip_surrogate,
+                    dict(
+                        cif_path=args.cif,
+                        fw_data=fw_data,
+                        guest=guest,
+                        supercell=tuple(args.supercell),
+                        target=target,
+                        grid_dims=grid_dims,
+                        n_1b=int(args.distill_samples_1b),
+                        n_2b=int(args.distill_samples_2b),
+                        distill_seed=int(args.seed) + 50001,
+                        cache_dir=args.distill_cache_dir,
+                        model_name=args.model,
+                        dispersion=use_disp,
+                        dispersion_xc=args.xc,
+                        dtype=args.dtype,
+                    ),
+                    only_1b=only_1b,
                 )
+                distill_res = distill_mlip_surrogate(**distill_kwargs)
                 payload["distillation"] = distill_res["summary"]
                 distill_sha256 = distill_res["distill_sha256"]
 
@@ -1215,49 +1525,140 @@ def main():
                 args=args, fw_data=fw_data, guest=guest, grid_dims=grid_dims,
                 target=target, prop_info={"distill_sha256": distill_sha256},
             )
+            if target is not None and getattr(target, "model_sha256", None) and not run_metadata.get("model_sha256"):
+                run_metadata["model_sha256"] = target.model_sha256
             payload["metadata"] = run_metadata
 
-            consistency_checked = False
-            for i, p_bar in pending:
-                print(f"\n--- Pressure Point {i+1}/{len(args.pressures)}: {p_bar} bar ---")
-                t_pt = time.perf_counter()
-                pt = run_pressure_point(
-                    fw_data=fw_data,
-                    guest=guest,
-                    supercell=args.supercell,
-                    T_K=args.temp,
-                    P_bar=p_bar,
-                    ff_mode=ff_mode,
-                    pol_mode=pol_mode,
-                    grid_dims=grid_dims,
-                    n_boxes=args.boxes,
-                    max_mol=args.max_mol,
-                    k_steps=args.k_steps,
-                    eq_cycles=args.eq_cycles,
-                    prod_cycles=args.prod_cycles,
-                    seed=args.seed + i * 100,
-                    shift_mode=args.shift_mode,
-                    target=None if args.grid_only else target,
-                    pilot_cycles=args.pilot_cycles,
-                    shift_override=args.shift_override,
-                    verify_consistency=(not consistency_checked and target is not None),
-                    device_id=device_id,
-                    init_mode=args.init_mode,
-                    init_loading=args.init_loading,
-                    checkpoint_dir=args.checkpoint_dir,
-                    checkpoint_every=args.checkpoint_every,
-                    resume_mode=resume_mode,
-                    snapshot_stride=args.snapshot_stride,
-                    run_metadata=run_metadata,
-                    grid_only=bool(args.grid_only),
-                    cbmc_k=int(args.cbmc_k),
-                    p_ins_del=float(args.p_ins_del),
-                    distill_res=distill_res,
-                )
-                pt["point_wall_s"] = float(time.perf_counter() - t_pt)
-                pt["model_load_wall_s"] = model_load_wall_s
-                consistency_checked = True
-                _upsert_point(pt)
+            if eff_mode == "remc" and len(pending) >= 2:
+                sorted_pending = sorted(pending, key=lambda x: float(x[1]))
+                preps = []
+                proposers = []
+                p_sorted = []
+                consistency_checked = False
+                eff_adapt_shift = 0.0 if (bool(args.grid_only) or args.shift_override is not None) else adapt_shift_frac
+                eff_adapt_k = 0.0 if bool(args.grid_only) else adapt_k_frac
+                try:
+                    t_remc_all = time.perf_counter()
+                    for orig_i, p_bar in sorted_pending:
+                        print(f"\n--- [REMC] Preparing Pressure {p_bar} bar ---")
+                        prep = prepare_pressure_proposer(
+                            fw_data=fw_data,
+                            guest=guest,
+                            supercell=args.supercell,
+                            T_K=args.temp,
+                            P_bar=p_bar,
+                            ff_mode=ff_mode,
+                            pol_mode=pol_mode,
+                            grid_dims=grid_dims,
+                            n_boxes=args.boxes,
+                            max_mol=args.max_mol,
+                            k_steps=args.k_steps,
+                            seed=args.seed + orig_i * 100,
+                            shift_mode=args.shift_mode,
+                            target=None if args.grid_only else target,
+                            pilot_cycles=args.pilot_cycles,
+                            shift_override=args.shift_override,
+                            verify_consistency=(not consistency_checked and target is not None),
+                            device_id=device_id,
+                            init_mode=args.init_mode,
+                            init_loading=args.init_loading,
+                            grid_only=bool(args.grid_only),
+                            cbmc_k=int(args.cbmc_k),
+                            p_ins_del=float(args.p_ins_del),
+                            distill_res=distill_res,
+                        )
+                        consistency_checked = True
+                        preps.append(prep)
+                        proposers.append(prep["prop"])
+                        p_sorted.append(float(p_bar))
+
+                    oms_pos = preps[0]["oms_metal_pos"] if len(preps[0]["oms_metal_pos"]) > 0 else None
+                    remc_results = run_remc_isotherm(
+                        proposers=proposers,
+                        pressures_bar=p_sorted,
+                        target_fn=None,
+                        batch_target_fn=None if args.grid_only else target.eval_batch,
+                        k_steps=args.k_steps,
+                        eq_cycles=args.eq_cycles,
+                        prod_cycles=args.prod_cycles,
+                        swap_every=args.remc_swap_every,
+                        seed=args.seed + 17,
+                        log_every=max(50, (args.eq_cycles + args.prod_cycles) // 5),
+                        oms_metal_pos=oms_pos,
+                        oms_cell_rows=preps[0]["oms_cell_rows"],
+                        guest_local_pos=preps[0]["guest_local_pos"],
+                        snapshot_stride=args.snapshot_stride,
+                        grid_only=bool(args.grid_only),
+                        adapt_shift_frac=eff_adapt_shift,
+                        adapt_k_frac=eff_adapt_k,
+                        k_min=int(args.k_min),
+                        k_max=int(args.k_max),
+                    )
+                    remc_wall_s = float(time.perf_counter() - t_remc_all)
+                    for prep, pt in zip(preps, remc_results):
+                        pt["cbmc_k"] = int(args.cbmc_k)
+                        pt["p_ins_del"] = float(args.p_ins_del)
+                        pt["prop_grid_wall_s"] = prep["prop_grid_wall_s"]
+                        pt["shift_calib_wall_s"] = prep["shift_calib_wall_s"]
+                        pt["shift_calibration"] = prep["shift_calib"]
+                        pt["init_state_summary"] = prep["init_state_summary"]
+                        pt["metadata"] = dict(run_metadata)
+                        pt["legacy_diagnostics"] = evaluate_convergence_diagnostics(pt)
+                        pt["point_wall_s"] = remc_wall_s
+                        pt["model_load_wall_s"] = model_load_wall_s
+                        _upsert_point(pt)
+                finally:
+                    for prop in proposers:
+                        try:
+                            prop.close()
+                        except Exception:
+                            pass
+            else:
+                consistency_checked = False
+                for i, p_bar in pending:
+                    print(f"\n--- Pressure Point {i+1}/{len(args.pressures)}: {p_bar} bar ---")
+                    t_pt = time.perf_counter()
+                    pt = run_pressure_point(
+                        fw_data=fw_data,
+                        guest=guest,
+                        supercell=args.supercell,
+                        T_K=args.temp,
+                        P_bar=p_bar,
+                        ff_mode=ff_mode,
+                        pol_mode=pol_mode,
+                        grid_dims=grid_dims,
+                        n_boxes=args.boxes,
+                        max_mol=args.max_mol,
+                        k_steps=args.k_steps,
+                        eq_cycles=args.eq_cycles,
+                        prod_cycles=args.prod_cycles,
+                        seed=args.seed + i * 100,
+                        shift_mode=args.shift_mode,
+                        target=None if args.grid_only else target,
+                        pilot_cycles=args.pilot_cycles,
+                        shift_override=args.shift_override,
+                        verify_consistency=(not consistency_checked and target is not None),
+                        device_id=device_id,
+                        init_mode=args.init_mode,
+                        init_loading=args.init_loading,
+                        checkpoint_dir=args.checkpoint_dir,
+                        checkpoint_every=args.checkpoint_every,
+                        resume_mode=resume_mode,
+                        snapshot_stride=args.snapshot_stride,
+                        run_metadata=run_metadata,
+                        grid_only=bool(args.grid_only),
+                        cbmc_k=int(args.cbmc_k),
+                        p_ins_del=float(args.p_ins_del),
+                        distill_res=distill_res,
+                        adapt_shift_frac=adapt_shift_frac,
+                        adapt_k_frac=adapt_k_frac,
+                        k_min=int(args.k_min),
+                        k_max=int(args.k_max),
+                    )
+                    pt["point_wall_s"] = float(time.perf_counter() - t_pt)
+                    pt["model_load_wall_s"] = model_load_wall_s
+                    consistency_checked = True
+                    _upsert_point(pt)
     else:
         payload["total_wall_s"] = float(time.perf_counter() - t_start_all)
         save_outputs(out_json, out_csv, payload)

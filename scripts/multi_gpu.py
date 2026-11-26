@@ -1,5 +1,6 @@
 """Multi-GPU parallel orchestration (pressure-point queue & replica box sharding) for Nested MLIP-GCMC."""
 
+import inspect
 import math
 import multiprocessing as mp
 import os
@@ -13,6 +14,7 @@ import numpy as np
 from mcmc_diagnostics import compute_independent_qst, evaluate_v2_convergence
 from nested_mc_engine import (
     K_TO_KJMOL,
+    attempt_remc_swaps,
     compute_ess_stats,
 )
 
@@ -65,6 +67,24 @@ def split_boxes_across_gpus(total_boxes: int, gpu_ids: Sequence[int]) -> List[Tu
     base = total_boxes // n_workers
     rem = total_boxes % n_workers
     return [(int(gpu_ids[i]), base + (1 if i < rem else 0)) for i in range(n_workers)]
+
+
+def split_pressures_across_gpus(n_pressures: int, gpu_ids: Sequence[int]) -> List[Tuple[int, List[int]]]:
+    """Contiguously partition `n_pressures` sorted pressure indices across `min(len(gpu_ids), n_pressures)` GPUs."""
+    n_pressures = int(n_pressures)
+    if n_pressures <= 0:
+        raise ValueError(f"n_pressures must be > 0, got {n_pressures}")
+    if not gpu_ids:
+        raise ValueError("gpu_ids must be non-empty")
+    n_workers = min(len(gpu_ids), n_pressures)
+    base, rem = divmod(n_pressures, n_workers)
+    out: List[Tuple[int, List[int]]] = []
+    cur = 0
+    for r in range(n_workers):
+        cnt = base + (1 if r < rem else 0)
+        out.append((int(gpu_ids[r]), list(range(cur, cur + cnt))))
+        cur += cnt
+    return out
 
 
 def _configure_worker_env(gpu_id: int, parent_cvd: Optional[str], cpu_threads: int = 4) -> str:
@@ -273,6 +293,14 @@ def merge_replica_shard_results(
         "total_inner_steps": int(sum(int(s["total_inner_steps"]) for s in shards)),
         "parallel_mode": "replica",
     }
+    if any("max_N_observed" in s for s in shards):
+        merged["max_N_observed"] = int(max(int(s.get("max_N_observed", 0)) for s in shards))
+    if "max_mol" in shards[0]:
+        merged["max_mol"] = int(shards[0]["max_mol"])
+    if "delta_eps_initial_kJ_mol" in shards[0]:
+        merged["delta_eps_initial_kJ_mol"] = _box_weighted_mean("delta_eps_initial_kJ_mol")
+    if "k_steps_initial" in shards[0]:
+        merged["k_steps_initial"] = int(shards[0]["k_steps_initial"])
     if "metadata" in shards[0]:
         merged["metadata"] = shards[0]["metadata"]
     if diagnostics_fn is not None:
@@ -317,7 +345,7 @@ def _distill_worker_main(gpu_id: int, parent_cvd: Optional[str], req: dict, resu
             uc_atoms=req["fw_data"]["uc"],
             dtype=req.get("dtype", "float32"),
         )
-        res = distill_mlip_surrogate(
+        distill_kwargs = dict(
             cif_path=req["cif_path"],
             fw_data=req["fw_data"],
             guest=req["guest"],
@@ -333,6 +361,12 @@ def _distill_worker_main(gpu_id: int, parent_cvd: Optional[str], req: dict, resu
             dispersion_xc=req["dispersion_xc"],
             dtype=req.get("dtype", "float32"),
         )
+        only_1b = bool(req.get("only_1b", False))
+        if "only_1b" in inspect.signature(distill_mlip_surrogate).parameters:
+            distill_kwargs["only_1b"] = only_1b
+        elif only_1b:
+            raise RuntimeError("distill_mlip_surrogate does not support only_1b=True in this version of mlip_distill.py")
+        res = distill_mlip_surrogate(**distill_kwargs)
         result_q.put(("ok", res["cache_npz_path"]))
     except BaseException as exc:
         import traceback
@@ -415,8 +449,18 @@ def _pressure_worker_main(
                 cbmc_k=int(run_cfg.get("cbmc_k", 128)),
                 p_ins_del=float(run_cfg.get("p_ins_del", 0.50)),
                 distill_res=distill_res,
+                adapt_shift_frac=float(run_cfg.get("adapt_shift_frac", 0.0)),
+                adapt_k_frac=float(run_cfg.get("adapt_k_frac", 0.0)),
+                k_min=int(run_cfg.get("k_min", 2)),
+                k_max=int(run_cfg.get("k_max", 24)),
+                target_outer_acc=float(run_cfg.get("target_outer_acc", 0.35)),
+                adapt_window=int(run_cfg.get("adapt_window", 20)),
             )
             consistency_checked = True
+            if target is not None and getattr(target, "model_sha256", None):
+                if isinstance(pt.get("metadata"), dict) and not pt["metadata"].get("model_sha256"):
+                    pt["metadata"] = dict(pt["metadata"])
+                    pt["metadata"]["model_sha256"] = target.model_sha256
             pt["gpu_id"] = int(gpu_id)
             pt["parallel_mode"] = "pressure"
             pt["point_wall_s"] = float(time.perf_counter() - t0)
@@ -490,8 +534,18 @@ def _replica_worker_main(
                 cbmc_k=int(run_cfg.get("cbmc_k", 128)),
                 p_ins_del=float(run_cfg.get("p_ins_del", 0.50)),
                 distill_res=distill_res,
+                adapt_shift_frac=float(run_cfg.get("adapt_shift_frac", 0.0)),
+                adapt_k_frac=float(run_cfg.get("adapt_k_frac", 0.0)),
+                k_min=int(run_cfg.get("k_min", 2)),
+                k_max=int(run_cfg.get("k_max", 24)),
+                target_outer_acc=float(run_cfg.get("target_outer_acc", 0.35)),
+                adapt_window=int(run_cfg.get("adapt_window", 20)),
             )
             consistency_checked = True
+            if target is not None and getattr(target, "model_sha256", None):
+                if isinstance(pt.get("metadata"), dict) and not pt["metadata"].get("model_sha256"):
+                    pt["metadata"] = dict(pt["metadata"])
+                    pt["metadata"]["model_sha256"] = target.model_sha256
             result_q.put(("ok", shard_rank, gpu_id, idx, pt))
     except BaseException as exc:
         import traceback
@@ -642,3 +696,403 @@ def run_replicas_parallel(
             p.join(timeout=10.0)
 
     return sorted(results, key=lambda pt: float(pt["P_bar"]))
+
+
+def _remc_worker_main(
+    worker_rank: int,
+    gpu_id: int,
+    assigned_items: List[Tuple[int, int, float]],
+    parent_cvd: Optional[str],
+    run_cfg: dict,
+    cmd_q,
+    result_q,
+):
+    """Multi-GPU lockstep REMC worker owning a contiguous subset of sorted pressures."""
+    proposers = {}
+    try:
+        visible = _configure_worker_env(gpu_id, parent_cvd, run_cfg.get("worker_threads", 4))
+        from mlip_distill import load_distill_cache
+        from nested_mc_engine import NestedMCChain, _serialize_single_box_state
+        from run_mlip_gcmc import evaluate_convergence_diagnostics, prepare_pressure_proposer
+
+        grid_only = bool(run_cfg.get("grid_only", False))
+        target = None if grid_only else _init_worker_target(run_cfg)
+        distill_res = (
+            load_distill_cache(run_cfg["distill_cache_path"])
+            if run_cfg.get("distill_cache_path")
+            else None
+        )
+
+        chains = {}
+        preps = {}
+        p_by_m = {}
+        ready_info = {}
+        consistency_checked = False
+        eff_adapt_shift = (
+            0.0
+            if (grid_only or run_cfg.get("shift_override") is not None)
+            else float(run_cfg.get("adapt_shift_frac", 0.0))
+        )
+        eff_adapt_k = 0.0 if grid_only else float(run_cfg.get("adapt_k_frac", 0.0))
+
+        for m_idx, orig_idx, p_bar in assigned_items:
+            print(
+                f"\n[REMC GPU {gpu_id} (visible={visible}) rank={worker_rank}] "
+                f"Preparing P[{m_idx}]={p_bar} bar"
+            )
+            prep = prepare_pressure_proposer(
+                fw_data=run_cfg["fw_data"],
+                guest=run_cfg["guest"],
+                supercell=run_cfg["supercell"],
+                T_K=float(run_cfg["T_K"]),
+                P_bar=float(p_bar),
+                ff_mode=int(run_cfg["ff_mode"]),
+                pol_mode=int(run_cfg["pol_mode"]),
+                grid_dims=run_cfg["grid_dims"],
+                n_boxes=int(run_cfg["n_boxes"]),
+                max_mol=int(run_cfg["max_mol"]),
+                k_steps=int(run_cfg["k_steps"]),
+                seed=int(run_cfg["base_seed"]) + int(orig_idx) * 100,
+                shift_mode=run_cfg["shift_mode"],
+                target=target,
+                pilot_cycles=int(run_cfg["pilot_cycles"]),
+                shift_override=run_cfg["shift_override"],
+                verify_consistency=(worker_rank == 0 and not consistency_checked and target is not None),
+                device_id=0,
+                init_mode=run_cfg.get("init_mode", "auto"),
+                init_loading=float(run_cfg.get("init_loading", 8.0)),
+                grid_only=grid_only,
+                cbmc_k=int(run_cfg.get("cbmc_k", 128)),
+                p_ins_del=float(run_cfg.get("p_ins_del", 0.50)),
+                distill_res=distill_res,
+            )
+            consistency_checked = True
+            prop = prep["prop"]
+            proposers[m_idx] = prop
+            preps[m_idx] = prep
+            p_by_m[m_idx] = float(p_bar)
+            chains[m_idx] = NestedMCChain(
+                proposer=prop,
+                target_fn=None,
+                k_steps=int(run_cfg["k_steps"]),
+                eq_cycles=int(run_cfg["eq_cycles"]),
+                prod_cycles=int(run_cfg["prod_cycles"]),
+                seed=int(run_cfg["base_seed"]) + int(orig_idx) * 100 + 17,
+                log_every=0,
+                batch_target_fn=None if grid_only else target.eval_batch,
+                oms_metal_pos=prep["oms_metal_pos"] if len(prep["oms_metal_pos"]) > 0 else None,
+                oms_cell_rows=prep["oms_cell_rows"],
+                guest_local_pos=prep["guest_local_pos"],
+                snapshot_stride=int(run_cfg.get("snapshot_stride", 0)),
+                grid_only=grid_only,
+                adapt_shift_frac=eff_adapt_shift,
+                adapt_k_frac=eff_adapt_k,
+                k_min=int(run_cfg.get("k_min", 2)),
+                k_max=int(run_cfg.get("k_max", 24)),
+                target_outer_acc=float(run_cfg.get("target_outer_acc", 0.35)),
+                adapt_window=int(run_cfg.get("adapt_window", 20)),
+            )
+            ready_info[m_idx] = {
+                "fugacity_Pa": float(prop.f_Pa),
+                "N_curr": chains[m_idx].N_curr.tolist(),
+                "fw_mass_gmol": float(prop.fw_mass_gmol),
+                "model_sha256": getattr(target, "model_sha256", None) if target is not None else None,
+            }
+
+        result_q.put(("ready", worker_rank, ready_info))
+
+        while True:
+            cmd = cmd_q.get()
+            if cmd is None or cmd[0] == "stop":
+                break
+            op = cmd[0]
+            if op == "step":
+                n_steps = int(cmd[1])
+                n_map = {}
+                for m_idx in chains:
+                    chains[m_idx].step_cycles(n_steps)
+                    n_map[m_idx] = chains[m_idx].N_curr.tolist()
+                result_q.put(("stepped", worker_rank, n_map))
+            elif op == "get_boxes":
+                req_list = cmd[1]
+                payload_boxes = {}
+                for m_idx, b in req_list:
+                    ch = chains[int(m_idx)]
+                    bi = int(b)
+                    payload_boxes[(int(m_idx), bi)] = (
+                        _serialize_single_box_state(ch.curr[bi]),
+                        int(ch.N_curr[bi]),
+                        float(ch.U_tgt_curr[bi]),
+                    )
+                result_q.put(("boxes", worker_rank, payload_boxes))
+            elif op == "set_boxes":
+                updates_by_m = cmd[1]
+                for m_idx, box_map in updates_by_m.items():
+                    chains[int(m_idx)].apply_swapped_boxes(box_map)
+                result_q.put(("set_ok", worker_rank, True))
+            elif op == "finalize":
+                swap_stats_by_m, wall_s, n_pressures_total, swap_every = cmd[1], float(cmd[2]), int(cmd[3]), int(cmd[4])
+                out_by_m = {}
+                eq_cycles = int(run_cfg["eq_cycles"])
+                T_K = float(run_cfg["T_K"])
+                for m_idx, ch in chains.items():
+                    prep = preps[m_idx]
+                    prop = proposers[m_idx]
+                    conv_mmol_g = prep["conv_mmol_g"]
+                    res = ch.finalize(elapsed_s=wall_s)
+                    hist = np.asarray(res["box_N_history"], dtype=np.float64) * conv_mmol_g
+                    prod_hist = hist[eq_cycles:]
+                    if prod_hist.ndim == 2 and prod_hist.shape[0] >= 2:
+                        half = prod_hist.shape[0] // 2
+                        mean_h1 = float(np.mean(prod_hist[:half]))
+                        mean_h2 = float(np.mean(prod_hist[half:]))
+                        drift = abs(mean_h2 - mean_h1)
+                    elif prod_hist.ndim == 2 and prod_hist.shape[0] == 1:
+                        mean_h1 = float(np.mean(prod_hist))
+                        mean_h2 = mean_h1
+                        drift = 0.0
+                    else:
+                        mean_h1, mean_h2, drift = 0.0, 0.0, 0.0
+
+                    sw = swap_stats_by_m[m_idx]
+                    res["P_bar"] = float(p_by_m[m_idx])
+                    res["T_K"] = T_K
+                    res["fugacity_Pa"] = float(prop.f_Pa)
+                    res["fw_mass_gmol"] = float(prop.fw_mass_gmol)
+                    res["first_half_uptake_mmol_g"] = mean_h1
+                    res["second_half_uptake_mmol_g"] = mean_h2
+                    res["stationarity_drift_mmol_g"] = drift
+                    res["mlip_evals"] = 0 if grid_only else int(res["target_evals"])
+                    res["cbmc_k"] = int(run_cfg.get("cbmc_k", 128))
+                    res["p_ins_del"] = float(run_cfg.get("p_ins_del", 0.50))
+                    res["prop_grid_wall_s"] = prep["prop_grid_wall_s"]
+                    res["shift_calib_wall_s"] = prep["shift_calib_wall_s"]
+                    res["shift_calibration"] = prep["shift_calib"]
+                    res["init_state_summary"] = prep["init_state_summary"]
+                    res["gpu_id"] = int(gpu_id)
+                    res["parallel_mode"] = "remc"
+                    res["remc_swap_every"] = swap_every
+                    res["remc_n_pressures"] = n_pressures_total
+                    res["remc_isotherm_wall_s"] = wall_s
+                    res["remc_swap_att_up"] = int(sw["prod_att_up"])
+                    res["remc_swap_acc_up"] = int(sw["prod_acc_up"])
+                    res["remc_swap_rate_up"] = sw["prod_rate_up"]
+                    res["remc_total_swap_att_up"] = int(sw["tot_att_up"])
+                    res["remc_total_swap_acc_up"] = int(sw["tot_acc_up"])
+                    res["remc_total_swap_rate_up"] = sw["tot_rate_up"]
+                    if run_cfg.get("run_metadata") is not None:
+                        meta_copy = dict(run_cfg["run_metadata"])
+                        if target is not None and getattr(target, "model_sha256", None) and not meta_copy.get("model_sha256"):
+                            meta_copy["model_sha256"] = target.model_sha256
+                        res["metadata"] = meta_copy
+                    res["diagnostics"] = evaluate_v2_convergence(
+                        prod_N_history=res["prod_N_history"],
+                        prod_U_history_kJ=res["prod_U_history"],
+                        conv_mmol_g=conv_mmol_g,
+                        T_K=T_K,
+                        prod_ins_acc=res["prod_ins_acc"],
+                        prod_del_acc=res["prod_del_acc"],
+                        prod_ins_att=res["prod_ins_att"],
+                        prod_del_att=res["prod_del_att"],
+                        prod_outer_acc_rate=res["prod_outer_acc_rate"],
+                        uptake_sem_mmol_g=res["uptake_sem_mmol_g"],
+                        acceptance_breakdown=res.get("acceptance_breakdown"),
+                        oms_occ_history=res.get("prod_oms_occ_history") or None,
+                    )
+                    res["legacy_diagnostics"] = evaluate_convergence_diagnostics(res)
+                    out_by_m[m_idx] = res
+                result_q.put(("finalized", worker_rank, out_by_m))
+                break
+            else:
+                raise RuntimeError(f"Unknown REMC worker command: {op!r}")
+    except BaseException as exc:
+        import traceback
+        result_q.put(("err", worker_rank, f"[REMC GPU {gpu_id} rank={worker_rank}] {exc}\n{traceback.format_exc()}"))
+    finally:
+        for prop in proposers.values():
+            try:
+                prop.close()
+            except Exception:
+                pass
+
+
+def run_remc_parallel(
+    pending: List[Tuple[int, float]],
+    gpu_ids: List[int],
+    run_cfg: dict,
+    on_point_done: Optional[Callable[[dict], None]] = None,
+) -> List[dict]:
+    """Run lockstep multi-GPU Grand Canonical Parallel Tempering across sorted pressures."""
+    if len(pending) < 2:
+        raise ValueError(f"REMC requires at least 2 pressures, got {len(pending)}")
+
+    sorted_items = sorted(pending, key=lambda x: float(x[1]))
+    M = len(sorted_items)
+    plan = split_pressures_across_gpus(M, gpu_ids)
+    n_workers = len(plan)
+    m_to_rank = {}
+    worker_assignments = []
+    for rank, (gid, m_list) in enumerate(plan):
+        assigned = []
+        for m in m_list:
+            m_to_rank[m] = rank
+            orig_idx, p_bar = sorted_items[m]
+            assigned.append((m, int(orig_idx), float(p_bar)))
+        worker_assignments.append((rank, gid, assigned))
+
+    parent_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    ctx = mp.get_context("spawn")
+    cmd_qs = [ctx.Queue() for _ in range(n_workers)]
+    result_q = ctx.Queue()
+
+    procs = [
+        ctx.Process(
+            target=_remc_worker_main,
+            args=(rank, gid, assigned, parent_cvd, run_cfg, cmd_qs[rank], result_q),
+        )
+        for rank, gid, assigned in worker_assignments
+    ]
+    for p in procs:
+        p.start()
+
+    def _collect_from(expected_tag: str, expected_ranks: set) -> dict:
+        got = {}
+        while len(got) < len(expected_ranks):
+            try:
+                msg = result_q.get(timeout=2.0)
+            except queue.Empty:
+                dead_bad = [p for p in procs if not p.is_alive() and p.exitcode not in (0, None)]
+                if dead_bad:
+                    raise RuntimeError(f"REMC worker crashed unexpectedly with exit code {dead_bad[0].exitcode}")
+                continue
+            tag, r_rank, payload = msg
+            if tag == "err":
+                raise RuntimeError(payload)
+            if tag != expected_tag:
+                raise RuntimeError(f"REMC protocol mismatch: expected {expected_tag!r}, got {tag!r}")
+            got[int(r_rank)] = payload
+        return got
+
+    all_ranks = set(range(n_workers))
+    try:
+        ready_by_rank = _collect_from("ready", all_ranks)
+        fugacities_Pa = [0.0] * M
+        for r_info in ready_by_rank.values():
+            for m, info in r_info.items():
+                fugacities_Pa[int(m)] = float(info["fugacity_Pa"])
+
+        n_b = int(run_cfg["n_boxes"])
+        eq_cycles = int(run_cfg["eq_cycles"])
+        prod_cycles = int(run_cfg["prod_cycles"])
+        total_cycles = eq_cycles + prod_cycles
+        swap_stride = max(1, int(run_cfg.get("remc_swap_every", 2)))
+        base_seed = int(run_cfg["base_seed"])
+        ladder_rngs = [np.random.default_rng(base_seed + 7919 * (b + 1)) for b in range(n_b)]
+
+        prod_swap_att_up = np.zeros(M, dtype=np.int64)
+        prod_swap_acc_up = np.zeros(M, dtype=np.int64)
+        tot_swap_att_up = np.zeros(M, dtype=np.int64)
+        tot_swap_acc_up = np.zeros(M, dtype=np.int64)
+
+        t_mc0 = time.perf_counter()
+        cyc_done = 0
+        swap_round = 0
+        log_every = max(50, total_cycles // 5) if total_cycles > 0 else 0
+        next_log = log_every
+
+        while cyc_done < total_cycles:
+            batch = min(swap_stride, total_cycles - cyc_done)
+            if cyc_done < eq_cycles and cyc_done + batch > eq_cycles:
+                batch = eq_cycles - cyc_done
+
+            for q in cmd_qs:
+                q.put(("step", batch))
+            stepped = _collect_from("stepped", all_ranks)
+            N_mat = [None] * M
+            for r_map in stepped.values():
+                for m, n_vec in r_map.items():
+                    N_mat[int(m)] = n_vec
+            cyc_done += batch
+
+            if cyc_done < total_cycles:
+                parity = swap_round % 2
+                swap_round += 1
+                accepted_pairs, att_up, acc_up = attempt_remc_swaps(
+                    N_mat, fugacities_Pa, parity=parity, ladder_rngs=ladder_rngs
+                )
+                tot_swap_att_up += att_up
+                tot_swap_acc_up += acc_up
+                if cyc_done > eq_cycles:
+                    prod_swap_att_up += att_up
+                    prod_swap_acc_up += acc_up
+
+                if accepted_pairs:
+                    req_by_rank = {}
+                    for m_lo, m_hi, b in accepted_pairs:
+                        req_by_rank.setdefault(m_to_rank[m_lo], []).append((m_lo, b))
+                        req_by_rank.setdefault(m_to_rank[m_hi], []).append((m_hi, b))
+                    for r, req_list in req_by_rank.items():
+                        cmd_qs[r].put(("get_boxes", req_list))
+                    boxes_by_rank = _collect_from("boxes", set(req_by_rank.keys()))
+                    fetched = {}
+                    for b_dict in boxes_by_rank.values():
+                        fetched.update(b_dict)
+
+                    upd_by_rank = {}
+                    for m_lo, m_hi, b in accepted_pairs:
+                        upd_by_rank.setdefault(m_to_rank[m_lo], {}).setdefault(m_lo, {})[b] = fetched[(m_hi, b)]
+                        upd_by_rank.setdefault(m_to_rank[m_hi], {}).setdefault(m_hi, {})[b] = fetched[(m_lo, b)]
+                    for r, updates_by_m in upd_by_rank.items():
+                        cmd_qs[r].put(("set_boxes", updates_by_m))
+                    _collect_from("set_ok", set(upd_by_rank.keys()))
+
+            if next_log > 0 and cyc_done >= next_log:
+                elapsed = time.perf_counter() - t_mc0
+                rates = [
+                    f"{tot_swap_acc_up[m] / max(1, tot_swap_att_up[m]) * 100:.0f}%"
+                    for m in range(M - 1)
+                ]
+                means = [f"{float(np.mean(N_mat[m])):.1f}" for m in range(M)]
+                print(
+                    f"  [Multi-GPU REMC cyc {cyc_done:4d}/{total_cycles}] <N>={means} | "
+                    f"SwapRates={rates} ({elapsed:.1f}s)"
+                )
+                while next_log <= cyc_done:
+                    next_log += log_every
+
+        wall_s = float(time.perf_counter() - t_mc0)
+        swap_stats_by_m = {}
+        for m in range(M):
+            ap, cp = int(prod_swap_att_up[m]), int(prod_swap_acc_up[m])
+            at, ct = int(tot_swap_att_up[m]), int(tot_swap_acc_up[m])
+            swap_stats_by_m[m] = {
+                "prod_att_up": ap,
+                "prod_acc_up": cp,
+                "prod_rate_up": (float(cp) / float(ap)) if ap > 0 else (0.0 if m < M - 1 else None),
+                "tot_att_up": at,
+                "tot_acc_up": ct,
+                "tot_rate_up": (float(ct) / float(at)) if at > 0 else (0.0 if m < M - 1 else None),
+            }
+
+        for q in cmd_qs:
+            q.put(("finalize", swap_stats_by_m, wall_s, M, swap_stride))
+        fin_by_rank = _collect_from("finalized", all_ranks)
+
+        results = []
+        for out_map in fin_by_rank.values():
+            for pt in out_map.values():
+                pt["point_wall_s"] = wall_s
+                results.append(pt)
+        results = sorted(results, key=lambda pt: float(pt["P_bar"]))
+        for pt in results:
+            if on_point_done is not None:
+                on_point_done(pt)
+        return results
+    except BaseException:
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+        raise
+    finally:
+        for p in procs:
+            p.join(timeout=10.0)

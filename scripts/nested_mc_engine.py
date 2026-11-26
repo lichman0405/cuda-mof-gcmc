@@ -1,12 +1,83 @@
 """Hybrid GPU-GCMC + MLIP Nested Monte Carlo Engine (ctypes wrapper for mof_gcmc_proposer.dll)."""
 
 import ctypes
+import hashlib
 import math
 import os
 import time
 from pathlib import Path
 from typing import Optional
 import numpy as np
+
+
+def _compute_model_sha256(model_file_path: Optional[str], torch_model=None):
+    """Return (sha256_hex, source) from checkpoint file on disk or deterministic state_dict fallback."""
+    if model_file_path and os.path.isfile(str(model_file_path)):
+        h = hashlib.sha256()
+        with open(str(model_file_path), "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest(), "file"
+    if torch_model is not None and hasattr(torch_model, "state_dict"):
+        h = hashlib.sha256()
+        sd = torch_model.state_dict()
+        for key in sorted(sd.keys()):
+            tensor = sd[key]
+            h.update(str(key).encode("utf-8"))
+            if hasattr(tensor, "detach"):
+                t_cpu = tensor.detach().cpu().contiguous()
+                h.update(str(t_cpu.dtype).encode("utf-8"))
+                h.update(str(tuple(t_cpu.shape)).encode("utf-8"))
+                try:
+                    h.update(t_cpu.numpy().tobytes())
+                except Exception:
+                    h.update(t_cpu.float().numpy().tobytes())
+            else:
+                arr = np.ascontiguousarray(tensor)
+                h.update(str(arr.dtype).encode("utf-8"))
+                h.update(str(arr.shape).encode("utf-8"))
+                h.update(arr.tobytes())
+        return h.hexdigest(), "state_dict"
+    return None, None
+
+
+def _mad_filtered_median(values, z_thresh: float = 3.5):
+    """Return (robust_median, n_outliers) using MAD outlier rejection."""
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None, 0
+    if arr.size <= 2:
+        return float(np.median(arr)), 0
+    med = float(np.median(arr))
+    abs_dev = np.abs(arr - med)
+    mad = float(np.median(abs_dev))
+    sigma = 1.4826 * mad
+    if sigma > 1e-9:
+        keep = abs_dev <= (float(z_thresh) * sigma)
+        if np.any(keep):
+            n_out = int(arr.size - int(np.sum(keep)))
+            return float(np.median(arr[keep])), n_out
+    # MAD == 0 (>= 50% tied): median itself is immune to <50% arbitrary outliers
+    q75, q25 = np.percentile(arr, [75.0, 25.0])
+    iqr_scale = max(1e-6, 1.5 * float(q75 - q25))
+    n_out = int(np.sum(abs_dev > max(5.0, float(z_thresh) * iqr_scale)))
+    return med, n_out
+
+
+def _compute_adapt_end(eq_cycles: int, adapt_frac: float) -> int:
+    """Compute equilibration adaptation stop cycle (strictly <= eq_cycles // 2 when eq_cycles >= 40)."""
+    eq_n = int(eq_cycles)
+    frac = float(adapt_frac)
+    if eq_n <= 0 or frac <= 0.0:
+        return 0
+    end = int(eq_n * min(1.0, max(0.0, frac)))
+    if eq_n >= 40:
+        end = min(end, eq_n // 2)
+    return max(0, min(eq_n, end))
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
@@ -858,13 +929,30 @@ class FastMaceD3Target:
         self.mace_model.eval()
         self.r_max = float(self.mace_calc.r_max)
         self.model_file_path = None
-        for attr in ("model_paths", "model_path"):
-            val = getattr(self.mace_calc, attr, None)
-            if val:
-                self.model_file_path = str(val[0]) if isinstance(val, (list, tuple)) else str(val)
-                break
-        if self.model_file_path is None and os.path.exists(str(model)):
-            self.model_file_path = str(model)
+        if os.path.isfile(str(model)):
+            self.model_file_path = str(Path(str(model)).resolve())
+        if self.model_file_path is None:
+            for obj in (self.mace_calc, calc):
+                for attr in ("model_paths", "model_path", "_model_paths", "models_path"):
+                    val = getattr(obj, attr, None)
+                    if val:
+                        cand = str(val[0]) if isinstance(val, (list, tuple)) else str(val)
+                        if os.path.isfile(cand):
+                            self.model_file_path = str(Path(cand).resolve())
+                            break
+                if self.model_file_path is not None:
+                    break
+        if self.model_file_path is None:
+            try:
+                from mace.calculators.foundations_models import download_mace_mp_checkpoint
+                cand = download_mace_mp_checkpoint(str(model))
+                if cand and os.path.isfile(str(cand)):
+                    self.model_file_path = str(Path(str(cand)).resolve())
+            except Exception:
+                pass
+        self.model_sha256, self.model_sha256_source = _compute_model_sha256(
+            self.model_file_path, self.mace_model
+        )
         self.keyspec = mace_data.KeySpecification(
             info_keys=self.mace_calc.info_keys,
             arrays_keys=self.mace_calc.arrays_keys,
@@ -1416,27 +1504,48 @@ def count_oms_occupied(
     return int(np.sum(min_d2_per_mol < (cutoff_A * cutoff_A)))
 
 
-def _serialize_box_states(states_list) -> list:
-    out = []
-    for st in states_list:
-        d_st = {
-            "N": int(st["N"]),
-            "U_ref_K": float(st.get("U_ref_K", 0.0)),
-            "cx": np.asarray(st["cx"], dtype=np.float64).tolist(),
-            "cy": np.asarray(st["cy"], dtype=np.float64).tolist(),
-            "cz": np.asarray(st["cz"], dtype=np.float64).tolist(),
-        }
-        if "qw" in st:
-            d_st["qw"] = np.asarray(st["qw"], dtype=np.float64).tolist()
-            d_st["qx"] = np.asarray(st["qx"], dtype=np.float64).tolist()
-            d_st["qy"] = np.asarray(st["qy"], dtype=np.float64).tolist()
-            d_st["qz"] = np.asarray(st["qz"], dtype=np.float64).tolist()
-        elif "ux" in st:
-            d_st["ux"] = np.asarray(st["ux"], dtype=np.float64).tolist()
-            d_st["uy"] = np.asarray(st["uy"], dtype=np.float64).tolist()
-            d_st["uz"] = np.asarray(st["uz"], dtype=np.float64).tolist()
-        out.append(d_st)
+def _serialize_single_box_state(st: dict) -> dict:
+    d_st = {
+        "N": int(st["N"]),
+        "U_ref_K": float(st.get("U_ref_K", 0.0)),
+        "cx": np.asarray(st["cx"], dtype=np.float64).tolist(),
+        "cy": np.asarray(st["cy"], dtype=np.float64).tolist(),
+        "cz": np.asarray(st["cz"], dtype=np.float64).tolist(),
+    }
+    if "qw" in st:
+        d_st["qw"] = np.asarray(st["qw"], dtype=np.float64).tolist()
+        d_st["qx"] = np.asarray(st["qx"], dtype=np.float64).tolist()
+        d_st["qy"] = np.asarray(st["qy"], dtype=np.float64).tolist()
+        d_st["qz"] = np.asarray(st["qz"], dtype=np.float64).tolist()
+    elif "ux" in st:
+        d_st["ux"] = np.asarray(st["ux"], dtype=np.float64).tolist()
+        d_st["uy"] = np.asarray(st["uy"], dtype=np.float64).tolist()
+        d_st["uz"] = np.asarray(st["uz"], dtype=np.float64).tolist()
+    return d_st
+
+
+def _deserialize_single_box_state(st: dict) -> dict:
+    out = {
+        "N": int(st["N"]),
+        "U_ref_K": float(st.get("U_ref_K", 0.0)),
+        "cx": np.asarray(st["cx"], dtype=np.float64).copy(),
+        "cy": np.asarray(st["cy"], dtype=np.float64).copy(),
+        "cz": np.asarray(st["cz"], dtype=np.float64).copy(),
+    }
+    if "qw" in st:
+        out["qw"] = np.asarray(st["qw"], dtype=np.float64).copy()
+        out["qx"] = np.asarray(st["qx"], dtype=np.float64).copy()
+        out["qy"] = np.asarray(st["qy"], dtype=np.float64).copy()
+        out["qz"] = np.asarray(st["qz"], dtype=np.float64).copy()
+    elif "ux" in st:
+        out["ux"] = np.asarray(st["ux"], dtype=np.float64).copy()
+        out["uy"] = np.asarray(st["uy"], dtype=np.float64).copy()
+        out["uz"] = np.asarray(st["uz"], dtype=np.float64).copy()
     return out
+
+
+def _serialize_box_states(states_list) -> list:
+    return [_serialize_single_box_state(st) for st in states_list]
 
 
 def _states_equal(a: dict, b: dict, atol: float = 1e-12) -> bool:
@@ -1528,6 +1637,705 @@ def compute_ess_stats(prod_N_history, prod_U_history, elapsed_s: float) -> dict:
     }
 
 
+class NestedMCChain:
+    """Stateful Grand-Canonical Nested MC chain supporting equilibration-only adaptation, checkpointing, and REMC."""
+
+    def __init__(
+        self,
+        proposer: CudaGcmcProposer,
+        target_fn=None,
+        k_steps: int = 10,
+        eq_cycles: int = 200,
+        prod_cycles: int = 500,
+        seed: int = 20261124,
+        log_every: int = 0,
+        batch_target_fn=None,
+        oms_metal_pos: Optional[np.ndarray] = None,
+        oms_cell_rows: Optional[np.ndarray] = None,
+        oms_cutoff_A: float = 2.60,
+        guest_local_pos: Optional[np.ndarray] = None,
+        snapshot_stride: int = 0,
+        resume_state: Optional[dict] = None,
+        checkpoint_fn=None,
+        checkpoint_every: int = 0,
+        grid_only: bool = False,
+        adapt_shift_frac: float = 0.0,
+        adapt_k_frac: float = 0.0,
+        k_min: int = 2,
+        k_max: int = 24,
+        target_outer_acc: float = 0.35,
+        adapt_window: int = 20,
+    ):
+        self.proposer = proposer
+        self.target_fn = target_fn
+        self.batch_target_fn = batch_target_fn
+        self.rng = np.random.default_rng(seed)
+        self.n_b = int(proposer.n_boxes)
+        self.T_K = float(proposer.T_K)
+        self.grid_only = bool(grid_only)
+        self.delta_eps_K = 0.0 if self.grid_only else float(getattr(proposer, "delta_eps_K", 0.0))
+        self.delta_eps_initial_K = float(self.delta_eps_K)
+        self.conv_mmol_g = 1000.0 / float(proposer.fw_mass_gmol)
+        self.use_quat = hasattr(proposer, "propose_k_quat") and hasattr(proposer, "get_accepted_quat")
+        self.eq_cycles = int(eq_cycles)
+        self.prod_cycles = int(prod_cycles)
+        self.total_cycles = self.eq_cycles + self.prod_cycles
+        self.log_every = int(log_every)
+        self.oms_cutoff_A = float(oms_cutoff_A)
+        self.guest_local_pos = guest_local_pos
+        self.snapshot_stride = int(snapshot_stride)
+        self.checkpoint_fn = checkpoint_fn
+        self.checkpoint_every = int(checkpoint_every)
+        self.max_mol = int(getattr(proposer, "max_mol", 0))
+
+        self.k_steps_initial = max(1, int(k_steps))
+        self.k_cur = int(self.k_steps_initial)
+        self.k_min = max(1, int(k_min))
+        self.k_max = max(self.k_min, int(k_max))
+        self.target_outer_acc = float(target_outer_acc)
+        self.adapt_shift_frac = 0.0 if self.grid_only else float(adapt_shift_frac)
+        self.adapt_k_frac = 0.0 if self.grid_only else float(adapt_k_frac)
+        self.adapt_shift_end = _compute_adapt_end(self.eq_cycles, self.adapt_shift_frac)
+        self.adapt_k_end = _compute_adapt_end(self.eq_cycles, self.adapt_k_frac)
+        self.adapt_max_end = max(self.adapt_shift_end, self.adapt_k_end)
+        self.adapt_window = max(1, int(adapt_window))
+        self.eff_adapt_window = (
+            max(1, min(self.adapt_window, self.adapt_max_end)) if self.adapt_max_end > 0 else self.adapt_window
+        )
+
+        self.oms_inv_cell = None
+        if oms_metal_pos is not None and oms_cell_rows is not None and len(oms_metal_pos) > 0:
+            self.oms_metal_pos = np.asarray(oms_metal_pos, dtype=np.float64)
+            self.oms_cell_rows = np.asarray(oms_cell_rows, dtype=np.float64)
+            self.oms_inv_cell = np.linalg.inv(self.oms_cell_rows)
+        else:
+            self.oms_metal_pos = None
+            self.oms_cell_rows = None
+
+        self._reset_adapt_window()
+        self.shift_update_idx = 0
+        self.adaptation_history = []
+        self.prod_trial_marg_per_box = [[] for _ in range(self.n_b)]
+
+        if resume_state is not None:
+            if int(resume_state["n_boxes"]) != self.n_b:
+                raise ValueError(f"Resume state n_boxes={resume_state['n_boxes']} != {self.n_b}")
+            if abs(float(resume_state["delta_eps_K"]) - self.delta_eps_K) > 1e-9:
+                raise ValueError(f"Resume state delta_eps_K={resume_state['delta_eps_K']} != {self.delta_eps_K}")
+            if bool(resume_state.get("grid_only", False)) != self.grid_only:
+                raise ValueError(f"Resume state grid_only={resume_state.get('grid_only', False)} != {self.grid_only}")
+            if int(resume_state["eq_cycles"]) != self.eq_cycles:
+                raise ValueError(f"Resume state eq_cycles={resume_state['eq_cycles']} != {self.eq_cycles}")
+            if not self.use_quat:
+                raise RuntimeError("True checkpoint resume requires quaternion proposer API")
+            self.rng.bit_generator.state = resume_state["py_rng_state"]
+            restored_states = [_deserialize_single_box_state(st) for st in resume_state["curr_states"]]
+            proposer.set_accepted_quat(restored_states)
+            proposer.set_rng_states(resume_state["cuda_rng_states"])
+            self.curr = proposer.get_accepted_quat()
+            self.U_tgt_curr = np.asarray(resume_state["U_tgt_curr"], dtype=np.float64).copy()
+            self.U_ref_curr = np.asarray(resume_state["U_ref_curr"], dtype=np.float64).copy()
+            self.N_curr = np.asarray(resume_state["N_curr"], dtype=np.int32).copy()
+            for b in range(self.n_b):
+                if int(self.curr[b]["N"]) != int(self.N_curr[b]):
+                    raise RuntimeError(f"Resume N mismatch in box {b}: {self.curr[b]['N']} vs {self.N_curr[b]}")
+                if abs(float(self.curr[b]["U_ref_K"]) - float(self.U_ref_curr[b])) > 1e-6:
+                    raise RuntimeError(
+                        f"Resume U_ref_K mismatch in box {b}: {self.curr[b]['U_ref_K']} vs {self.U_ref_curr[b]}"
+                    )
+            self.start_cyc = int(resume_state["completed_cycles"])
+            self.cyc = self.start_cyc
+            self.k_cur = max(1, int(resume_state.get("k_steps", self.k_cur)))
+            self.k_steps_initial = max(1, int(resume_state.get("k_steps_initial", self.k_steps_initial)))
+            self.delta_eps_initial_K = float(resume_state.get("delta_eps_initial_K", self.delta_eps_K))
+            self.adaptation_history = list(resume_state.get("adaptation_history", []))
+            self.shift_update_idx = int(resume_state.get("shift_update_idx", len(self.adaptation_history)))
+            self.max_N_observed = int(
+                resume_state.get("max_N_observed", int(np.max(self.N_curr)) if len(self.N_curr) else 0)
+            )
+            self.total_inner_steps = int(
+                resume_state.get("total_inner_steps", self.start_cyc * self.n_b * self.k_cur)
+            )
+            self.target_evals = int(resume_state.get("target_evals", 0))
+            self.acc_outer = np.asarray(resume_state["acc_outer"], dtype=np.int64).copy()
+            self.prod_acc_outer = np.asarray(resume_state["prod_acc_outer"], dtype=np.int64).copy()
+            self.inner_acc_tot = np.asarray(resume_state["inner_acc_tot"], dtype=np.int64).copy()
+            self.prod_ins_att = int(resume_state["prod_ins_att"])
+            self.prod_ins_acc = int(resume_state["prod_ins_acc"])
+            self.prod_del_att = int(resume_state["prod_del_att"])
+            self.prod_del_acc = int(resume_state["prod_del_acc"])
+            self.acc_empty_to_empty = int(resume_state["acc_empty_to_empty"])
+            self.acc_identity_nonempty = int(resume_state["acc_identity_nonempty"])
+            self.acc_same_N_changed = int(resume_state["acc_same_N_changed"])
+            self.acc_dN_changed = int(resume_state["acc_dN_changed"])
+            self.prod_rejected = int(resume_state["prod_rejected"])
+            self.prod_total_trials = int(resume_state["prod_total_trials"])
+            self.nested_trials = int(resume_state.get("nested_trials", self.prod_total_trials))
+            self.nested_accepted = int(resume_state.get("nested_accepted", int(np.sum(self.prod_acc_outer))))
+            self.sum_N = np.asarray(resume_state["sum_N"], dtype=np.float64).copy()
+            self.sum_N2 = np.asarray(resume_state["sum_N2"], dtype=np.float64).copy()
+            self.sum_U = np.asarray(resume_state["sum_U"], dtype=np.float64).copy()
+            self.sum_UN = np.asarray(resume_state["sum_UN"], dtype=np.float64).copy()
+            self.trajectory = list(resume_state.get("trajectory", []))
+            self.box_N_history = [list(row) for row in resume_state["box_N_history"]]
+            self.prod_N_history = [list(row) for row in resume_state["prod_N_history"]]
+            self.prod_U_history = [list(row) for row in resume_state["prod_U_history"]]
+            self.prod_U_ref_history = [list(row) for row in resume_state["prod_U_ref_history"]]
+            self.prod_accepted_history = [list(row) for row in resume_state["prod_accepted_history"]]
+            self.prod_dN_history = [list(row) for row in resume_state["prod_dN_history"]]
+            self.prod_proposed_dN_history = [list(row) for row in resume_state["prod_proposed_dN_history"]]
+            self.prod_oms_occ_history = [list(row) for row in resume_state.get("prod_oms_occ_history", [])]
+            self.prod_snapshots = list(resume_state.get("prod_snapshots", []))
+            self.elapsed_prior = float(resume_state.get("elapsed_s", 0.0))
+        else:
+            self.curr = proposer.get_accepted_quat() if self.use_quat else proposer.get_accepted()
+            self.U_tgt_curr = np.zeros(self.n_b, dtype=np.float64)
+            self.U_ref_curr = np.zeros(self.n_b, dtype=np.float64)
+            self.N_curr = np.zeros(self.n_b, dtype=np.int32)
+            if self.grid_only:
+                init_evals = [(float(self.curr[b]["U_ref_K"]), False) for b in range(self.n_b)]
+            elif batch_target_fn is not None:
+                init_evals = batch_target_fn(self.curr)
+            else:
+                init_evals = [target_fn(self.curr[b]) for b in range(self.n_b)]
+            for b in range(self.n_b):
+                ut, ov = init_evals[b]
+                if not math.isfinite(float(ut)):
+                    raise RuntimeError(f"Non-finite initial target energy in box {b}: {ut}")
+                if not math.isfinite(float(self.curr[b]["U_ref_K"])):
+                    raise RuntimeError(f"Non-finite initial reference energy in box {b}: {self.curr[b]['U_ref_K']}")
+                if ov:
+                    raise RuntimeError(f"Initial warm-started state of box {b} has target overlap")
+                self.U_tgt_curr[b] = float(ut)
+                self.U_ref_curr[b] = float(self.curr[b]["U_ref_K"])
+                self.N_curr[b] = int(self.curr[b]["N"])
+
+            self.start_cyc = 0
+            self.cyc = 0
+            self.max_N_observed = int(np.max(self.N_curr)) if len(self.N_curr) else 0
+            self.total_inner_steps = 0
+            self.target_evals = 0 if self.grid_only else int(np.sum(self.N_curr > 0))
+            self.acc_outer = np.zeros(self.n_b, dtype=np.int64)
+            self.prod_acc_outer = np.zeros(self.n_b, dtype=np.int64)
+            self.inner_acc_tot = np.zeros(self.n_b, dtype=np.int64)
+            self.prod_ins_att = 0
+            self.prod_ins_acc = 0
+            self.prod_del_att = 0
+            self.prod_del_acc = 0
+            self.acc_empty_to_empty = 0
+            self.acc_identity_nonempty = 0
+            self.acc_same_N_changed = 0
+            self.acc_dN_changed = 0
+            self.prod_rejected = 0
+            self.prod_total_trials = 0
+            self.nested_trials = 0
+            self.nested_accepted = 0
+
+            self.sum_N = np.zeros(self.n_b, dtype=np.float64)
+            self.sum_N2 = np.zeros(self.n_b, dtype=np.float64)
+            self.sum_U = np.zeros(self.n_b, dtype=np.float64)
+            self.sum_UN = np.zeros(self.n_b, dtype=np.float64)
+
+            self.trajectory = []
+            self.box_N_history = []
+            self.prod_N_history = []
+            self.prod_U_history = []
+            self.prod_U_ref_history = []
+            self.prod_accepted_history = []
+            self.prod_dN_history = []
+            self.prod_proposed_dN_history = []
+            self.prod_oms_occ_history = []
+            self.prod_snapshots = []
+            self.elapsed_prior = 0.0
+
+        self.t0 = time.perf_counter()
+
+    def _reset_adapt_window(self):
+        self._win_cycles = 0
+        self._win_prop_dN = []
+        self._win_nonempty_starts = 0
+        self._win_ins_att = 0
+        self._win_del_att = 0
+        self._win_marg_kJ = []
+        self._win_eff_trials = 0
+        self._win_eff_acc = 0
+
+    def _apply_adapt_window(self, cyc: int):
+        do_shift = cyc < self.adapt_shift_end
+        do_k = cyc < self.adapt_k_end
+        if not (do_shift or do_k):
+            self._reset_adapt_window()
+            return
+
+        de_before = float(self.delta_eps_K * K_TO_KJMOL)
+        k_before = int(self.k_cur)
+        de_marg, _ = _mad_filtered_median(self._win_marg_kJ) if len(self._win_marg_kJ) >= 6 else (None, 0)
+        mean_prop_dN = float(np.mean(self._win_prop_dN)) if self._win_prop_dN else 0.0
+        eff_acc = (float(self._win_eff_acc) / float(self._win_eff_trials)) if self._win_eff_trials > 0 else None
+
+        if do_shift:
+            RT_kJ = self.T_K * K_TO_KJMOL
+            step_scale = max(1.5, RT_kJ)
+            lr = 0.35 / (1.0 + 0.25 * float(self.shift_update_idx))
+            has_marg = (de_marg is not None) and math.isfinite(float(de_marg))
+            # Guard drift term when all boxes started empty (N==0) so empty boxes cannot spuriously push de upward
+            has_drift = (
+                self._win_nonempty_starts > 0
+                and (self._win_ins_att + self._win_del_att) > 0
+                and len(self._win_prop_dN) > 0
+            )
+            drift_term = step_scale * float(np.clip(mean_prop_dN, -2.0, 2.0)) if has_drift else 0.0
+            if has_marg and has_drift:
+                marg_err = float(de_marg) - de_before
+                if marg_err * drift_term >= 0.0:
+                    delta_raw = lr * (0.80 * marg_err + drift_term)
+                else:
+                    w_m = 0.35 / (1.0 + 0.5 * float(self.shift_update_idx))
+                    delta_raw = lr * (w_m * marg_err + drift_term)
+            elif has_marg:
+                delta_raw = lr * (float(de_marg) - de_before)
+            elif has_drift:
+                delta_raw = lr * drift_term
+            else:
+                delta_raw = 0.0
+            delta_step = float(np.clip(delta_raw, -1.5, 1.5))
+            new_de_kJ = float(np.clip(de_before + delta_step, -24.0, 24.0))
+            if abs(new_de_kJ - de_before) > 1e-12:
+                self.proposer.set_chem_pot_shift(new_de_kJ)
+                self.delta_eps_K = float(getattr(self.proposer, "delta_eps_K", new_de_kJ / K_TO_KJMOL))
+            self.shift_update_idx += 1
+
+        if do_k and eff_acc is not None:
+            acc_lo = max(0.05, min(0.22, self.target_outer_acc - 0.13))
+            acc_hi = min(0.90, max(0.50, self.target_outer_acc + 0.15))
+            if eff_acc < acc_lo:
+                k_next = max(self.k_min, int(round(self.k_cur * 0.75)))
+                if k_next == self.k_cur and self.k_cur > self.k_min:
+                    k_next = self.k_cur - 1
+                self.k_cur = k_next
+            elif eff_acc > acc_hi:
+                k_scaled = int(round(self.k_cur * 1.25))
+                k_next = min(self.k_max, k_scaled + (1 if k_scaled == self.k_cur else 0))
+                self.k_cur = k_next
+
+        self.adaptation_history.append({
+            "cycle": int(cyc + 1),
+            "delta_eps_before_kJ_mol": de_before,
+            "delta_eps_kJ_mol": float(self.delta_eps_K * K_TO_KJMOL),
+            "k_steps_before": k_before,
+            "k_steps": int(self.k_cur),
+            "mean_prop_dN": float(mean_prop_dN),
+            "de_marg_kJ_mol": None if de_marg is None else float(de_marg),
+            "n_marg_samples": int(len(self._win_marg_kJ)),
+            "eff_acc": None if eff_acc is None else float(eff_acc),
+            "win_ins_att": int(self._win_ins_att),
+            "win_del_att": int(self._win_del_att),
+            "win_nonempty_starts": int(self._win_nonempty_starts),
+        })
+        self._reset_adapt_window()
+
+    def build_ckpt(self, completed_cyc: int) -> dict:
+        cuda_rng = self.proposer.get_rng_states().tolist() if hasattr(self.proposer, "get_rng_states") else []
+        return {
+            "completed_cycles": int(completed_cyc),
+            "eq_cycles": int(self.eq_cycles),
+            "prod_cycles": int(self.prod_cycles),
+            "n_boxes": int(self.n_b),
+            "k_steps": int(self.k_cur),
+            "k_steps_initial": int(self.k_steps_initial),
+            "delta_eps_K": float(self.delta_eps_K),
+            "delta_eps_initial_K": float(self.delta_eps_initial_K),
+            "grid_only": bool(self.grid_only),
+            "adaptation_history": self.adaptation_history,
+            "shift_update_idx": int(self.shift_update_idx),
+            "max_N_observed": int(self.max_N_observed),
+            "total_inner_steps": int(self.total_inner_steps),
+            "target_evals": int(self.target_evals),
+            "py_rng_state": self.rng.bit_generator.state,
+            "cuda_rng_states": [int(x) for x in cuda_rng],
+            "curr_states": _serialize_box_states(self.curr),
+            "U_tgt_curr": [float(x) for x in self.U_tgt_curr],
+            "U_ref_curr": [float(x) for x in self.U_ref_curr],
+            "N_curr": [int(x) for x in self.N_curr],
+            "acc_outer": [int(x) for x in self.acc_outer],
+            "prod_acc_outer": [int(x) for x in self.prod_acc_outer],
+            "inner_acc_tot": [int(x) for x in self.inner_acc_tot],
+            "prod_ins_att": int(self.prod_ins_att),
+            "prod_ins_acc": int(self.prod_ins_acc),
+            "prod_del_att": int(self.prod_del_att),
+            "prod_del_acc": int(self.prod_del_acc),
+            "acc_empty_to_empty": int(self.acc_empty_to_empty),
+            "acc_identity_nonempty": int(self.acc_identity_nonempty),
+            "acc_same_N_changed": int(self.acc_same_N_changed),
+            "acc_dN_changed": int(self.acc_dN_changed),
+            "prod_rejected": int(self.prod_rejected),
+            "prod_total_trials": int(self.prod_total_trials),
+            "nested_trials": int(self.nested_trials),
+            "nested_accepted": int(self.nested_accepted),
+            "sum_N": [float(x) for x in self.sum_N],
+            "sum_N2": [float(x) for x in self.sum_N2],
+            "sum_U": [float(x) for x in self.sum_U],
+            "sum_UN": [float(x) for x in self.sum_UN],
+            "box_N_history": self.box_N_history,
+            "prod_N_history": self.prod_N_history,
+            "prod_U_history": self.prod_U_history,
+            "prod_U_ref_history": self.prod_U_ref_history,
+            "prod_accepted_history": self.prod_accepted_history,
+            "prod_dN_history": self.prod_dN_history,
+            "prod_proposed_dN_history": self.prod_proposed_dN_history,
+            "prod_oms_occ_history": self.prod_oms_occ_history,
+            "prod_snapshots": self.prod_snapshots,
+            "trajectory": self.trajectory,
+            "elapsed_s": float(self.elapsed_prior + (time.perf_counter() - self.t0)),
+        }
+
+    def apply_swapped_boxes(self, box_updates: dict) -> None:
+        """Install REMC-swapped box states and resynchronize proposer U_ref_K cleanly."""
+        if not box_updates:
+            return
+        for b, (st_dict, n_val, u_tgt_val) in box_updates.items():
+            bi = int(b)
+            self.curr[bi] = _deserialize_single_box_state(st_dict)
+            self.N_curr[bi] = int(n_val)
+            self.U_tgt_curr[bi] = float(u_tgt_val)
+        if self.use_quat and hasattr(self.proposer, "set_accepted_quat"):
+            self.proposer.set_accepted_quat(self.curr)
+            refreshed = self.proposer.get_accepted_quat()
+            for b in range(self.n_b):
+                if int(refreshed[b]["N"]) != int(self.N_curr[b]):
+                    raise RuntimeError(
+                        f"REMC swap N mismatch after proposer sync in box {b}: "
+                        f"{refreshed[b]['N']} vs {self.N_curr[b]}"
+                    )
+                u_ref_new = float(refreshed[b]["U_ref_K"])
+                if not math.isfinite(u_ref_new):
+                    raise RuntimeError(f"Non-finite U_ref_K after REMC swap sync in box {b}: {u_ref_new}")
+                self.U_ref_curr[b] = u_ref_new
+            self.curr = refreshed
+        else:
+            for b in box_updates:
+                bi = int(b)
+                self.U_ref_curr[bi] = float(self.curr[bi].get("U_ref_K", 0.0))
+        if len(self.N_curr) > 0:
+            self.max_N_observed = max(self.max_N_observed, int(np.max(self.N_curr)))
+
+    def step_cycles(self, n_steps: int) -> None:
+        end_cyc = min(self.total_cycles, self.cyc + max(0, int(n_steps)))
+        for cyc in range(self.cyc, end_cyc):
+            mask = np.zeros(self.n_b, dtype=np.int32)
+            cyc_prop_dN = [0] * self.n_b
+            cyc_net_dN = [0] * self.n_b
+
+            trials = self.proposer.propose_k_quat(self.k_cur) if self.use_quat else self.proposer.propose_k(self.k_cur)
+            self.total_inner_steps += self.n_b * self.k_cur
+            if self.grid_only:
+                tri_evals = [(float(trials[b]["U_ref_K"]), False) for b in range(self.n_b)]
+            else:
+                self.target_evals += sum(1 for t in trials if int(t["N"]) > 0)
+                if self.batch_target_fn is not None:
+                    tri_evals = self.batch_target_fn(trials)
+                else:
+                    tri_evals = [self.target_fn(trials[b]) for b in range(self.n_b)]
+
+            in_adapt = (not self.grid_only) and (cyc < self.adapt_max_end)
+            for b in range(self.n_b):
+                self.inner_acc_tot[b] += trials[b]["inner_acc"]
+                if not math.isfinite(float(trials[b]["U_ref_K"])):
+                    raise RuntimeError(f"Non-finite trial reference energy at cycle {cyc}, box {b}: {trials[b]['U_ref_K']}")
+                n_prev = int(self.N_curr[b])
+                dU_ref = float(trials[b]["U_ref_K"]) - float(self.U_ref_curr[b])
+                dN = int(trials[b]["N"]) - n_prev
+                cyc_prop_dN[b] = dN
+                u_tgt_tri, ov = tri_evals[b]
+                if not ov and not math.isfinite(float(u_tgt_tri)):
+                    raise RuntimeError(f"Non-finite trial target energy at cycle {cyc}, box {b}: {u_tgt_tri}")
+                accepted = False
+                if self.grid_only:
+                    accepted = True
+                elif not ov:
+                    dU_tgt = float(u_tgt_tri) - float(self.U_tgt_curr[b])
+                    ddU = dU_tgt - dU_ref - self.delta_eps_K * float(dN)
+                    if not math.isfinite(float(ddU)):
+                        raise RuntimeError(f"Non-finite Nested MC ddU at cycle {cyc}, box {b}: {ddU}")
+                    if ddU <= 0.0:
+                        accepted = True
+                    else:
+                        arg = -ddU / self.T_K
+                        if arg > -50.0 and self.rng.random() < math.exp(arg):
+                            accepted = True
+                    if dN != 0:
+                        marg_kJ = (dU_tgt - dU_ref) * K_TO_KJMOL / float(dN)
+                        if math.isfinite(marg_kJ):
+                            if in_adapt:
+                                self._win_marg_kJ.append(marg_kJ)
+                            elif cyc >= self.eq_cycles:
+                                self.prod_trial_marg_per_box[b].append(marg_kJ)
+
+                if in_adapt:
+                    if n_prev > 0:
+                        self._win_nonempty_starts += 1
+                    self._win_prop_dN.append(float(dN))
+                    if dN > 0:
+                        self._win_ins_att += 1
+                    elif dN < 0:
+                        self._win_del_att += 1
+                    if not (n_prev == 0 and int(trials[b]["N"]) == 0):
+                        self._win_eff_trials += 1
+                        if accepted:
+                            self._win_eff_acc += 1
+
+                if cyc >= self.eq_cycles:
+                    self.nested_trials += 1
+                    same_cfg = _states_equal(trials[b], self.curr[b])
+                    self.prod_total_trials += 1
+                    if dN > 0:
+                        self.prod_ins_att += 1
+                        if accepted:
+                            self.prod_ins_acc += 1
+                    elif dN < 0:
+                        self.prod_del_att += 1
+                        if accepted:
+                            self.prod_del_acc += 1
+                    if not accepted:
+                        self.prod_rejected += 1
+                    elif n_prev == 0 and int(trials[b]["N"]) == 0:
+                        self.acc_empty_to_empty += 1
+                    elif same_cfg:
+                        self.acc_identity_nonempty += 1
+                    elif dN == 0:
+                        self.acc_same_N_changed += 1
+                    else:
+                        self.acc_dN_changed += 1
+
+                if accepted:
+                    mask[b] = 1
+                    self.U_tgt_curr[b] = float(u_tgt_tri)
+                    self.U_ref_curr[b] = float(trials[b]["U_ref_K"])
+                    self.N_curr[b] = int(trials[b]["N"])
+                    self.curr[b] = trials[b]
+                    cyc_net_dN[b] = dN
+                    self.acc_outer[b] += 1
+                    if cyc >= self.eq_cycles:
+                        self.prod_acc_outer[b] += 1
+                        self.nested_accepted += 1
+
+            self.proposer.commit(mask)
+            if len(self.N_curr) > 0:
+                self.max_N_observed = max(self.max_N_observed, int(np.max(self.N_curr)))
+
+            if in_adapt:
+                self._win_cycles += 1
+                if self._win_cycles >= self.eff_adapt_window:
+                    self._apply_adapt_window(cyc)
+
+            if cyc >= self.eq_cycles:
+                self.prod_N_history.append([int(x) for x in self.N_curr])
+                self.prod_U_history.append([float(self.U_tgt_curr[b] * K_TO_KJMOL) for b in range(self.n_b)])
+                self.prod_U_ref_history.append([float(self.U_ref_curr[b] * K_TO_KJMOL) for b in range(self.n_b)])
+                self.prod_accepted_history.append([int(mask[b]) for b in range(self.n_b)])
+                self.prod_dN_history.append(cyc_net_dN)
+                self.prod_proposed_dN_history.append(cyc_prop_dN)
+                if self.oms_metal_pos is not None:
+                    self.prod_oms_occ_history.append([
+                        count_oms_occupied(
+                            self.curr[b], self.oms_metal_pos, self.oms_cell_rows,
+                            guest_local_pos=self.guest_local_pos, cutoff_A=self.oms_cutoff_A,
+                            inv_cell_rows=self.oms_inv_cell,
+                        )
+                        for b in range(self.n_b)
+                    ])
+                prod_step = cyc - self.eq_cycles + 1
+                if self.snapshot_stride > 0 and (prod_step % self.snapshot_stride == 0 or cyc == self.total_cycles - 1):
+                    self.prod_snapshots.append({
+                        "prod_cycle": int(prod_step),
+                        "states": _serialize_box_states(self.curr),
+                    })
+                for b in range(self.n_b):
+                    dn = float(self.N_curr[b])
+                    du = float(self.U_tgt_curr[b])
+                    self.sum_N[b] += dn
+                    self.sum_N2[b] += dn * dn
+                    self.sum_U[b] += du
+                    self.sum_UN[b] += du * dn
+
+            self.box_N_history.append([int(x) for x in self.N_curr])
+            if self.n_b == 1:
+                self.trajectory.append({
+                    "cycle": cyc,
+                    "in_prod": cyc >= self.eq_cycles,
+                    "N": int(self.N_curr[0]),
+                    "uptake_mmol_g": float(self.N_curr[0] * self.conv_mmol_g),
+                    "U_tgt_kJ": float(self.U_tgt_curr[0] * K_TO_KJMOL),
+                    "U_ref_kJ": float(self.U_ref_curr[0] * K_TO_KJMOL),
+                    "accepted": bool(mask[0]),
+                })
+            if self.checkpoint_fn is not None and self.checkpoint_every > 0 and ((cyc + 1) % self.checkpoint_every == 0):
+                self.checkpoint_fn(self.build_ckpt(cyc + 1))
+            if self.log_every > 0 and ((cyc + 1) % self.log_every == 0):
+                elapsed = self.elapsed_prior + (time.perf_counter() - self.t0)
+                mean_up_now = float(np.mean(self.N_curr) * self.conv_mmol_g)
+                print(
+                    f"  [NestedMC cyc {cyc+1:4d}/{self.total_cycles}] N={self.N_curr.tolist()} ({mean_up_now:.2f} mmol/g) "
+                    f"Acc={np.mean(self.acc_outer)/(cyc+1)*100:5.1f}% k={self.k_cur} "
+                    f"dEps={self.delta_eps_K*K_TO_KJMOL:+.2f} ({elapsed:.1f}s)"
+                )
+            self.cyc = cyc + 1
+
+    def finalize(self, elapsed_s: Optional[float] = None) -> dict:
+        dt = float(elapsed_s) if elapsed_s is not None else float(self.elapsed_prior + (time.perf_counter() - self.t0))
+        final_ckpt = self.build_ckpt(self.cyc)
+        if self.checkpoint_fn is not None and self.cyc > self.start_cyc:
+            self.checkpoint_fn(final_ckpt)
+
+        prod_denom = max(1, self.prod_cycles)
+        tot_denom = max(1, self.total_cycles)
+        box_uptakes = (self.sum_N / prod_denom) * self.conv_mmol_g if self.prod_cycles > 0 else np.zeros(self.n_b, dtype=np.float64)
+        box_qst = []
+        box_molar_bind = []
+        box_molar_qst = []
+        for b in range(self.n_b):
+            mN = self.sum_N[b] / prod_denom if self.prod_cycles > 0 else 0.0
+            mN2 = self.sum_N2[b] / prod_denom if self.prod_cycles > 0 else 0.0
+            mU = self.sum_U[b] / prod_denom if self.prod_cycles > 0 else 0.0
+            mUN = self.sum_UN[b] / prod_denom if self.prod_cycles > 0 else 0.0
+            varN = mN2 - mN * mN
+            mb = (-mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
+            mq = (self.T_K - mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
+            box_molar_bind.append(mb)
+            box_molar_qst.append(mq)
+            if varN > 1e-12:
+                q_K = self.T_K - (mUN - mU * mN) / varN
+                box_qst.append(float(q_K * K_TO_KJMOL))
+            else:
+                box_qst.append(None)
+
+        mean_up = float(np.mean(box_uptakes))
+        sem_up = float(np.std(box_uptakes, ddof=1) / math.sqrt(self.n_b)) if self.n_b > 1 else 0.0
+        valid_box_qst = [q for q in box_qst if q is not None]
+        per_box_mean_qst = float(np.mean(valid_box_qst)) if valid_box_qst else None
+        per_box_sem_qst = (
+            float(np.std(valid_box_qst, ddof=1) / math.sqrt(len(valid_box_qst)))
+            if len(valid_box_qst) > 1 else (0.0 if len(valid_box_qst) == 1 else None)
+        )
+        box_moments = [
+            {
+                "n_samples": int(self.prod_cycles),
+                "sum_N": float(self.sum_N[b]),
+                "sum_N2": float(self.sum_N2[b]),
+                "sum_U": float(self.sum_U[b]),
+                "sum_UN": float(self.sum_UN[b]),
+            }
+            for b in range(self.n_b)
+        ]
+
+        from mcmc_diagnostics import compute_independent_qst
+        qst_res = compute_independent_qst(
+            self.prod_N_history, self.prod_U_history, T_K=self.T_K,
+            prod_ins_acc=self.prod_ins_acc, prod_del_acc=self.prod_del_acc,
+        )
+        mean_qst = qst_res["qst_fluctuation_kJ_mol"]
+        sem_qst = qst_res["qst_fluctuation_sem_kJ_mol"]
+        mean_mb = float(np.mean(box_molar_bind))
+        mean_mq = float(np.mean(box_molar_qst))
+        sem_mq = float(np.std(box_molar_qst, ddof=1) / math.sqrt(self.n_b)) if self.n_b > 1 else 0.0
+
+        acceptance_breakdown = {
+            "total_trials": int(self.prod_total_trials),
+            "rejected": int(self.prod_rejected),
+            "acc_empty_to_empty": int(self.acc_empty_to_empty),
+            "acc_identity_nonempty": int(self.acc_identity_nonempty),
+            "acc_same_N_changed": int(self.acc_same_N_changed),
+            "acc_dN_changed": int(self.acc_dN_changed),
+            "effective_move_acc_rate": float((self.acc_same_N_changed + self.acc_dN_changed) / max(1, self.prod_total_trials)),
+            "nested_trials": int(self.nested_trials),
+            "nested_accepted": int(self.nested_accepted),
+        }
+
+        prod_trial_marg_meds = []
+        prod_trial_marg_counts = []
+        for b in range(self.n_b):
+            vals = self.prod_trial_marg_per_box[b]
+            prod_trial_marg_counts.append(int(len(vals)))
+            if len(vals) >= 2:
+                m_val, _ = _mad_filtered_median(vals)
+                prod_trial_marg_meds.append(m_val)
+            else:
+                prod_trial_marg_meds.append(None)
+
+        ess_stats = compute_ess_stats(self.prod_N_history, self.prod_U_history, dt)
+        final_acc = self.proposer.get_accepted_quat() if self.use_quat else self.proposer.get_accepted()
+        final_states = _serialize_box_states(final_acc)
+
+        return {
+            "n_boxes": self.n_b,
+            "k_steps": int(self.k_cur),
+            "k_steps_initial": int(self.k_steps_initial),
+            "grid_only": bool(self.grid_only),
+            "eq_cycles": int(self.eq_cycles),
+            "prod_cycles": int(self.prod_cycles),
+            "delta_eps_initial_kJ_mol": float(self.delta_eps_initial_K * K_TO_KJMOL),
+            "delta_eps_kJ_mol": float(self.delta_eps_K * K_TO_KJMOL),
+            "adapt_shift_end_cycle": int(self.adapt_shift_end),
+            "adapt_k_end_cycle": int(self.adapt_k_end),
+            "adaptation_history": self.adaptation_history,
+            "max_N_observed": int(self.max_N_observed),
+            "max_mol": int(self.max_mol),
+            "total_inner_steps": int(self.total_inner_steps),
+            "target_evals": int(self.target_evals),
+            "prod_trial_marginal_per_box_kJ_mol": prod_trial_marg_meds,
+            "prod_trial_marginal_counts": prod_trial_marg_counts,
+            "elapsed_s": dt,
+            "uptake_mmol_g": mean_up,
+            "uptake_sem_mmol_g": sem_up,
+            "box_uptakes_mmol_g": box_uptakes.tolist(),
+            "Qst_estimator": "independent_fluctuation",
+            "Qst_kJ_mol": mean_qst,
+            "Qst_sem_kJ_mol": sem_qst,
+            "qst_status": qst_res["qst_status"],
+            "qst_reasons": qst_res["qst_reasons"],
+            "qst_chain_jackknife_sem_kJ_mol": qst_res.get("qst_chain_jackknife_sem_kJ_mol"),
+            "qst_block_jackknife_sem_kJ_mol": qst_res.get("qst_block_jackknife_sem_kJ_mol"),
+            "per_chain_qst_kJ_mol": qst_res.get("per_chain_qst_kJ_mol", []),
+            "Qst_per_box_mean_kJ_mol": per_box_mean_qst,
+            "Qst_per_box_sem_kJ_mol": per_box_sem_qst,
+            "box_qst_kJ_mol": box_qst,
+            "box_moments": box_moments,
+            "mean_molar_binding_kJ_mol": mean_mb,
+            "mean_molar_qst_kJ_mol": mean_mq,
+            "mean_molar_qst_sem_kJ_mol": sem_mq,
+            "tau_int_N": ess_stats["tau_int_N"],
+            "ess_N": ess_stats["ess_N"],
+            "ess_N_per_s": ess_stats["ess_N_per_s"],
+            "tau_int_U": ess_stats["tau_int_U"],
+            "ess_U": ess_stats["ess_U"],
+            "ess_U_per_s": ess_stats["ess_U_per_s"],
+            "esjd_N": ess_stats["esjd_N"],
+            "sjd_N_per_s": ess_stats["sjd_N_per_s"],
+            "dN_moves_per_s": ess_stats["dN_moves_per_s"],
+            "outer_acc_rate": float(np.mean(self.acc_outer) / tot_denom),
+            "prod_outer_acc_rate": float(np.mean(self.prod_acc_outer) / prod_denom) if self.prod_cycles > 0 else 0.0,
+            "prod_ins_att": int(self.prod_ins_att),
+            "prod_ins_acc": int(self.prod_ins_acc),
+            "prod_del_att": int(self.prod_del_att),
+            "prod_del_acc": int(self.prod_del_acc),
+            "acceptance_breakdown": acceptance_breakdown,
+            "mean_inner_acc_per_burst": float(np.mean(self.inner_acc_tot) / tot_denom),
+            "effective_mc_steps_per_target_eval": float(self.k_cur * np.mean(self.acc_outer) / tot_denom),
+            "box_N_history": self.box_N_history,
+            "prod_N_history": self.prod_N_history,
+            "prod_U_history": self.prod_U_history,
+            "prod_U_ref_history": self.prod_U_ref_history,
+            "prod_accepted_history": self.prod_accepted_history,
+            "prod_dN_history": self.prod_dN_history,
+            "prod_proposed_dN_history": self.prod_proposed_dN_history,
+            "prod_oms_occ_history": self.prod_oms_occ_history,
+            "prod_snapshots": self.prod_snapshots,
+            "trajectory": self.trajectory,
+            "final_states": final_states,
+            "final_cuda_rng_states": final_ckpt["cuda_rng_states"],
+        }
+
+
 def run_nested_mc(
     proposer: CudaGcmcProposer,
     target_fn,
@@ -1546,450 +2354,268 @@ def run_nested_mc(
     checkpoint_fn=None,
     checkpoint_every: int = 0,
     grid_only: bool = False,
+    adapt_shift_frac: float = 0.0,
+    adapt_k_frac: float = 0.0,
+    k_min: int = 2,
+    k_max: int = 24,
+    target_outer_acc: float = 0.35,
+    adapt_window: int = 20,
 ):
-    """Exact Grand-Canonical Nested MC loop (with optional grid-only ablation mode) and bit-exact resume."""
-    rng = np.random.default_rng(seed)
-    n_b = proposer.n_boxes
-    T_K = proposer.T_K
-    delta_eps_K = 0.0 if grid_only else float(getattr(proposer, "delta_eps_K", 0.0))
-    conv_mmol_g = 1000.0 / proposer.fw_mass_gmol
-    use_quat = hasattr(proposer, "propose_k_quat") and hasattr(proposer, "get_accepted_quat")
-    total_cycles = int(eq_cycles) + int(prod_cycles)
-
-    oms_inv_cell = None
-    if oms_metal_pos is not None and oms_cell_rows is not None and len(oms_metal_pos) > 0:
-        oms_metal_pos = np.asarray(oms_metal_pos, dtype=np.float64)
-        oms_cell_rows = np.asarray(oms_cell_rows, dtype=np.float64)
-        oms_inv_cell = np.linalg.inv(oms_cell_rows)
-    else:
-        oms_metal_pos = None
-
-    if resume_state is not None:
-        if int(resume_state["n_boxes"]) != n_b:
-            raise ValueError(f"Resume state n_boxes={resume_state['n_boxes']} != {n_b}")
-        if abs(float(resume_state["delta_eps_K"]) - delta_eps_K) > 1e-9:
-            raise ValueError(f"Resume state delta_eps_K={resume_state['delta_eps_K']} != {delta_eps_K}")
-        if bool(resume_state.get("grid_only", False)) != bool(grid_only):
-            raise ValueError(f"Resume state grid_only={resume_state.get('grid_only', False)} != {grid_only}")
-        if int(resume_state["eq_cycles"]) != int(eq_cycles):
-            raise ValueError(f"Resume state eq_cycles={resume_state['eq_cycles']} != {eq_cycles}")
-        if not use_quat:
-            raise RuntimeError("True checkpoint resume requires quaternion proposer API")
-        rng.bit_generator.state = resume_state["py_rng_state"]
-        restored_states = []
-        for st in resume_state["curr_states"]:
-            restored_states.append({
-                "N": int(st["N"]),
-                "cx": np.asarray(st["cx"], dtype=np.float64),
-                "cy": np.asarray(st["cy"], dtype=np.float64),
-                "cz": np.asarray(st["cz"], dtype=np.float64),
-                "qw": np.asarray(st["qw"], dtype=np.float64),
-                "qx": np.asarray(st["qx"], dtype=np.float64),
-                "qy": np.asarray(st["qy"], dtype=np.float64),
-                "qz": np.asarray(st["qz"], dtype=np.float64),
-            })
-        proposer.set_accepted_quat(restored_states)
-        proposer.set_rng_states(resume_state["cuda_rng_states"])
-        curr = proposer.get_accepted_quat()
-        U_tgt_curr = np.asarray(resume_state["U_tgt_curr"], dtype=np.float64).copy()
-        U_ref_curr = np.asarray(resume_state["U_ref_curr"], dtype=np.float64).copy()
-        N_curr = np.asarray(resume_state["N_curr"], dtype=np.int32).copy()
-        for b in range(n_b):
-            if int(curr[b]["N"]) != int(N_curr[b]):
-                raise RuntimeError(f"Resume N mismatch in box {b}: {curr[b]['N']} vs {N_curr[b]}")
-            if abs(float(curr[b]["U_ref_K"]) - float(U_ref_curr[b])) > 1e-6:
-                raise RuntimeError(
-                    f"Resume U_ref_K mismatch in box {b}: {curr[b]['U_ref_K']} vs {U_ref_curr[b]}"
-                )
-        start_cyc = int(resume_state["completed_cycles"])
-        acc_outer = np.asarray(resume_state["acc_outer"], dtype=np.int64).copy()
-        prod_acc_outer = np.asarray(resume_state["prod_acc_outer"], dtype=np.int64).copy()
-        inner_acc_tot = np.asarray(resume_state["inner_acc_tot"], dtype=np.int64).copy()
-        prod_ins_att = int(resume_state["prod_ins_att"])
-        prod_ins_acc = int(resume_state["prod_ins_acc"])
-        prod_del_att = int(resume_state["prod_del_att"])
-        prod_del_acc = int(resume_state["prod_del_acc"])
-        acc_empty_to_empty = int(resume_state["acc_empty_to_empty"])
-        acc_identity_nonempty = int(resume_state["acc_identity_nonempty"])
-        acc_same_N_changed = int(resume_state["acc_same_N_changed"])
-        acc_dN_changed = int(resume_state["acc_dN_changed"])
-        prod_rejected = int(resume_state["prod_rejected"])
-        prod_total_trials = int(resume_state["prod_total_trials"])
-        nested_trials = int(resume_state.get("nested_trials", prod_total_trials))
-        nested_accepted = int(resume_state.get("nested_accepted", int(np.sum(prod_acc_outer))))
-        sum_N = np.asarray(resume_state["sum_N"], dtype=np.float64).copy()
-        sum_N2 = np.asarray(resume_state["sum_N2"], dtype=np.float64).copy()
-        sum_U = np.asarray(resume_state["sum_U"], dtype=np.float64).copy()
-        sum_UN = np.asarray(resume_state["sum_UN"], dtype=np.float64).copy()
-        trajectory = list(resume_state.get("trajectory", []))
-        box_N_history = [list(row) for row in resume_state["box_N_history"]]
-        prod_N_history = [list(row) for row in resume_state["prod_N_history"]]
-        prod_U_history = [list(row) for row in resume_state["prod_U_history"]]
-        prod_U_ref_history = [list(row) for row in resume_state["prod_U_ref_history"]]
-        prod_accepted_history = [list(row) for row in resume_state["prod_accepted_history"]]
-        prod_dN_history = [list(row) for row in resume_state["prod_dN_history"]]
-        prod_proposed_dN_history = [list(row) for row in resume_state["prod_proposed_dN_history"]]
-        prod_oms_occ_history = [list(row) for row in resume_state.get("prod_oms_occ_history", [])]
-        prod_snapshots = list(resume_state.get("prod_snapshots", []))
-        elapsed_prior = float(resume_state.get("elapsed_s", 0.0))
-    else:
-        curr = proposer.get_accepted_quat() if use_quat else proposer.get_accepted()
-        U_tgt_curr = np.zeros(n_b, dtype=np.float64)
-        U_ref_curr = np.zeros(n_b, dtype=np.float64)
-        N_curr = np.zeros(n_b, dtype=np.int32)
-        if grid_only:
-            init_evals = [(float(curr[b]["U_ref_K"]), False) for b in range(n_b)]
-        elif batch_target_fn is not None:
-            init_evals = batch_target_fn(curr)
-        else:
-            init_evals = [target_fn(curr[b]) for b in range(n_b)]
-        for b in range(n_b):
-            ut, ov = init_evals[b]
-            if not math.isfinite(float(ut)):
-                raise RuntimeError(f"Non-finite initial target energy in box {b}: {ut}")
-            if not math.isfinite(float(curr[b]["U_ref_K"])):
-                raise RuntimeError(f"Non-finite initial reference energy in box {b}: {curr[b]['U_ref_K']}")
-            if ov:
-                raise RuntimeError(f"Initial warm-started state of box {b} has target overlap")
-            U_tgt_curr[b] = float(ut)
-            U_ref_curr[b] = float(curr[b]["U_ref_K"])
-            N_curr[b] = curr[b]["N"]
-
-        start_cyc = 0
-        acc_outer = np.zeros(n_b, dtype=np.int64)
-        prod_acc_outer = np.zeros(n_b, dtype=np.int64)
-        inner_acc_tot = np.zeros(n_b, dtype=np.int64)
-        prod_ins_att = 0
-        prod_ins_acc = 0
-        prod_del_att = 0
-        prod_del_acc = 0
-        acc_empty_to_empty = 0
-        acc_identity_nonempty = 0
-        acc_same_N_changed = 0
-        acc_dN_changed = 0
-        prod_rejected = 0
-        prod_total_trials = 0
-        nested_trials = 0
-        nested_accepted = 0
-
-        sum_N = np.zeros(n_b, dtype=np.float64)
-        sum_N2 = np.zeros(n_b, dtype=np.float64)
-        sum_U = np.zeros(n_b, dtype=np.float64)
-        sum_UN = np.zeros(n_b, dtype=np.float64)
-
-        trajectory = []
-        box_N_history = []
-        prod_N_history = []
-        prod_U_history = []
-        prod_U_ref_history = []
-        prod_accepted_history = []
-        prod_dN_history = []
-        prod_proposed_dN_history = []
-        prod_oms_occ_history = []
-        prod_snapshots = []
-        elapsed_prior = 0.0
-
-    t0 = time.perf_counter()
-
-    def _build_ckpt(completed_cyc: int) -> dict:
-        cuda_rng = proposer.get_rng_states().tolist() if hasattr(proposer, "get_rng_states") else []
-        return {
-            "completed_cycles": int(completed_cyc),
-            "eq_cycles": int(eq_cycles),
-            "prod_cycles": int(prod_cycles),
-            "n_boxes": int(n_b),
-            "delta_eps_K": float(delta_eps_K),
-            "grid_only": bool(grid_only),
-            "py_rng_state": rng.bit_generator.state,
-            "cuda_rng_states": [int(x) for x in cuda_rng],
-            "curr_states": _serialize_box_states(curr),
-            "U_tgt_curr": [float(x) for x in U_tgt_curr],
-            "U_ref_curr": [float(x) for x in U_ref_curr],
-            "N_curr": [int(x) for x in N_curr],
-            "acc_outer": [int(x) for x in acc_outer],
-            "prod_acc_outer": [int(x) for x in prod_acc_outer],
-            "inner_acc_tot": [int(x) for x in inner_acc_tot],
-            "prod_ins_att": int(prod_ins_att),
-            "prod_ins_acc": int(prod_ins_acc),
-            "prod_del_att": int(prod_del_att),
-            "prod_del_acc": int(prod_del_acc),
-            "acc_empty_to_empty": int(acc_empty_to_empty),
-            "acc_identity_nonempty": int(acc_identity_nonempty),
-            "acc_same_N_changed": int(acc_same_N_changed),
-            "acc_dN_changed": int(acc_dN_changed),
-            "prod_rejected": int(prod_rejected),
-            "prod_total_trials": int(prod_total_trials),
-            "nested_trials": int(nested_trials),
-            "nested_accepted": int(nested_accepted),
-            "sum_N": [float(x) for x in sum_N],
-            "sum_N2": [float(x) for x in sum_N2],
-            "sum_U": [float(x) for x in sum_U],
-            "sum_UN": [float(x) for x in sum_UN],
-            "box_N_history": box_N_history,
-            "prod_N_history": prod_N_history,
-            "prod_U_history": prod_U_history,
-            "prod_U_ref_history": prod_U_ref_history,
-            "prod_accepted_history": prod_accepted_history,
-            "prod_dN_history": prod_dN_history,
-            "prod_proposed_dN_history": prod_proposed_dN_history,
-            "prod_oms_occ_history": prod_oms_occ_history,
-            "prod_snapshots": prod_snapshots,
-            "trajectory": trajectory,
-            "elapsed_s": float(elapsed_prior + (time.perf_counter() - t0)),
-        }
-
-    for cyc in range(start_cyc, total_cycles):
-        mask = np.zeros(n_b, dtype=np.int32)
-        cyc_prop_dN = [0] * n_b
-        cyc_net_dN = [0] * n_b
-
-        trials = proposer.propose_k_quat(k_steps) if use_quat else proposer.propose_k(k_steps)
-        if grid_only:
-            tri_evals = [(float(trials[b]["U_ref_K"]), False) for b in range(n_b)]
-        elif batch_target_fn is not None:
-            tri_evals = batch_target_fn(trials)
-        else:
-            tri_evals = [target_fn(trials[b]) for b in range(n_b)]
-
-        for b in range(n_b):
-            inner_acc_tot[b] += trials[b]["inner_acc"]
-            if not math.isfinite(float(trials[b]["U_ref_K"])):
-                raise RuntimeError(f"Non-finite trial reference energy at cycle {cyc}, box {b}: {trials[b]['U_ref_K']}")
-            n_prev = int(N_curr[b])
-            dU_ref = trials[b]["U_ref_K"] - U_ref_curr[b]
-            dN = int(trials[b]["N"]) - n_prev
-            cyc_prop_dN[b] = dN
-            u_tgt_tri, ov = tri_evals[b]
-            if not ov and not math.isfinite(float(u_tgt_tri)):
-                raise RuntimeError(f"Non-finite trial target energy at cycle {cyc}, box {b}: {u_tgt_tri}")
-            accepted = False
-            if grid_only:
-                accepted = True
-            elif not ov:
-                dU_tgt = u_tgt_tri - U_tgt_curr[b]
-                ddU = dU_tgt - dU_ref - delta_eps_K * float(dN)
-                if not math.isfinite(float(ddU)):
-                    raise RuntimeError(f"Non-finite Nested MC ddU at cycle {cyc}, box {b}: {ddU}")
-                if ddU <= 0.0:
-                    accepted = True
-                else:
-                    arg = -ddU / T_K
-                    if arg > -50.0 and rng.random() < math.exp(arg):
-                        accepted = True
-            if cyc >= eq_cycles:
-                nested_trials += 1
-                same_cfg = _states_equal(trials[b], curr[b])
-                prod_total_trials += 1
-                if dN > 0:
-                    prod_ins_att += 1
-                    if accepted:
-                        prod_ins_acc += 1
-                elif dN < 0:
-                    prod_del_att += 1
-                    if accepted:
-                        prod_del_acc += 1
-                if not accepted:
-                    prod_rejected += 1
-                elif n_prev == 0 and int(trials[b]["N"]) == 0:
-                    acc_empty_to_empty += 1
-                elif same_cfg:
-                    acc_identity_nonempty += 1
-                elif dN == 0:
-                    acc_same_N_changed += 1
-                else:
-                    acc_dN_changed += 1
-
-            if accepted:
-                mask[b] = 1
-                U_tgt_curr[b] = u_tgt_tri
-                U_ref_curr[b] = trials[b]["U_ref_K"]
-                N_curr[b] = trials[b]["N"]
-                curr[b] = trials[b]
-                cyc_net_dN[b] = dN
-                acc_outer[b] += 1
-                if cyc >= eq_cycles:
-                    prod_acc_outer[b] += 1
-                    nested_accepted += 1
-
-        proposer.commit(mask)
-
-        if cyc >= eq_cycles:
-            prod_N_history.append([int(x) for x in N_curr])
-            prod_U_history.append([float(U_tgt_curr[b] * K_TO_KJMOL) for b in range(n_b)])
-            prod_U_ref_history.append([float(U_ref_curr[b] * K_TO_KJMOL) for b in range(n_b)])
-            prod_accepted_history.append([int(mask[b]) for b in range(n_b)])
-            prod_dN_history.append(cyc_net_dN)
-            prod_proposed_dN_history.append(cyc_prop_dN)
-            if oms_metal_pos is not None:
-                prod_oms_occ_history.append([
-                    count_oms_occupied(
-                        curr[b], oms_metal_pos, oms_cell_rows,
-                        guest_local_pos=guest_local_pos, cutoff_A=oms_cutoff_A, inv_cell_rows=oms_inv_cell,
-                    )
-                    for b in range(n_b)
-                ])
-            prod_step = cyc - eq_cycles + 1
-            if snapshot_stride > 0 and (prod_step % snapshot_stride == 0 or cyc == total_cycles - 1):
-                prod_snapshots.append({
-                    "prod_cycle": int(prod_step),
-                    "states": _serialize_box_states(curr),
-                })
-            for b in range(n_b):
-                dn = float(N_curr[b])
-                du = float(U_tgt_curr[b])
-                sum_N[b] += dn
-                sum_N2[b] += dn * dn
-                sum_U[b] += du
-                sum_UN[b] += du * dn
-
-        box_N_history.append([int(x) for x in N_curr])
-        if n_b == 1:
-            trajectory.append({
-                "cycle": cyc,
-                "in_prod": cyc >= eq_cycles,
-                "N": int(N_curr[0]),
-                "uptake_mmol_g": float(N_curr[0] * conv_mmol_g),
-                "U_tgt_kJ": float(U_tgt_curr[0] * K_TO_KJMOL),
-                "U_ref_kJ": float(U_ref_curr[0] * K_TO_KJMOL),
-                "accepted": bool(mask[0]),
-            })
-        if checkpoint_fn is not None and checkpoint_every > 0 and ((cyc + 1) % checkpoint_every == 0):
-            checkpoint_fn(_build_ckpt(cyc + 1))
-        if log_every > 0 and ((cyc + 1) % log_every == 0):
-            elapsed = elapsed_prior + (time.perf_counter() - t0)
-            mean_up_now = float(np.mean(N_curr) * conv_mmol_g)
-            print(
-                f"  [NestedMC cyc {cyc+1:4d}/{total_cycles}] N={N_curr.tolist()} ({mean_up_now:.2f} mmol/g) "
-                f"Acc={np.mean(acc_outer)/(cyc+1)*100:5.1f}% ({elapsed:.1f}s)"
-            )
-
-    dt = elapsed_prior + (time.perf_counter() - t0)
-    final_ckpt = _build_ckpt(total_cycles)
-    if checkpoint_fn is not None and total_cycles > start_cyc:
-        checkpoint_fn(final_ckpt)
-
-    prod_denom = max(1, prod_cycles)
-    tot_denom = max(1, total_cycles)
-    box_uptakes = (sum_N / prod_denom) * conv_mmol_g if prod_cycles > 0 else np.zeros(n_b, dtype=np.float64)
-    box_qst = []
-    box_molar_bind = []
-    box_molar_qst = []
-    for b in range(n_b):
-        mN = sum_N[b] / prod_denom if prod_cycles > 0 else 0.0
-        mN2 = sum_N2[b] / prod_denom if prod_cycles > 0 else 0.0
-        mU = sum_U[b] / prod_denom if prod_cycles > 0 else 0.0
-        mUN = sum_UN[b] / prod_denom if prod_cycles > 0 else 0.0
-        varN = mN2 - mN * mN
-        mb = (-mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
-        mq = (T_K - mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
-        box_molar_bind.append(mb)
-        box_molar_qst.append(mq)
-        if varN > 1e-12:
-            q_K = T_K - (mUN - mU * mN) / varN
-            box_qst.append(float(q_K * K_TO_KJMOL))
-        else:
-            box_qst.append(None)
-
-    mean_up = float(np.mean(box_uptakes))
-    sem_up = float(np.std(box_uptakes, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
-    valid_box_qst = [q for q in box_qst if q is not None]
-    per_box_mean_qst = float(np.mean(valid_box_qst)) if valid_box_qst else None
-    per_box_sem_qst = (
-        float(np.std(valid_box_qst, ddof=1) / math.sqrt(len(valid_box_qst)))
-        if len(valid_box_qst) > 1 else (0.0 if len(valid_box_qst) == 1 else None)
+    """Exact Grand-Canonical Nested MC loop (with equilibration-only adaptation, grid-only mode, and bit-exact resume)."""
+    chain = NestedMCChain(
+        proposer=proposer,
+        target_fn=target_fn,
+        k_steps=k_steps,
+        eq_cycles=eq_cycles,
+        prod_cycles=prod_cycles,
+        seed=seed,
+        log_every=log_every,
+        batch_target_fn=batch_target_fn,
+        oms_metal_pos=oms_metal_pos,
+        oms_cell_rows=oms_cell_rows,
+        oms_cutoff_A=oms_cutoff_A,
+        guest_local_pos=guest_local_pos,
+        snapshot_stride=snapshot_stride,
+        resume_state=resume_state,
+        checkpoint_fn=checkpoint_fn,
+        checkpoint_every=checkpoint_every,
+        grid_only=grid_only,
+        adapt_shift_frac=adapt_shift_frac,
+        adapt_k_frac=adapt_k_frac,
+        k_min=k_min,
+        k_max=k_max,
+        target_outer_acc=target_outer_acc,
+        adapt_window=adapt_window,
     )
-    box_moments = [
-        {
-            "n_samples": int(prod_cycles),
-            "sum_N": float(sum_N[b]),
-            "sum_N2": float(sum_N2[b]),
-            "sum_U": float(sum_U[b]),
-            "sum_UN": float(sum_UN[b]),
-        }
-        for b in range(n_b)
+    chain.step_cycles(chain.total_cycles - chain.cyc)
+    return chain.finalize()
+
+
+def attempt_remc_swaps(N_matrix, fugacities_Pa, parity: int, ladder_rngs):
+    """Exact zero-MLIP-cost Grand Canonical pressure-REMC adjacent swap decisions on independent ladders.
+
+    Ladder b at pressure m ONLY attempts swaps with ladder b at pressure m+1:
+        log alpha(m, m+1; b) = (N_{m+1,b} - N_{m,b}) * ln(f_m / f_{m+1})
+    """
+    M = len(N_matrix)
+    if M < 2:
+        raise ValueError(f"REMC requires at least 2 pressures, got {M}")
+    B = len(N_matrix[0])
+    if len(fugacities_Pa) != M:
+        raise ValueError(f"fugacities_Pa length {len(fugacities_Pa)} != M={M}")
+    if len(ladder_rngs) != B:
+        raise ValueError(f"ladder_rngs length {len(ladder_rngs)} != B={B}")
+
+    att_up = np.zeros(M, dtype=np.int64)
+    acc_up = np.zeros(M, dtype=np.int64)
+    accepted_pairs = []
+
+    for m in range(int(parity) % 2, M - 1, 2):
+        f_lo = float(fugacities_Pa[m])
+        f_hi = float(fugacities_Pa[m + 1])
+        if f_lo <= 0.0 or f_hi <= 0.0 or not (math.isfinite(f_lo) and math.isfinite(f_hi)):
+            raise ValueError(f"Invalid fugacities for REMC swap at pair ({m}, {m+1}): f_lo={f_lo}, f_hi={f_hi}")
+        log_f_ratio = math.log(f_lo / f_hi)
+        row_lo = N_matrix[m]
+        row_hi = N_matrix[m + 1]
+        for b in range(B):
+            att_up[m] += 1
+            dN_pair = int(row_hi[b]) - int(row_lo[b])
+            log_acc = float(dN_pair) * log_f_ratio
+            if log_acc >= 0.0 or (log_acc > -50.0 and ladder_rngs[b].random() < math.exp(log_acc)):
+                acc_up[m] += 1
+                accepted_pairs.append((m, m + 1, b))
+
+    return accepted_pairs, att_up, acc_up
+
+
+def run_remc_isotherm(
+    proposers: list,
+    pressures_bar: list,
+    target_fn=None,
+    batch_target_fn=None,
+    k_steps: int = 10,
+    eq_cycles: int = 200,
+    prod_cycles: int = 500,
+    swap_every: int = 2,
+    seed: int = 20261124,
+    log_every: int = 0,
+    oms_metal_pos: Optional[np.ndarray] = None,
+    oms_cell_rows: Optional[np.ndarray] = None,
+    oms_cutoff_A: float = 2.60,
+    guest_local_pos: Optional[np.ndarray] = None,
+    snapshot_stride: int = 0,
+    grid_only: bool = False,
+    adapt_shift_frac: float = 0.0,
+    adapt_k_frac: float = 0.0,
+    k_min: int = 2,
+    k_max: int = 24,
+    target_outer_acc: float = 0.35,
+    adapt_window: int = 20,
+) -> list:
+    """Zero-MLIP-cost Grand Canonical Parallel Tempering across M sorted pressures on B independent ladders."""
+    from mcmc_diagnostics import evaluate_v2_convergence
+
+    M = len(proposers)
+    if M < 2 or len(pressures_bar) != M:
+        raise ValueError(f"run_remc_isotherm requires >=2 matching proposers and pressures (got {M}, {len(pressures_bar)})")
+
+    order = [int(i) for i in np.argsort([float(p) for p in pressures_bar])]
+    props_sorted = [proposers[i] for i in order]
+    p_sorted = [float(pressures_bar[i]) for i in order]
+
+    n_b = int(props_sorted[0].n_boxes)
+    T_K = float(props_sorted[0].T_K)
+    fugacities_Pa = []
+    for m, prop in enumerate(props_sorted):
+        if int(prop.n_boxes) != n_b:
+            raise ValueError(f"All REMC proposers must share n_boxes={n_b}, got {prop.n_boxes} at m={m}")
+        if abs(float(prop.T_K) - T_K) > 1e-6:
+            raise ValueError(f"All REMC proposers must share T_K={T_K}, got {prop.T_K} at m={m}")
+        fugacities_Pa.append(float(prop.f_Pa))
+
+    chains = [
+        NestedMCChain(
+            proposer=props_sorted[m],
+            target_fn=target_fn,
+            batch_target_fn=batch_target_fn,
+            k_steps=k_steps,
+            eq_cycles=eq_cycles,
+            prod_cycles=prod_cycles,
+            seed=int(seed) + m * 1009,
+            log_every=0,
+            oms_metal_pos=oms_metal_pos,
+            oms_cell_rows=oms_cell_rows,
+            oms_cutoff_A=oms_cutoff_A,
+            guest_local_pos=guest_local_pos,
+            snapshot_stride=snapshot_stride,
+            grid_only=grid_only,
+            adapt_shift_frac=adapt_shift_frac,
+            adapt_k_frac=adapt_k_frac,
+            k_min=k_min,
+            k_max=k_max,
+            target_outer_acc=target_outer_acc,
+            adapt_window=adapt_window,
+        )
+        for m in range(M)
     ]
 
-    from mcmc_diagnostics import compute_independent_qst
-    qst_res = compute_independent_qst(
-        prod_N_history, prod_U_history, T_K=T_K,
-        prod_ins_acc=prod_ins_acc, prod_del_acc=prod_del_acc,
-    )
-    mean_qst = qst_res["qst_fluctuation_kJ_mol"]
-    sem_qst = qst_res["qst_fluctuation_sem_kJ_mol"]
-    mean_mb = float(np.mean(box_molar_bind))
-    mean_mq = float(np.mean(box_molar_qst))
-    sem_mq = float(np.std(box_molar_qst, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0
+    ladder_rngs = [np.random.default_rng(int(seed) + 7919 * (b + 1)) for b in range(n_b)]
+    total_cycles = int(eq_cycles) + int(prod_cycles)
+    swap_stride = max(1, int(swap_every))
+    prod_swap_att_up = np.zeros(M, dtype=np.int64)
+    prod_swap_acc_up = np.zeros(M, dtype=np.int64)
+    tot_swap_att_up = np.zeros(M, dtype=np.int64)
+    tot_swap_acc_up = np.zeros(M, dtype=np.int64)
 
-    acceptance_breakdown = {
-        "total_trials": int(prod_total_trials),
-        "rejected": int(prod_rejected),
-        "acc_empty_to_empty": int(acc_empty_to_empty),
-        "acc_identity_nonempty": int(acc_identity_nonempty),
-        "acc_same_N_changed": int(acc_same_N_changed),
-        "acc_dN_changed": int(acc_dN_changed),
-        "effective_move_acc_rate": float((acc_same_N_changed + acc_dN_changed) / max(1, prod_total_trials)),
-        "nested_trials": int(nested_trials),
-        "nested_accepted": int(nested_accepted),
-    }
+    t0 = time.perf_counter()
+    cyc_done = 0
+    swap_round = 0
+    next_log = int(log_every) if int(log_every) > 0 else 0
 
-    ess_stats = compute_ess_stats(prod_N_history, prod_U_history, dt)
-    final_acc = proposer.get_accepted_quat() if use_quat else proposer.get_accepted()
-    final_states = _serialize_box_states(final_acc)
+    while cyc_done < total_cycles:
+        batch = min(swap_stride, total_cycles - cyc_done)
+        if cyc_done < int(eq_cycles) and cyc_done + batch > int(eq_cycles):
+            batch = int(eq_cycles) - cyc_done
+        for m in range(M):
+            chains[m].step_cycles(batch)
+        cyc_done += batch
 
-    return {
-        "n_boxes": n_b,
-        "k_steps": k_steps,
-        "grid_only": bool(grid_only),
-        "eq_cycles": eq_cycles,
-        "prod_cycles": prod_cycles,
-        "delta_eps_kJ_mol": float(delta_eps_K * K_TO_KJMOL),
-        "elapsed_s": dt,
-        "uptake_mmol_g": mean_up,
-        "uptake_sem_mmol_g": sem_up,
-        "box_uptakes_mmol_g": box_uptakes.tolist(),
-        "Qst_estimator": "independent_fluctuation",
-        "Qst_kJ_mol": mean_qst,
-        "Qst_sem_kJ_mol": sem_qst,
-        "qst_status": qst_res["qst_status"],
-        "qst_reasons": qst_res["qst_reasons"],
-        "qst_chain_jackknife_sem_kJ_mol": qst_res.get("qst_chain_jackknife_sem_kJ_mol"),
-        "qst_block_jackknife_sem_kJ_mol": qst_res.get("qst_block_jackknife_sem_kJ_mol"),
-        "per_chain_qst_kJ_mol": qst_res.get("per_chain_qst_kJ_mol", []),
-        "Qst_per_box_mean_kJ_mol": per_box_mean_qst,
-        "Qst_per_box_sem_kJ_mol": per_box_sem_qst,
-        "box_qst_kJ_mol": box_qst,
-        "box_moments": box_moments,
-        "mean_molar_binding_kJ_mol": mean_mb,
-        "mean_molar_qst_kJ_mol": mean_mq,
-        "mean_molar_qst_sem_kJ_mol": sem_mq,
-        "tau_int_N": ess_stats["tau_int_N"],
-        "ess_N": ess_stats["ess_N"],
-        "ess_N_per_s": ess_stats["ess_N_per_s"],
-        "tau_int_U": ess_stats["tau_int_U"],
-        "ess_U": ess_stats["ess_U"],
-        "ess_U_per_s": ess_stats["ess_U_per_s"],
-        "esjd_N": ess_stats["esjd_N"],
-        "sjd_N_per_s": ess_stats["sjd_N_per_s"],
-        "dN_moves_per_s": ess_stats["dN_moves_per_s"],
-        "outer_acc_rate": float(np.mean(acc_outer) / tot_denom),
-        "prod_outer_acc_rate": float(np.mean(prod_acc_outer) / prod_denom) if prod_cycles > 0 else 0.0,
-        "prod_ins_att": int(prod_ins_att),
-        "prod_ins_acc": int(prod_ins_acc),
-        "prod_del_att": int(prod_del_att),
-        "prod_del_acc": int(prod_del_acc),
-        "acceptance_breakdown": acceptance_breakdown,
-        "mean_inner_acc_per_burst": float(np.mean(inner_acc_tot) / tot_denom),
-        "effective_mc_steps_per_target_eval": float(k_steps * np.mean(acc_outer) / tot_denom),
-        "box_N_history": box_N_history,
-        "prod_N_history": prod_N_history,
-        "prod_U_history": prod_U_history,
-        "prod_U_ref_history": prod_U_ref_history,
-        "prod_accepted_history": prod_accepted_history,
-        "prod_dN_history": prod_dN_history,
-        "prod_proposed_dN_history": prod_proposed_dN_history,
-        "prod_oms_occ_history": prod_oms_occ_history,
-        "prod_snapshots": prod_snapshots,
-        "trajectory": trajectory,
-        "final_states": final_states,
-        "final_cuda_rng_states": final_ckpt["cuda_rng_states"],
-    }
+        if cyc_done < total_cycles:
+            parity = swap_round % 2
+            swap_round += 1
+            N_mat = [chains[m].N_curr.tolist() for m in range(M)]
+            accepted_pairs, att_up, acc_up = attempt_remc_swaps(
+                N_mat, fugacities_Pa, parity=parity, ladder_rngs=ladder_rngs
+            )
+            tot_swap_att_up += att_up
+            tot_swap_acc_up += acc_up
+            if cyc_done > int(eq_cycles):
+                prod_swap_att_up += att_up
+                prod_swap_acc_up += acc_up
+
+            if accepted_pairs:
+                updates_by_m = {}
+                for m_lo, m_hi, b in accepted_pairs:
+                    st_lo = _serialize_single_box_state(chains[m_lo].curr[b])
+                    st_hi = _serialize_single_box_state(chains[m_hi].curr[b])
+                    n_lo, n_hi = int(chains[m_lo].N_curr[b]), int(chains[m_hi].N_curr[b])
+                    u_lo, u_hi = float(chains[m_lo].U_tgt_curr[b]), float(chains[m_hi].U_tgt_curr[b])
+                    updates_by_m.setdefault(m_lo, {})[b] = (st_hi, n_hi, u_hi)
+                    updates_by_m.setdefault(m_hi, {})[b] = (st_lo, n_lo, u_lo)
+                for m_upd, box_map in updates_by_m.items():
+                    chains[m_upd].apply_swapped_boxes(box_map)
+
+        if next_log > 0 and cyc_done >= next_log:
+            elapsed = time.perf_counter() - t0
+            rates = [
+                f"{tot_swap_acc_up[m] / max(1, tot_swap_att_up[m]) * 100:.0f}%"
+                for m in range(M - 1)
+            ]
+            means = [f"{float(np.mean(chains[m].N_curr)):.1f}" for m in range(M)]
+            print(
+                f"  [REMC cyc {cyc_done:4d}/{total_cycles}] <N>={means} | "
+                f"SwapRates={rates} ({elapsed:.1f}s)"
+            )
+            while next_log <= cyc_done:
+                next_log += int(log_every)
+
+    wall_s = float(time.perf_counter() - t0)
+    results = []
+    for m in range(M):
+        res = chains[m].finalize(elapsed_s=wall_s)
+        conv_mmol_g = 1000.0 / float(props_sorted[m].fw_mass_gmol)
+        hist = np.asarray(res["box_N_history"], dtype=np.float64) * conv_mmol_g
+        prod_hist = hist[int(eq_cycles):]
+        if prod_hist.ndim == 2 and prod_hist.shape[0] >= 2:
+            half = prod_hist.shape[0] // 2
+            mean_h1 = float(np.mean(prod_hist[:half]))
+            mean_h2 = float(np.mean(prod_hist[half:]))
+            drift = abs(mean_h2 - mean_h1)
+        elif prod_hist.ndim == 2 and prod_hist.shape[0] == 1:
+            mean_h1 = float(np.mean(prod_hist))
+            mean_h2 = mean_h1
+            drift = 0.0
+        else:
+            mean_h1 = 0.0
+            mean_h2 = 0.0
+            drift = 0.0
+
+        att_p = int(prod_swap_att_up[m])
+        acc_p = int(prod_swap_acc_up[m])
+        att_t = int(tot_swap_att_up[m])
+        acc_t = int(tot_swap_acc_up[m])
+        res["P_bar"] = float(p_sorted[m])
+        res["T_K"] = float(T_K)
+        res["fugacity_Pa"] = float(fugacities_Pa[m])
+        res["fw_mass_gmol"] = float(props_sorted[m].fw_mass_gmol)
+        res["first_half_uptake_mmol_g"] = mean_h1
+        res["second_half_uptake_mmol_g"] = mean_h2
+        res["stationarity_drift_mmol_g"] = drift
+        res["mlip_evals"] = 0 if grid_only else int(res["target_evals"])
+        res["parallel_mode"] = "remc"
+        res["remc_swap_every"] = int(swap_stride)
+        res["remc_n_pressures"] = int(M)
+        res["remc_isotherm_wall_s"] = wall_s
+        res["remc_swap_att_up"] = att_p
+        res["remc_swap_acc_up"] = acc_p
+        res["remc_swap_rate_up"] = (float(acc_p) / float(att_p)) if att_p > 0 else (0.0 if m < M - 1 else None)
+        res["remc_total_swap_att_up"] = att_t
+        res["remc_total_swap_acc_up"] = acc_t
+        res["remc_total_swap_rate_up"] = (float(acc_t) / float(att_t)) if att_t > 0 else (0.0 if m < M - 1 else None)
+        res["diagnostics"] = evaluate_v2_convergence(
+            prod_N_history=res["prod_N_history"],
+            prod_U_history_kJ=res["prod_U_history"],
+            conv_mmol_g=conv_mmol_g,
+            T_K=float(T_K),
+            prod_ins_acc=res["prod_ins_acc"],
+            prod_del_acc=res["prod_del_acc"],
+            prod_ins_att=res["prod_ins_att"],
+            prod_del_att=res["prod_del_att"],
+            prod_outer_acc_rate=res["prod_outer_acc_rate"],
+            uptake_sem_mmol_g=res["uptake_sem_mmol_g"],
+            acceptance_breakdown=res.get("acceptance_breakdown"),
+            oms_occ_history=res.get("prod_oms_occ_history") or None,
+        )
+        results.append(res)
+    return results

@@ -9,11 +9,18 @@ from nested_mc_engine import (
     K_TO_KJMOL,
     compute_ess_stats,
     compute_pooled_jackknife_qst,
+    count_oms_occupied,
     quat_rotate_batch,
 )
 
 KB_SI = 1.380649e-23
 R_BAR_L = 0.08314462618
+
+# Exact hard-core support cutoffs matching the distilled GPU proposer
+# (mlip_distill.py:716 element-specific framework core + proposer_dll.cu:332 r^2 < 0.25 guest-guest core).
+DISTILLED_FW_R_HS_HEAVY_A = 1.48
+DISTILLED_FW_R_HS_H_A = 1.20
+DISTILLED_GG_R_HS_A = 0.50
 
 
 def compute_pure_fugacity_pr_py(
@@ -113,6 +120,26 @@ def rot_quat_small(rng: np.random.Generator, max_angle: float, qw: float, qx: fl
     return nqw * inv, nqx * inv, nqy * inv, nqz * inv
 
 
+def resolve_hard_core_cutoffs(
+    r_hs_A: float = 1.20,
+    fw_r_hs_heavy_A: float = None,
+    fw_r_hs_h_A: float = None,
+    gg_r_hs_A: float = None,
+    match_distilled_hard_core: bool = False,
+):
+    """Resolve (fw_heavy, fw_h, gg) hard-core radii in Angstrom."""
+    if match_distilled_hard_core:
+        eff_fw_heavy = DISTILLED_FW_R_HS_HEAVY_A if fw_r_hs_heavy_A is None else float(fw_r_hs_heavy_A)
+        eff_fw_h = DISTILLED_FW_R_HS_H_A if fw_r_hs_h_A is None else float(fw_r_hs_h_A)
+        eff_gg = DISTILLED_GG_R_HS_A if gg_r_hs_A is None else float(gg_r_hs_A)
+    else:
+        base = float(r_hs_A)
+        eff_fw_heavy = base if fw_r_hs_heavy_A is None else float(fw_r_hs_heavy_A)
+        eff_fw_h = base if fw_r_hs_h_A is None else float(fw_r_hs_h_A)
+        eff_gg = base if gg_r_hs_A is None else float(gg_r_hs_A)
+    return float(eff_fw_heavy), float(eff_fw_h), float(eff_gg)
+
+
 def has_hard_sphere_overlap(
     trial_guest_pos: np.ndarray,
     fw_pos: np.ndarray,
@@ -121,27 +148,82 @@ def has_hard_sphere_overlap(
     inv_cell_rows: np.ndarray,
     r_hs_A: float = 1.20,
     shifts_27: np.ndarray = None,
+    trial_guest_Z: np.ndarray = None,
+    fw_r_hs_heavy_A: float = None,
+    fw_r_hs_h_A: float = None,
+    gg_r_hs_A: float = None,
+    match_distilled_hard_core: bool = False,
 ) -> bool:
-    """Return True if any trial real atom approaches a framework or other guest atom within r_hs_A."""
-    if r_hs_A <= 0.0 or len(trial_guest_pos) == 0:
+    """Return True if any trial real atom violates framework-guest or guest-guest hard-core cutoffs.
+
+    By default (match_distilled_hard_core=False and all override radii None), uses the single scalar
+    `r_hs_A` for both framework-guest and guest-guest pairs (backwards compatible).
+    When `match_distilled_hard_core=True`, enforces exact parity with the distilled GPU proposer's
+    regularized Hamiltonian support: 1.20 A (H, Z==1) and 1.48 A (heavy, Z>1) vs framework atoms,
+    and 0.50 A for guest-guest real-atom pairs.
+    """
+    trial_arr = np.asarray(trial_guest_pos, dtype=np.float64)
+    if len(trial_arr) == 0:
         return False
-    ref = fw_pos if len(other_guest_pos) == 0 else np.concatenate([fw_pos, other_guest_pos], axis=0)
-    r2_cut = r_hs_A * r_hs_A
 
-    # dr_raw shape: (n_trial_sites, n_ref, 3)
-    dr_raw = trial_guest_pos[:, None, :] - ref[None, :, :]
-    df = dr_raw @ inv_cell_rows
-    df -= np.round(df)
-    if shifts_27 is None:
-        dr = df @ cell_rows
-        r2 = np.sum(dr * dr, axis=-1)
-        return bool(np.any(r2 < r2_cut))
+    eff_fw_heavy, eff_fw_h, eff_gg = resolve_hard_core_cutoffs(
+        r_hs_A=r_hs_A,
+        fw_r_hs_heavy_A=fw_r_hs_heavy_A,
+        fw_r_hs_h_A=fw_r_hs_h_A,
+        gg_r_hs_A=gg_r_hs_A,
+        match_distilled_hard_core=match_distilled_hard_core,
+    )
+    if eff_fw_heavy <= 0.0 and eff_fw_h <= 0.0 and eff_gg <= 0.0:
+        return False
 
-    # Full 27-image minimum image check for skewed/small cells
-    df_all = df[:, :, None, :] + shifts_27[None, None, :, :]
-    dr_all = df_all @ cell_rows
-    r2_all = np.sum(dr_all * dr_all, axis=-1)
-    return bool(np.any(r2_all < r2_cut))
+    # 1. Framework-guest check (element-specific when trial_guest_Z is supplied or cutoffs differ)
+    if len(fw_pos) > 0 and (eff_fw_heavy > 0.0 or eff_fw_h > 0.0):
+        if trial_guest_Z is not None:
+            z_arr = np.asarray(trial_guest_Z, dtype=np.int64)
+            if len(z_arr) != len(trial_arr):
+                raise ValueError(
+                    f"trial_guest_Z length ({len(z_arr)}) != trial_guest_pos length ({len(trial_arr)})"
+                )
+            site_fw_cut = np.where(z_arr == 1, eff_fw_h, eff_fw_heavy).astype(np.float64)
+        else:
+            site_fw_cut = np.full(len(trial_arr), eff_fw_heavy, dtype=np.float64)
+
+        if np.any(site_fw_cut > 0.0):
+            r2_fw_cut = np.where(site_fw_cut > 0.0, site_fw_cut * site_fw_cut, -1.0)
+            dr_raw = trial_arr[:, None, :] - fw_pos[None, :, :]
+            df = dr_raw @ inv_cell_rows
+            df -= np.round(df)
+            if shifts_27 is None:
+                dr = df @ cell_rows
+                r2 = np.sum(dr * dr, axis=-1)
+                if bool(np.any(r2 < r2_fw_cut[:, None])):
+                    return True
+            else:
+                df_all = df[:, :, None, :] + shifts_27[None, None, :, :]
+                dr_all = df_all @ cell_rows
+                r2_all = np.sum(dr_all * dr_all, axis=-1)
+                if bool(np.any(r2_all < r2_fw_cut[:, None, None])):
+                    return True
+
+    # 2. Guest-guest check
+    if len(other_guest_pos) > 0 and eff_gg > 0.0:
+        r2_gg_cut = eff_gg * eff_gg
+        dr_raw = trial_arr[:, None, :] - other_guest_pos[None, :, :]
+        df = dr_raw @ inv_cell_rows
+        df -= np.round(df)
+        if shifts_27 is None:
+            dr = df @ cell_rows
+            r2 = np.sum(dr * dr, axis=-1)
+            if bool(np.any(r2 < r2_gg_cut)):
+                return True
+        else:
+            df_all = df[:, :, None, :] + shifts_27[None, None, :, :]
+            dr_all = df_all @ cell_rows
+            r2_all = np.sum(dr_all * dr_all, axis=-1)
+            if bool(np.any(r2_all < r2_gg_cut)):
+                return True
+
+    return False
 
 
 class SerialAseMaceD3Target:
@@ -272,6 +354,13 @@ def run_direct_gcmc(
     max_wall_s: float = None,
     log_every: int = 0,
     fw_mass_gmol: float = None,
+    fw_r_hs_heavy_A: float = None,
+    fw_r_hs_h_A: float = None,
+    gg_r_hs_A: float = None,
+    match_distilled_hard_core: bool = False,
+    oms_metal_pos: np.ndarray = None,
+    oms_cell_rows: np.ndarray = None,
+    oms_cutoff_A: float = 2.60,
 ):
     """Exact Grand-Canonical Direct MLIP-GCMC matching C++ RigidGuestDef move probabilities and PR fugacity."""
     if target_fn is None and batch_target_fn is None:
@@ -286,19 +375,42 @@ def run_direct_gcmc(
     mass_gmol = float(fw_mass_gmol) if fw_mass_gmol is not None else float(np.sum(fw.get_masses()))
     conv_mmol_g = 1000.0 / mass_gmol
 
+    eff_fw_heavy, eff_fw_h, eff_gg = resolve_hard_core_cutoffs(
+        r_hs_A=r_hs_A,
+        fw_r_hs_heavy_A=fw_r_hs_heavy_A,
+        fw_r_hs_h_A=fw_r_hs_h_A,
+        gg_r_hs_A=gg_r_hs_A,
+        match_distilled_hard_core=match_distilled_hard_core,
+    )
+    max_r_hs = max(0.0, eff_fw_heavy, eff_fw_h, eff_gg)
+
     perp_widths = 1.0 / np.linalg.norm(inv_cell_rows, axis=0)
     min_perp = float(np.min(perp_widths))
-    if r_hs_A > 0.0 and min_perp < 4.0 * r_hs_A:
+    if max_r_hs > 0.0 and min_perp < 4.0 * max_r_hs:
         grid_1d = np.array([-1.0, 0.0, 1.0], dtype=np.float64)
         shifts_27 = np.stack(np.meshgrid(grid_1d, grid_1d, grid_1d, indexing="ij"), axis=-1).reshape(-1, 3)
     else:
         shifts_27 = None
+
+    oms_inv_cell = None
+    oms_cell_rows_arr = None
+    if oms_metal_pos is not None and len(oms_metal_pos) > 0:
+        oms_metal_pos = np.asarray(oms_metal_pos, dtype=np.float64)
+        oms_cell_rows_arr = cell_rows if oms_cell_rows is None else np.asarray(oms_cell_rows, dtype=np.float64)
+        oms_inv_cell = inv_cell_rows if oms_cell_rows is None else np.linalg.inv(oms_cell_rows_arr)
+    else:
+        oms_metal_pos = None
 
     f_Pa = compute_pure_fugacity_pr_py(
         float(T_K), float(pressure_bar), float(guest.Tc_K), float(guest.Pc_bar), float(guest.omega)
     )
     beta_f_V = (f_Pa * vol_super * 1.0e-30) / (KB_SI * float(T_K))
     local_pos = guest.real_local_positions()
+    guest_real_Z = (
+        guest.real_atomic_numbers()
+        if hasattr(guest, "real_atomic_numbers")
+        else np.array([s.Z for s in guest.real_sites()], dtype=np.int64)
+    )
     n_real = local_pos.shape[0]
 
     n_b = int(n_boxes)
@@ -323,6 +435,7 @@ def run_direct_gcmc(
     total_steps = int(eq_steps) + int(prod_steps)
     hs_rejected = 0
     mlip_evals = 0
+    max_N_observed = max((int(boxes[b]["N"]) for b in range(n_b)), default=0)
     acc_total = np.zeros(n_b, dtype=np.int64)
     prod_acc_total = np.zeros(n_b, dtype=np.int64)
     prod_ins_att = prod_ins_acc = 0
@@ -337,6 +450,7 @@ def run_direct_gcmc(
     box_N_history = []
     prod_N_history = []
     prod_U_history = []
+    prod_oms_occ_history = []
 
     t0 = time.perf_counter()
     steps_completed = 0
@@ -398,7 +512,14 @@ def run_direct_gcmc(
                 else:
                     other_pos = np.zeros((0, 3), dtype=np.float64)
 
-                if has_hard_sphere_overlap(trial_pos, fw_pos, other_pos, cell_rows, inv_cell_rows, r_hs_A, shifts_27):
+                if has_hard_sphere_overlap(
+                    trial_pos, fw_pos, other_pos, cell_rows, inv_cell_rows, r_hs_A, shifts_27,
+                    trial_guest_Z=guest_real_Z,
+                    fw_r_hs_heavy_A=eff_fw_heavy,
+                    fw_r_hs_h_A=eff_fw_h,
+                    gg_r_hs_A=eff_gg,
+                    match_distilled_hard_core=match_distilled_hard_core,
+                ):
                     hs_rejected += 1
                     proposals[b] = ("hs_ovl", mv, idx, None)
                     continue
@@ -421,7 +542,14 @@ def run_direct_gcmc(
                 )[0]
                 trial_pos = c_new[None, :] + trial_offs
                 other_pos = _all_guest_positions(st, local_pos)
-                if has_hard_sphere_overlap(trial_pos, fw_pos, other_pos, cell_rows, inv_cell_rows, r_hs_A, shifts_27):
+                if has_hard_sphere_overlap(
+                    trial_pos, fw_pos, other_pos, cell_rows, inv_cell_rows, r_hs_A, shifts_27,
+                    trial_guest_Z=guest_real_Z,
+                    fw_r_hs_heavy_A=eff_fw_heavy,
+                    fw_r_hs_h_A=eff_fw_h,
+                    gg_r_hs_A=eff_gg,
+                    match_distilled_hard_core=match_distilled_hard_core,
+                ):
                     hs_rejected += 1
                     proposals[b] = ("hs_ovl", mv, -1, None)
                     continue
@@ -527,11 +655,25 @@ def run_direct_gcmc(
                     prod_acc_total[b] += 1
 
         N_now = [int(boxes[b]["N"]) for b in range(n_b)]
+        if N_now:
+            max_N_observed = max(max_N_observed, max(N_now))
         box_N_history.append(N_now)
         if in_prod:
             prod_steps_done += 1
             prod_N_history.append(N_now)
             prod_U_history.append([float(U_curr[b] * K_TO_KJMOL) for b in range(n_b)])
+            if oms_metal_pos is not None:
+                prod_oms_occ_history.append([
+                    count_oms_occupied(
+                        boxes[b],
+                        oms_metal_pos,
+                        oms_cell_rows_arr,
+                        guest_local_pos=local_pos,
+                        cutoff_A=float(oms_cutoff_A),
+                        inv_cell_rows=oms_inv_cell,
+                    )
+                    for b in range(n_b)
+                ])
             for b in range(n_b):
                 dn = float(N_now[b])
                 du = float(U_curr[b])
@@ -574,12 +716,21 @@ def run_direct_gcmc(
         "steps_completed": int(steps_completed),
         "elapsed_s": float(dt),
         "fugacity_Pa": float(f_Pa),
+        "fw_mass_gmol": float(mass_gmol),
+        "max_mol": int(max_mol),
+        "max_N_observed": int(max_N_observed),
+        "match_distilled_hard_core": bool(match_distilled_hard_core),
+        "hard_core_cutoffs_A": {
+            "fw_heavy": float(eff_fw_heavy),
+            "fw_h": float(eff_fw_h),
+            "gg": float(eff_gg),
+        },
         "uptake_mmol_g": float(np.mean(box_uptakes)),
         "uptake_sem_mmol_g": float(np.std(box_uptakes, ddof=1) / math.sqrt(n_b)) if n_b > 1 else 0.0,
         "box_uptakes_mmol_g": box_uptakes.tolist(),
         "Qst_estimator": "pooled_jackknife",
-        "Qst_kJ_mol": float(jack["Qst_kJ_mol"]),
-        "Qst_sem_kJ_mol": float(jack["Qst_sem_kJ_mol"]),
+        "Qst_kJ_mol": None if jack["Qst_kJ_mol"] is None else float(jack["Qst_kJ_mol"]),
+        "Qst_sem_kJ_mol": None if jack["Qst_sem_kJ_mol"] is None else float(jack["Qst_sem_kJ_mol"]),
         "box_moments": box_moments,
         "tau_int_N": ess_stats["tau_int_N"],
         "ess_N": ess_stats["ess_N"],
@@ -605,5 +756,6 @@ def run_direct_gcmc(
         "box_N_history": box_N_history,
         "prod_N_history": prod_N_history,
         "prod_U_history": prod_U_history,
+        "prod_oms_occ_history": prod_oms_occ_history,
         "final_states": [_copy_box_state(s) for s in boxes],
     }

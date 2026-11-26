@@ -14,7 +14,7 @@ from run_metadata import sha256_file, sha256_json_obj
 
 K_TO_KJMOL = 8.31446261815324e-3
 KE_K = 167100.9558738398
-DISTILL_VERSION = "v1.1"
+DISTILL_VERSION = "v1.3"
 
 # Mild generic LJ defaults (eps_K, sigma_A) used ONLY for guest-guest steric core
 # when a guest site carries zero classical LJ parameters (e.g. SPC/E or TIP-style H).
@@ -481,32 +481,32 @@ def _solve_1b_model(
         for e in range(n_env)
     ]
 
-    # Bounds & distance-aware Tikhonov regularization:
-    # prevent multi-site collinear cancellation (e.g., tetrahedral CH4 C vs 4*H) while preserving OMS depth
-    lb = np.full(n_params, -350.0, dtype=np.float64)
-    ub = np.full(n_params, +600.0, dtype=np.float64)
-    reg_diag = np.full(n_params, max(40.0, 0.25 * N), dtype=np.float64)
+    # Bounds & gentle distance-aware Tikhonov regularization:
+    # prevent multi-site collinear cancellation (e.g., tetrahedral CH4 C vs 4*H) without crushing OMS/dispersion tails
+    lb = np.full(n_params, -1200.0, dtype=np.float64)
+    ub = np.full(n_params, +2000.0, dtype=np.float64)
+    reg_diag = np.full(n_params, 6.0, dtype=np.float64)
     for c in range(n_chan):
         for e in range(n_env):
             base = (c * n_env + e) * n_rad
             # k == 0: short-range repulsive core
-            lb[base] = 50.0
+            lb[base] = 25.0
             ub[base] = 5.0e4
-            reg_diag[base] = 1.0e-3
+            reg_diag[base] = 1.0e-4
             for k in range(1, n_rad):
                 col = base + k
                 if k <= 3:  # mu <= 2.22 A (inner wall transition)
-                    lb[col] = -2000.0 if is_metal_env[e] else -150.0
+                    lb[col] = -2500.0 if is_metal_env[e] else -1200.0
                     ub[col] = 6000.0
-                    reg_diag[col] = max(2.0, 0.015 * N) if is_metal_env[e] else max(5.0, 0.03 * N)
+                    reg_diag[col] = 2.0
                 elif k <= 5:  # mu = 2.46, 2.72 A (vdW / OMS pocket)
-                    lb[col] = -2000.0 if is_metal_env[e] else -400.0
-                    ub[col] = 2500.0 if is_metal_env[e] else 1000.0
-                    reg_diag[col] = max(2.0, 0.015 * N) if is_metal_env[e] else max(8.0, 0.05 * N)
-                else:  # mu >= 3.00 A (tail; high ridge suppresses cross-site constant offsets)
-                    lb[col] = -350.0
-                    ub[col] = 500.0
-                    reg_diag[col] = max(40.0, 0.25 * N)
+                    lb[col] = -2500.0 if is_metal_env[e] else -1200.0
+                    ub[col] = 4000.0 if is_metal_env[e] else 2500.0
+                    reg_diag[col] = 2.0
+                else:  # mu >= 3.00 A (tail; moderate ridge prevents cross-site offset drift without crushing vdW)
+                    lb[col] = -1000.0
+                    ub[col] = 1500.0
+                    reg_diag[col] = 6.0
     for m in range(n_q_modes):
         lb[n_sr + m] = -5.0
         ub[n_sr + m] = +5.0
@@ -567,15 +567,76 @@ def _solve_1b_model(
     }
 
 
+def _eval_deployed_2b_lut(
+    r_com: np.ndarray,
+    lut_K: np.ndarray,
+    r_min_A: float,
+    r_max_A: float,
+) -> np.ndarray:
+    """Evaluate deployed 2B COM residual LUT matching src/proposer_dll.cu:356-376 bit-for-bit."""
+    r = np.asarray(r_com, dtype=np.float64)
+    out = np.zeros_like(r, dtype=np.float64)
+    lut_f32 = np.asarray(lut_K, dtype=np.float32)
+    n_bins = int(lut_f32.size)
+    rmin = float(r_min_A)
+    rmax = float(r_max_A)
+    if n_bins < 2 or rmax <= rmin:
+        return out
+
+    lut = lut_f32.astype(np.float64)
+    inv_dr = float(n_bins - 1) / (rmax - rmin)
+
+    active = r < rmax
+    if not np.any(active):
+        return out
+
+    u_pos = (r[active] - rmin) * inv_dr
+    vals = np.empty_like(u_pos, dtype=np.float64)
+
+    low = u_pos <= 0.0
+    if np.any(low):
+        slope = lut[1] - lut[0]
+        if slope > 0.0:
+            slope = 0.0
+        vals[low] = lut[0] + slope * u_pos[low]
+
+    mid = ~low
+    if np.any(mid):
+        u_m = u_pos[mid]
+        idx0 = np.floor(u_m).astype(np.int64)
+        high = idx0 >= (n_bins - 1)
+        vals_m = np.empty_like(u_m, dtype=np.float64)
+        if np.any(high):
+            vals_m[high] = lut[n_bins - 1]
+        in_range = ~high
+        if np.any(in_range):
+            i0 = idx0[in_range]
+            frac = u_m[in_range] - i0.astype(np.float64)
+            v0 = lut[i0]
+            v1 = lut[i0 + 1]
+            vals_m[in_range] = v0 + frac * (v1 - v0)
+        vals[mid] = vals_m
+
+    out[active] = vals
+    return out
+
+
 def _solve_2b_model(
     u_lj0: np.ndarray,
     u_q0: np.ndarray,
     r_com: np.ndarray,
     u2_true_K: np.ndarray,
     r_cut_gg: float,
+    seed: int = 20260001,
 ) -> dict:
-    """Fit effective pore 2-body guest-guest scaling + smoothed COM radial residual LUT."""
+    """Fit effective pore 2-body guest-guest scaling + smoothed COM radial residual LUT with honest hold-out validation."""
     from scipy.optimize import lsq_linear
+
+    u_lj0 = np.asarray(u_lj0, dtype=np.float64)
+    u_q0 = np.asarray(u_q0, dtype=np.float64)
+    r_com = np.asarray(r_com, dtype=np.float64)
+    u2_true_K = np.asarray(u2_true_K, dtype=np.float64)
+    M = int(len(u2_true_K))
 
     r_min_A = 2.0
     r_max_A = float(r_cut_gg)
@@ -597,26 +658,34 @@ def _solve_2b_model(
         diff = r_arr[:, None] - mu_2b[None, :]
         return np.exp(-(diff * diff) / (2.0 * sig_2b * sig_2b)) * (f_in * f_cut)[:, None]
 
-    if len(u2_true_K) < 16 or np.max(np.abs(u2_true_K)) < 1e-6:
+    if M < 16 or float(np.max(np.abs(u2_true_K))) < 1e-6:
         return {
             "gg_q_scale": 1.0,
             "gg_lj_scale": 1.0,
-            "r_min_A": r_min_A,
-            "r_max_A": r_max_A,
+            "r_min_A": float(r_min_A),
+            "r_max_A": float(r_max_A),
             "gg_com_lut_K": np.zeros(n_lut, dtype=np.float32),
-            "r2_2b": 1.0,
-            "mae_2b_kJ_mol": 0.0,
-            "mean_offset_classical_gg_kJ_mol": 0.0,
-            "mean_offset_distilled_2b_kJ_mol": 0.0,
+            "r2_2b": None,
+            "mae_2b_kJ_mol": None,
+            "r2_2b_deployed_holdout": None,
+            "mae_2b_deployed_holdout_kJ_mol": None,
+            "mae_2b_classical_holdout_kJ_mol": None,
+            "r2_2b_train": None,
+            "mae_2b_train_kJ_mol": None,
+            "n_2b_train": 0,
+            "n_2b_val": 0,
+            "mean_offset_classical_gg_kJ_mol": None,
+            "mean_offset_distilled_2b_kJ_mol": None,
         }
 
     B_2b = _rad_basis(r_com)
+    B_lut = _rad_basis(lut_r)
     X = np.column_stack([u_lj0, u_q0, B_2b])  # shape (M, 2 + 7)
     n_p = X.shape[1]
 
     lb = np.full(n_p, -350.0, dtype=np.float64)
     ub = np.full(n_p, +350.0, dtype=np.float64)
-    lb[0], ub[0] = 0.85, 1.35  # gg_lj_scale: preserve Pauli core repulsion
+    lb[0], ub[0] = 0.65, 1.50  # gg_lj_scale: preserve Pauli core repulsion while avoiding MP0+D3 clipping at 0.85
     lb[1], ub[1] = 0.50, 1.50  # gg_q_scale^2
 
     # Pull scaling parameters strongly toward 1.0 and radial corrections toward 0.0
@@ -628,39 +697,104 @@ def _solve_2b_model(
     reg_w[1] = 2.0e3
 
     y_kJ = u2_true_K * K_TO_KJMOL
-    sw = np.sqrt(np.where(y_kJ <= 10.0, 1.0, 1.0 / (1.0 + np.maximum(0.0, y_kJ - 10.0) / 15.0)))
-    A_w = X * sw[:, None]
-    b_w = u2_true_K * sw
-    A_aug = np.vstack([A_w, np.diag(np.sqrt(reg_w))])
-    b_aug = np.concatenate([b_w, np.sqrt(reg_w) * prior])
+    sw_all = np.sqrt(np.where(y_kJ <= 10.0, 1.0, 1.0 / (1.0 + np.maximum(0.0, y_kJ - 10.0) / 15.0)))
 
-    res = lsq_linear(A_aug, b_aug, bounds=(lb, ub), method="trf", lsmr_tol="auto")
-    theta = res.x
-    gg_lj_scale = float(theta[0])
-    gg_q_scale = math.sqrt(max(0.0, float(theta[1])))
-    w_rad = theta[2:]
+    def _fit_subset(idx_sub: np.ndarray) -> np.ndarray:
+        sw = sw_all[idx_sub]
+        A_w = X[idx_sub] * sw[:, None]
+        b_w = u2_true_K[idx_sub] * sw
+        A_aug = np.vstack([A_w, np.diag(np.sqrt(reg_w))])
+        b_aug = np.concatenate([b_w, np.sqrt(reg_w) * prior])
+        res = lsq_linear(A_aug, b_aug, bounds=(lb, ub), method="trf", lsmr_tol="auto")
+        return res.x
 
-    B_lut = _rad_basis(lut_r)
-    lut_K = np.clip((B_lut @ w_rad).astype(np.float64), -400.0, +400.0)
-    lut_K[lut_r <= 2.75] = 0.0
-    lut_K[-1] = 0.0
+    def _build_lut(w_rad: np.ndarray) -> np.ndarray:
+        lut = np.clip((B_lut @ w_rad).astype(np.float64), -400.0, +400.0)
+        lut[lut_r <= 2.75] = 0.0
+        lut[-1] = 0.0
+        return lut.astype(np.float32)
 
-    pred_K = X @ theta
-    ss_res = float(np.sum((u2_true_K - pred_K) ** 2))
-    ss_tot = float(np.sum((u2_true_K - np.mean(u2_true_K)) ** 2))
-    r2_2b = 1.0 - ss_res / max(1e-12, ss_tot)
-    mae_2b_kJ = float(np.mean(np.abs(u2_true_K - pred_K)) * K_TO_KJMOL)
+    def _eval_deployed(idx_sub: np.ndarray, lj_sc: float, q_sc: float, lut_f32: np.ndarray) -> np.ndarray:
+        return (
+            float(lj_sc) * u_lj0[idx_sub]
+            + (float(q_sc) ** 2) * u_q0[idx_sub]
+            + _eval_deployed_2b_lut(r_com[idx_sub], lut_f32, r_min_A, r_max_A)
+        )
+
+    # Final production refit on 100% of samples (matching _solve_1b_model)
+    all_idx = np.arange(M, dtype=np.int64)
+    theta_all = _fit_subset(all_idx)
+    gg_lj_scale = float(theta_all[0])
+    gg_q_scale = math.sqrt(max(0.0, float(theta_all[1])))
+    lut_K = _build_lut(theta_all[2:])
+
+    pred_all_K = _eval_deployed(all_idx, gg_lj_scale, gg_q_scale, lut_K)
+    ss_res_all = float(np.sum((u2_true_K - pred_all_K) ** 2))
+    ss_tot_all = float(np.sum((u2_true_K - np.mean(u2_true_K)) ** 2))
+    r2_train = 1.0 - ss_res_all / max(1e-12, ss_tot_all)
+    mae_train_kJ = float(np.mean(np.abs(u2_true_K - pred_all_K)) * K_TO_KJMOL)
+
+    if M >= 24:
+        rng = np.random.default_rng(int(seed))
+        perm = rng.permutation(M)
+        n_val = max(16, int(round(0.20 * M)))
+        val_idx = perm[:n_val]
+        tr_idx = perm[n_val:]
+
+        theta_cv = _fit_subset(tr_idx)
+        lj_cv = float(theta_cv[0])
+        q_cv = math.sqrt(max(0.0, float(theta_cv[1])))
+        lut_K_cv = _build_lut(theta_cv[2:])
+
+        pred_val_K = _eval_deployed(val_idx, lj_cv, q_cv, lut_K_cv)
+        true_val_K = u2_true_K[val_idx]
+        pred_classical_val_K = u_lj0[val_idx] + u_q0[val_idx]
+
+        ss_res_val = float(np.sum((true_val_K - pred_val_K) ** 2))
+        ss_tot_val = float(np.sum((true_val_K - np.mean(true_val_K)) ** 2))
+        r2_val = 1.0 - ss_res_val / max(1e-12, ss_tot_val)
+        mae_val_kJ = float(np.mean(np.abs(true_val_K - pred_val_K)) * K_TO_KJMOL)
+        mae_classical_val_kJ = float(np.mean(np.abs(true_val_K - pred_classical_val_K)) * K_TO_KJMOL)
+        offset_raw_kJ = float(np.mean(true_val_K - pred_classical_val_K) * K_TO_KJMOL)
+        offset_fit_kJ = float(np.mean(true_val_K - pred_val_K) * K_TO_KJMOL)
+
+        return {
+            "gg_q_scale": float(gg_q_scale),
+            "gg_lj_scale": float(gg_lj_scale),
+            "r_min_A": float(r_min_A),
+            "r_max_A": float(r_max_A),
+            "gg_com_lut_K": lut_K,
+            "r2_2b": float(r2_val),
+            "mae_2b_kJ_mol": float(mae_val_kJ),
+            "r2_2b_deployed_holdout": float(r2_val),
+            "mae_2b_deployed_holdout_kJ_mol": float(mae_val_kJ),
+            "mae_2b_classical_holdout_kJ_mol": float(mae_classical_val_kJ),
+            "r2_2b_train": float(r2_train),
+            "mae_2b_train_kJ_mol": float(mae_train_kJ),
+            "n_2b_train": int(len(tr_idx)),
+            "n_2b_val": int(n_val),
+            "mean_offset_classical_gg_kJ_mol": float(offset_raw_kJ),
+            "mean_offset_distilled_2b_kJ_mol": float(offset_fit_kJ),
+        }
+
+    # Fallback when 16 <= M < 24: insufficient samples for an honest >=16 hold-out split
     offset_raw_kJ = float(np.mean(u2_true_K - (u_lj0 + u_q0)) * K_TO_KJMOL)
-    offset_fit_kJ = float(np.mean(u2_true_K - pred_K) * K_TO_KJMOL)
-
+    offset_fit_kJ = float(np.mean(u2_true_K - pred_all_K) * K_TO_KJMOL)
     return {
         "gg_q_scale": float(gg_q_scale),
         "gg_lj_scale": float(gg_lj_scale),
         "r_min_A": float(r_min_A),
         "r_max_A": float(r_max_A),
-        "gg_com_lut_K": lut_K.astype(np.float32),
-        "r2_2b": float(r2_2b),
-        "mae_2b_kJ_mol": float(mae_2b_kJ),
+        "gg_com_lut_K": lut_K,
+        "r2_2b": float(r2_train),
+        "mae_2b_kJ_mol": float(mae_train_kJ),
+        "r2_2b_deployed_holdout": None,
+        "mae_2b_deployed_holdout_kJ_mol": None,
+        "mae_2b_classical_holdout_kJ_mol": None,
+        "r2_2b_train": float(r2_train),
+        "mae_2b_train_kJ_mol": float(mae_train_kJ),
+        "n_2b_train": int(M),
+        "n_2b_val": 0,
         "mean_offset_classical_gg_kJ_mol": float(offset_raw_kJ),
         "mean_offset_distilled_2b_kJ_mol": float(offset_fit_kJ),
     }
@@ -744,6 +878,124 @@ def _eval_unit_cell_pts(
     )
 
 
+def _hash_state_dict(state_dict: Any) -> Optional[str]:
+    """Compute a fast deterministic SHA-256 checksum over a model state_dict."""
+    if not (hasattr(state_dict, "keys") and hasattr(state_dict, "__getitem__")):
+        return None
+    keys = sorted(state_dict.keys())
+    if not keys:
+        return None
+    h = hashlib.sha256()
+    for name in keys:
+        val = state_dict[name]
+        h.update(str(name).encode("utf-8"))
+        h.update(b"\x00")
+        if hasattr(val, "detach") and hasattr(val, "cpu"):
+            t = val.detach().cpu().contiguous()
+            shape_str = str(tuple(int(d) for d in t.shape))
+            dtype_str = str(t.dtype)
+            h.update(shape_str.encode("ascii"))
+            h.update(b":")
+            h.update(dtype_str.encode("ascii"))
+            h.update(b":")
+            try:
+                h.update(t.numpy().tobytes())
+            except Exception:
+                try:
+                    import torch
+                    if t.numel() > 0:
+                        h.update(t.reshape(-1).view(torch.uint8).numpy().tobytes())
+                except Exception:
+                    h.update(bytes(t.untyped_storage()))
+        elif isinstance(val, np.ndarray):
+            arr = np.ascontiguousarray(val)
+            h.update(f"{arr.shape}:{arr.dtype}:".encode("ascii"))
+            h.update(arr.tobytes())
+        else:
+            h.update(repr(val).encode("utf-8"))
+        h.update(b"\n")
+    return f"state_dict:{h.hexdigest()}"
+
+
+def _resolve_model_sha256(target, model_name: str) -> Optional[str]:
+    """Resolve a deterministic SHA-256 identifier for checkpoint files or in-memory MLIP weights."""
+    # 1) Direct local model file path
+    if model_name:
+        try:
+            if Path(str(model_name)).is_file():
+                return sha256_file(str(model_name))
+        except OSError:
+            pass
+
+    if target is None:
+        return None
+
+    # 2) Explicit model_file_path or precomputed model_sha256 on target
+    model_file_path = getattr(target, "model_file_path", None)
+    if model_file_path:
+        try:
+            if Path(str(model_file_path)).is_file():
+                return sha256_file(str(model_file_path))
+        except OSError:
+            pass
+
+    explicit_sha = getattr(target, "model_sha256", None)
+    if isinstance(explicit_sha, str) and explicit_sha.strip():
+        return explicit_sha.strip()
+
+    # 3) Inspect mace_calc.model_paths / model_path for cached checkpoint files
+    mace_calc = getattr(target, "mace_calc", None)
+    if mace_calc is not None:
+        for attr in ("model_paths", "model_path"):
+            raw_paths = getattr(mace_calc, attr, None)
+            if not raw_paths:
+                continue
+            cand_list = list(raw_paths) if isinstance(raw_paths, (list, tuple)) else [raw_paths]
+            existing_hashes = []
+            for p in cand_list:
+                if not p:
+                    continue
+                try:
+                    if Path(str(p)).is_file():
+                        d = sha256_file(str(p))
+                        if d:
+                            existing_hashes.append(d)
+                except OSError:
+                    continue
+            if len(existing_hashes) == 1:
+                return existing_hashes[0]
+            if len(existing_hashes) > 1:
+                return sha256_json_obj(existing_hashes)
+
+    # 4) Deterministic SHA-256 over PyTorch nn.Module / model state_dict()
+    candidates = []
+    mace_model = getattr(target, "mace_model", None)
+    if mace_model is not None:
+        candidates.append(mace_model)
+    if mace_calc is not None:
+        calc_models = getattr(mace_calc, "models", None)
+        if isinstance(calc_models, (list, tuple)):
+            candidates.extend(m for m in calc_models if m is not None)
+        elif calc_models is not None:
+            candidates.append(calc_models)
+    generic_model = getattr(target, "model", None)
+    if generic_model is not None:
+        candidates.append(generic_model)
+
+    for mod in candidates:
+        sd_fn = getattr(mod, "state_dict", None)
+        if callable(sd_fn):
+            try:
+                sd = sd_fn()
+                digest = _hash_state_dict(sd)
+                if digest is not None:
+                    return digest
+            except Exception:
+                continue
+
+    return None
+
+
 def compute_distill_cache_key(
     cif_path: str,
     supercell: Tuple[int, int, int],
@@ -757,6 +1009,8 @@ def compute_distill_cache_key(
     n_1b: int,
     n_2b: int,
     distill_seed: int,
+    only_1b: bool = False,
+    model_sha256: Optional[str] = None,
 ) -> str:
     real_geom = [
         {"symbol": s.symbol, "Z": int(s.Z), "pos": [round(float(v), 8) for v in s.pos]}
@@ -767,6 +1021,11 @@ def compute_distill_cache_key(
          "q": round(float(s.q), 8), "eps": round(float(s.eps_K), 8), "sig": round(float(s.sigma_A), 8)}
         for s in guest.sites
     ]
+    resolved_model_sha = (
+        str(model_sha256).strip()
+        if isinstance(model_sha256, str) and model_sha256.strip()
+        else (sha256_file(model_file_path) if model_file_path else None)
+    )
     key_obj = {
         "version": DISTILL_VERSION,
         "cif_sha256": sha256_file(cif_path) or Path(cif_path).name,
@@ -775,12 +1034,13 @@ def compute_distill_cache_key(
         "guest_sites_sha256": sha256_json_obj(sites_all),
         "grid_dims": [int(x) for x in grid_dims],
         "model": str(model_name),
-        "model_sha256": sha256_file(model_file_path) if model_file_path else None,
+        "model_sha256": resolved_model_sha,
         "dispersion": bool(dispersion),
         "dispersion_xc": str(dispersion_xc),
         "dtype": str(dtype),
         "n_1b": int(n_1b),
-        "n_2b": int(n_2b),
+        "n_2b": 0 if only_1b else int(n_2b),
+        "only_1b": bool(only_1b),
         "distill_seed": int(distill_seed),
     }
     return sha256_json_obj(key_obj)
@@ -821,14 +1081,15 @@ def distill_mlip_surrogate(
     dispersion: bool = True,
     dispersion_xc: str = "pbe",
     dtype: str = "float32",
+    only_1b: bool = False,
 ) -> dict:
-    """Distill target MLIP (1B unit-cell grids + 2B effective pore pair LUT) on-the-fly with disk caching."""
+    """Distill target MLIP (1B unit-cell grids + optional 2B effective pore pair LUT) on-the-fly with disk caching."""
     import time
 
     t0 = time.perf_counter()
     dist_guest = make_distilled_guest_spec(guest)
     key_model_file = str(model_name) if Path(str(model_name)).is_file() else None
-    resolved_model_file = getattr(target, "model_file_path", None) if target is not None else key_model_file
+    resolved_model_sha = _resolve_model_sha256(target, model_name)
     cache_key = compute_distill_cache_key(
         cif_path=cif_path,
         supercell=tuple(supercell),
@@ -842,6 +1103,7 @@ def distill_mlip_surrogate(
         n_1b=n_1b,
         n_2b=n_2b,
         distill_seed=distill_seed,
+        only_1b=only_1b,
     )
 
     cdir = Path(cache_dir)
@@ -850,10 +1112,27 @@ def distill_mlip_surrogate(
     p_json = cdir / f"distill_{cache_key[:16]}.json"
     if p_npz.exists() and p_json.exists():
         meta_chk = json.loads(p_json.read_text(encoding="utf-8"))
-        if meta_chk.get("distill_sha256") == cache_key and list(meta_chk.get("grid_dims", [])) == list(grid_dims):
+        cached_msha = meta_chk.get("model_sha256")
+        model_sha_ok = (
+            resolved_model_sha is None
+            or cached_msha is None
+            or cached_msha == resolved_model_sha
+        )
+        if (
+            meta_chk.get("distill_sha256") == cache_key
+            and list(meta_chk.get("grid_dims", [])) == list(grid_dims)
+            and bool(meta_chk.get("only_1b", False)) == bool(only_1b)
+            and model_sha_ok
+        ):
             out = load_distill_cache(str(p_npz))
             out["distill_wall_s"] = float(time.perf_counter() - t0)
-            print(f"  [Auto-MLIP Distill CACHE HIT] {p_npz} (R2_1b={meta_chk['r2_1b']:.4f}, R2_2b={meta_chk['r2_2b']:.4f})")
+            r2_2b_v = meta_chk.get("r2_2b")
+            r2_2b_str = (
+                "skipped(only_1b)"
+                if meta_chk.get("only_1b")
+                else ("N/A" if r2_2b_v is None else f"{float(r2_2b_v):.4f}")
+            )
+            print(f"  [Auto-MLIP Distill CACHE HIT] {p_npz} (R2_1b={meta_chk['r2_1b']:.4f}, R2_2b={r2_2b_str})")
             return out
 
     if target is None:
@@ -982,85 +1261,114 @@ def distill_mlip_surrogate(
     )
 
     # 2. Pore-confined 2-body sampling (reusing evaluated 1-body poses + supercell lattice translations)
-    low_idx = np.where(y_1b <= (15.0 / K_TO_KJMOL))[0]
-    if len(low_idx) < 20:
-        low_idx = np.argsort(y_1b)[:min(80, len(y_1b))]
-
-    H_u = env_info["H_unit"]
-    sc_shifts = []
-    for ia in range(int(supercell[0])):
-        for ib in range(int(supercell[1])):
-            for ic in range(int(supercell[2])):
-                sc_shifts.append(np.array([ia, ib, ic], dtype=np.float64) @ H_u)
-    sc_shifts = np.asarray(sc_shifts, dtype=np.float64)
-
-    dimer_pairs = []
-    u_lj0_list, u_q0_list, rcom_list, e1_sum_list = [], [], [], []
-    max_attempts = max(int(n_2b) * 40, 4000)
-    for _ in range(max_attempts):
-        if len(dimer_pairs) >= int(n_2b):
-            break
-        ia = int(rng.choice(low_idx))
-        ib = int(rng.choice(low_idx))
-        st_a = states_1b_kept[ia]
-        st_b0 = states_1b_kept[ib]
-        sh_b = sc_shifts[int(rng.integers(0, len(sc_shifts)))]
-        cb_pos = np.array([st_b0["cx"][0] + sh_b[0], st_b0["cy"][0] + sh_b[1], st_b0["cz"][0] + sh_b[2]])
-        cb_pos = ((cb_pos @ inv_H_super) % 1.0) @ H_super
-        st_b = {
-            "N": 1,
-            "cx": np.array([float(cb_pos[0])]), "cy": np.array([float(cb_pos[1])]), "cz": np.array([float(cb_pos[2])]),
-            "qw": st_b0["qw"], "qx": st_b0["qx"], "qy": st_b0["qy"], "qz": st_b0["qz"],
+    if only_1b:
+        dimer_pairs = []
+        t_mace2_s = 0.0
+        fit_2b = {
+            "gg_q_scale": 1.0,
+            "gg_lj_scale": 1.0,
+            "r_min_A": 2.0,
+            "r_max_A": float(r_cut_gg),
+            "gg_com_lut_K": np.zeros(128, dtype=np.float32),
+            "r2_2b": None,
+            "mae_2b_kJ_mol": None,
+            "r2_2b_deployed_holdout": None,
+            "mae_2b_deployed_holdout_kJ_mol": None,
+            "mae_2b_classical_holdout_kJ_mol": None,
+            "r2_2b_train": None,
+            "mae_2b_train_kJ_mol": None,
+            "n_2b_train": 0,
+            "n_2b_val": 0,
+            "mean_offset_classical_gg_kJ_mol": None,
+            "mean_offset_distilled_2b_kJ_mol": None,
         }
-        ulj0, uq0, rc_com, ov = _unscaled_gg_pair_energy_K(
-            st_a, st_b, H_super, inv_H_super, dist_guest, r_cut_gg=r_cut_gg, dsf_alpha=0.20
-        )
-        if ov or rc_com < 2.60 or rc_com >= r_cut_gg - 0.1:
-            continue
-        # Ensure min intermolecular real-atom distance >= 2.30 A
-        qa = np.array([[st_a["qw"][0], st_a["qx"][0], st_a["qy"][0], st_a["qz"][0]]])
-        qb = np.array([[st_b["qw"][0], st_b["qx"][0], st_b["qy"][0], st_b["qz"][0]]])
-        pa = np.array([st_a["cx"][0], st_a["cy"][0], st_a["cz"][0]])[None, :] + _quat_rotate_np(qa, local_real)[0]
-        pb = np.array([st_b["cx"][0], st_b["cy"][0], st_b["cz"][0]])[None, :] + _quat_rotate_np(qb, local_real)[0]
-        df_gg = (pa[:, None, :] - pb[None, :, :]) @ inv_H_super
-        df_gg -= np.round(df_gg)
-        dr_gg = df_gg @ H_super
-        dmin_gg = float(math.sqrt(np.min(np.sum(dr_gg * dr_gg, axis=-1))))
-        if dmin_gg < 2.30:
-            continue
-        st_ab = {
-            "N": 2,
-            "cx": np.array([st_a["cx"][0], st_b["cx"][0]], dtype=np.float64),
-            "cy": np.array([st_a["cy"][0], st_b["cy"][0]], dtype=np.float64),
-            "cz": np.array([st_a["cz"][0], st_b["cz"][0]], dtype=np.float64),
-            "qw": np.array([st_a["qw"][0], st_b["qw"][0]], dtype=np.float64),
-            "qx": np.array([st_a["qx"][0], st_b["qx"][0]], dtype=np.float64),
-            "qy": np.array([st_a["qy"][0], st_b["qy"][0]], dtype=np.float64),
-            "qz": np.array([st_a["qz"][0], st_b["qz"][0]], dtype=np.float64),
-        }
-        dimer_pairs.append(st_ab)
-        u_lj0_list.append(ulj0)
-        u_q0_list.append(uq0)
-        rcom_list.append(rc_com)
-        e1_sum_list.append(float(y_1b[ia] + y_1b[ib]))
-
-    t_mace2_0 = _t.perf_counter()
-    ev_2b = target.eval_batch(dimer_pairs) if dimer_pairs else []
-    t_mace2_s = float(_t.perf_counter() - t_mace2_0)
-
-    if dimer_pairs:
-        u2_true = np.array([float(ev[0]) - e1s for ev, e1s in zip(ev_2b, e1_sum_list)], dtype=np.float64)
-        u_lj0_arr = np.asarray(u_lj0_list, dtype=np.float64)
-        u_q0_arr = np.asarray(u_q0_list, dtype=np.float64)
-        rcom_arr = np.asarray(rcom_list, dtype=np.float64)
-        valid_2b = np.isfinite(u2_true) & (u2_true < 1.5e4)
-        fit_2b = _solve_2b_model(
-            u_lj0_arr[valid_2b], u_q0_arr[valid_2b], rcom_arr[valid_2b], u2_true[valid_2b], r_cut_gg=r_cut_gg
-        )
     else:
-        fit_2b = _solve_2b_model(
-            np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0), r_cut_gg=r_cut_gg
-        )
+        low_idx = np.where(y_1b <= (15.0 / K_TO_KJMOL))[0]
+        if len(low_idx) < 20:
+            low_idx = np.argsort(y_1b)[:min(80, len(y_1b))]
+
+        H_u = env_info["H_unit"]
+        sc_shifts = []
+        for ia in range(int(supercell[0])):
+            for ib in range(int(supercell[1])):
+                for ic in range(int(supercell[2])):
+                    sc_shifts.append(np.array([ia, ib, ic], dtype=np.float64) @ H_u)
+        sc_shifts = np.asarray(sc_shifts, dtype=np.float64)
+
+        dimer_pairs = []
+        u_lj0_list, u_q0_list, rcom_list, e1_sum_list = [], [], [], []
+        max_attempts = max(int(n_2b) * 40, 4000)
+        for _ in range(max_attempts):
+            if len(dimer_pairs) >= int(n_2b):
+                break
+            ia = int(rng.choice(low_idx))
+            ib = int(rng.choice(low_idx))
+            st_a = states_1b_kept[ia]
+            st_b0 = states_1b_kept[ib]
+            sh_b = sc_shifts[int(rng.integers(0, len(sc_shifts)))]
+            cb_pos = np.array([st_b0["cx"][0] + sh_b[0], st_b0["cy"][0] + sh_b[1], st_b0["cz"][0] + sh_b[2]])
+            cb_pos = ((cb_pos @ inv_H_super) % 1.0) @ H_super
+            st_b = {
+                "N": 1,
+                "cx": np.array([float(cb_pos[0])]), "cy": np.array([float(cb_pos[1])]), "cz": np.array([float(cb_pos[2])]),
+                "qw": st_b0["qw"], "qx": st_b0["qx"], "qy": st_b0["qy"], "qz": st_b0["qz"],
+            }
+            ulj0, uq0, rc_com, ov = _unscaled_gg_pair_energy_K(
+                st_a, st_b, H_super, inv_H_super, dist_guest, r_cut_gg=r_cut_gg, dsf_alpha=0.20
+            )
+            if ov or rc_com < 2.60 or rc_com >= r_cut_gg - 0.1:
+                continue
+            # Ensure min intermolecular real-atom distance >= 2.30 A
+            qa = np.array([[st_a["qw"][0], st_a["qx"][0], st_a["qy"][0], st_a["qz"][0]]])
+            qb = np.array([[st_b["qw"][0], st_b["qx"][0], st_b["qy"][0], st_b["qz"][0]]])
+            pa = np.array([st_a["cx"][0], st_a["cy"][0], st_a["cz"][0]])[None, :] + _quat_rotate_np(qa, local_real)[0]
+            pb = np.array([st_b["cx"][0], st_b["cy"][0], st_b["cz"][0]])[None, :] + _quat_rotate_np(qb, local_real)[0]
+            df_gg = (pa[:, None, :] - pb[None, :, :]) @ inv_H_super
+            df_gg -= np.round(df_gg)
+            dr_gg = df_gg @ H_super
+            dmin_gg = float(math.sqrt(np.min(np.sum(dr_gg * dr_gg, axis=-1))))
+            if dmin_gg < 2.30:
+                continue
+            st_ab = {
+                "N": 2,
+                "cx": np.array([st_a["cx"][0], st_b["cx"][0]], dtype=np.float64),
+                "cy": np.array([st_a["cy"][0], st_b["cy"][0]], dtype=np.float64),
+                "cz": np.array([st_a["cz"][0], st_b["cz"][0]], dtype=np.float64),
+                "qw": np.array([st_a["qw"][0], st_b["qw"][0]], dtype=np.float64),
+                "qx": np.array([st_a["qx"][0], st_b["qx"][0]], dtype=np.float64),
+                "qy": np.array([st_a["qy"][0], st_b["qy"][0]], dtype=np.float64),
+                "qz": np.array([st_a["qz"][0], st_b["qz"][0]], dtype=np.float64),
+            }
+            dimer_pairs.append(st_ab)
+            u_lj0_list.append(ulj0)
+            u_q0_list.append(uq0)
+            rcom_list.append(rc_com)
+            e1_sum_list.append(float(y_1b[ia] + y_1b[ib]))
+
+        t_mace2_0 = _t.perf_counter()
+        ev_2b = target.eval_batch(dimer_pairs) if dimer_pairs else []
+        t_mace2_s = float(_t.perf_counter() - t_mace2_0)
+
+        if dimer_pairs:
+            u2_true = np.array([float(ev[0]) - e1s for ev, e1s in zip(ev_2b, e1_sum_list)], dtype=np.float64)
+            u_lj0_arr = np.asarray(u_lj0_list, dtype=np.float64)
+            u_q0_arr = np.asarray(u_q0_list, dtype=np.float64)
+            rcom_arr = np.asarray(rcom_list, dtype=np.float64)
+            valid_2b = np.isfinite(u2_true) & (u2_true < 1.5e4)
+            fit_2b = _solve_2b_model(
+                u_lj0_arr[valid_2b],
+                u_q0_arr[valid_2b],
+                rcom_arr[valid_2b],
+                u2_true[valid_2b],
+                r_cut_gg=r_cut_gg,
+                seed=int(distill_seed) + 23,
+            )
+        else:
+            fit_2b = _solve_2b_model(
+                np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0),
+                r_cut_gg=r_cut_gg,
+                seed=int(distill_seed) + 23,
+            )
 
     # 3. Synthesize 3D unit-cell grids on GPU
     t_grid0 = _t.perf_counter()
@@ -1080,11 +1388,12 @@ def distill_mlip_surrogate(
     meta = {
         "version": DISTILL_VERSION,
         "distill_sha256": cache_key,
+        "only_1b": bool(only_1b),
         "cif_path": str(cif_path),
         "supercell": [int(x) for x in supercell],
         "guest_name": dist_guest.name,
         "model": str(model_name),
-        "model_sha256": sha256_file(resolved_model_file) if resolved_model_file else None,
+        "model_sha256": resolved_model_sha,
         "dispersion": bool(dispersion),
         "dispersion_xc": str(dispersion_xc),
         "dtype": str(dtype),
@@ -1096,11 +1405,18 @@ def distill_mlip_surrogate(
         "n_1b_evaluated": int(len(sel_1b)),
         "n_1b_kept": int(len(y_1b)),
         "n_2b_evaluated": int(len(dimer_pairs)),
+        "n_2b_train": int(fit_2b["n_2b_train"]),
+        "n_2b_val": int(fit_2b["n_2b_val"]),
         "r2_1b": fit_1b["r2_1b"],
         "mae_1b_kJ_mol": fit_1b["mae_1b_kJ_mol"],
         "mae_pocket_kJ_mol": fit_1b["mae_pocket_kJ_mol"],
         "r2_2b": fit_2b["r2_2b"],
         "mae_2b_kJ_mol": fit_2b["mae_2b_kJ_mol"],
+        "r2_2b_deployed_holdout": fit_2b["r2_2b_deployed_holdout"],
+        "mae_2b_deployed_holdout_kJ_mol": fit_2b["mae_2b_deployed_holdout_kJ_mol"],
+        "mae_2b_classical_holdout_kJ_mol": fit_2b["mae_2b_classical_holdout_kJ_mol"],
+        "r2_2b_train": fit_2b["r2_2b_train"],
+        "mae_2b_train_kJ_mol": fit_2b["mae_2b_train_kJ_mol"],
         "mean_offset_classical_gg_kJ_mol": fit_2b["mean_offset_classical_gg_kJ_mol"],
         "mean_offset_distilled_2b_kJ_mol": fit_2b["mean_offset_distilled_2b_kJ_mol"],
         "gg_q_scale": fit_2b["gg_q_scale"],
@@ -1122,11 +1438,21 @@ def distill_mlip_surrogate(
     tmp_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     os.replace(tmp_json, p_json)
 
+    if only_1b:
+        msg_2b = "2B: skipped (only_1b=True)"
+    elif meta["mae_2b_kJ_mol"] is not None:
+        tag_2b = f"val={meta['n_2b_val']}" if meta["n_2b_val"] > 0 else f"insample={meta['n_2b_train']}"
+        msg_2b = (
+            f"2B({tag_2b}): q_scale={meta['gg_q_scale']:.3f}, lj_scale={meta['gg_lj_scale']:.3f}, "
+            f"R2={meta['r2_2b']:.4f}, MAE={meta['mae_2b_kJ_mol']:.2f} kJ/mol"
+        )
+    else:
+        msg_2b = f"2B: identity fallback (n_2b={meta['n_2b_evaluated']})"
+
     print(
         f"  [Auto-MLIP Distill DONE in {total_wall_s:.2f}s] envs={n_env}, chans={n_chan} | "
         f"1B: R2={meta['r2_1b']:.4f}, MAE={meta['mae_1b_kJ_mol']:.2f} (pocket {meta['mae_pocket_kJ_mol']:.2f}) kJ/mol | "
-        f"2B: q_scale={meta['gg_q_scale']:.3f}, lj_scale={meta['gg_lj_scale']:.3f}, "
-        f"MAE={meta['mae_2b_kJ_mol']:.2f} kJ/mol | saved {p_npz}"
+        f"{msg_2b} | saved {p_npz}"
     )
 
     return {

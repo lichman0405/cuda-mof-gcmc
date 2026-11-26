@@ -1,0 +1,335 @@
+{
+  "fp32_vs_fp64": [
+    {
+      "label": "Mg-MOF-74 / r2SCAN (Low 0.012 bar)",
+      "N_mean": 2.0,
+      "n_pairs": 16,
+      "rms_dU_kJ_mol": 0.000697311060271723,
+      "max_dU_kJ_mol": 0.0013896548107581452,
+      "rms_dloga": 0.0002814337027391079,
+      "max_dloga": 0.0005608626066655464,
+      "flip_count": 0,
+      "flip_rate_pct": 0.0,
+      "t32_s": 0.5280940409866162,
+      "t64_s": 3.1295373309985735,
+      "speedup_fp32_vs_fp64": 5.926098550841037
+    },
+    {
+      "label": "Mg-MOF-74 / r2SCAN (Inflection 0.28 bar)",
+      "N_mean": 30.0,
+      "n_pairs": 16,
+      "rms_dU_kJ_mol": 0.0012962421557815864,
+      "max_dU_kJ_mol": 0.0025812288649831316,
+      "rms_dloga": 0.0005231613985955916,
+      "max_dloga": 0.0010417801157576179,
+      "flip_count": 0,
+      "flip_rate_pct": 0.0,
+      "t32_s": 0.4779844199947547,
+      "t64_s": 4.015740007016575,
+      "speedup_fp32_vs_fp64": 8.401403558426951
+    },
+    {
+      "label": "Mg-MOF-74 / MACE-DAC-1+D3 (High 1.0 bar)",
+      "N_mean": 36.0,
+      "n_pairs": 16,
+      "rms_dU_kJ_mol": 0.0004393800774498689,
+      "max_dU_kJ_mol": 0.0012356335669210239,
+      "rms_dloga": 0.0001773331432009651,
+      "max_dloga": 0.0004986998626321792,
+      "flip_count": 0,
+      "flip_rate_pct": 0.0,
+      "t32_s": 0.561895758000901,
+      "t64_s": 4.307195010012947,
+      "speedup_fp32_vs_fp64": 7.665469882415522
+    },
+    {
+      "label": "IRMOF-1 / r2SCAN (Dense 5.0 bar)",
+      "N_mean": 19.0,
+      "n_pairs": 16,
+      "rms_dU_kJ_mol": 0.0009318749275772242,
+      "max_dU_kJ_mol": 0.0024998628421712965,
+      "rms_dloga": 0.0003761033293454616,
+      "max_dloga": 0.0010089409104420133,
+      "flip_count": 0,
+      "flip_rate_pct": 0.0,
+      "t32_s": 0.4483176139765419,
+      "t64_s": 4.254961327998899,
+      "speedup_fp32_vs_fp64": 9.490952831983842
+    }
+  ],
+  "core_shell_energies": [
+    {
+      "label": "Mg-MOF-74 / r2SCAN (Inflection 0.28 bar)",
+      "n_shell": 16,
+      "min_shell_u_kJ_mol": 343.23558512851395,
+      "median_shell_u_kJ_mol": 882.9942226128094
+    },
+    {
+      "label": "Mg-MOF-74 / MACE-DAC-1+D3 (High 1.0 bar)",
+      "n_shell": 16,
+      "min_shell_u_kJ_mol": 433.2300449894257,
+      "median_shell_u_kJ_mol": 658.1277779119787
+    },
+    {
+      "label": "IRMOF-1 / r2SCAN (Dense 5.0 bar)",
+      "n_shell": 16,
+      "min_shell_u_kJ_mol": 108.62861713044988,
+      "median_shell_u_kJ_mol": 664.488612935233
+    }
+  ],
+  "hard_core_run_bounds": {
+    "exp1_mp0_nod3_0p28": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "medium",
+      "dispersion": false,
+      "highest_P_bar": 0.28,
+      "max_mol": 128,
+      "max_N_observed": 12,
+      "min_r_guest_fw_A": 2.2880713263010435,
+      "min_r_gg_A": 5.1952987224147735
+    },
+    "jctc_exp1_auto_mlip_1b_only_r2scan": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 43,
+      "min_r_guest_fw_A": 2.062247528000714,
+      "min_r_gg_A": 2.6419340872602985
+    },
+    "jctc_exp1_auto_mlip_r2scan_highload_0p28": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 0.28,
+      "max_mol": 128,
+      "max_N_observed": 37,
+      "min_r_guest_fw_A": 2.1063900691991515,
+      "min_r_gg_A": 2.6225916988008238
+    },
+    "jctc_exp1_auto_mlip_r2scan_no_remc": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 43,
+      "min_r_guest_fw_A": 2.0136965403572575,
+      "min_r_gg_A": 2.6061491880767886
+    },
+    "jctc_exp1_auto_mlip_r2scan_remc": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 52,
+      "min_r_guest_fw_A": 2.045464587034514,
+      "min_r_gg_A": 2.5028229792864027
+    },
+    "jctc_exp1_direct_r2scan_0p28": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 0.28,
+      "max_mol": 128,
+      "max_N_observed": 14,
+      "min_r_guest_fw_A": 2.1478292609731144,
+      "min_r_gg_A": 2.694854581407631
+    },
+    "jctc_exp1_grid_only_mp0d3": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "medium",
+      "dispersion": true,
+      "highest_P_bar": 1.0,
+      "max_mol": 160,
+      "max_N_observed": 95,
+      "min_r_guest_fw_A": 1.972039531722187,
+      "min_r_gg_A": 2.477395119008405
+    },
+    "jctc_exp1_grid_only_r2scan": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 38,
+      "min_r_guest_fw_A": 2.044930516135868,
+      "min_r_gg_A": 2.537973349108392
+    },
+    "jctc_exp1_mercado_r2scan": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 0.28,
+      "max_mol": 128,
+      "max_N_observed": 35,
+      "min_r_guest_fw_A": 2.0746094921993623,
+      "min_r_gg_A": 2.694702331789539
+    },
+    "jctc_exp1_uff_r2scan": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 0.28,
+      "max_mol": 128,
+      "max_N_observed": 22,
+      "min_r_guest_fw_A": 2.2463833975431284,
+      "min_r_gg_A": 2.724000309415806
+    },
+    "jctc_finitesize_mgmof74_1x1x4_co2_r2scan_0p28": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 0.28,
+      "max_mol": 256,
+      "max_N_observed": 66,
+      "min_r_guest_fw_A": 2.037754214921282,
+      "min_r_gg_A": 2.679103601462803
+    },
+    "jctc_macedac_cubtc_co2": {
+      "cif": "data/Cu-BTC.cif",
+      "guest": "co2",
+      "model": "build/models/mace-dac-1.model",
+      "dispersion": true,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 34,
+      "min_r_guest_fw_A": 2.4358736364907636,
+      "min_r_gg_A": 2.563879685781134
+    },
+    "jctc_macedac_cubtc_h2o": {
+      "cif": "data/Cu-BTC.cif",
+      "guest": "h2o",
+      "model": "build/models/mace-dac-1.model",
+      "dispersion": true,
+      "highest_P_bar": 0.008,
+      "max_mol": 256,
+      "max_N_observed": 3,
+      "min_r_guest_fw_A": 2.9392059233553907,
+      "min_r_gg_A": null
+    },
+    "jctc_macedac_irmof1_co2": {
+      "cif": "data/IRMOF-1.cif",
+      "guest": "co2",
+      "model": "build/models/mace-dac-1.model",
+      "dispersion": true,
+      "highest_P_bar": 5.0,
+      "max_mol": 128,
+      "max_N_observed": 44,
+      "min_r_guest_fw_A": 2.1626255988377925,
+      "min_r_gg_A": 2.7121556371250475
+    },
+    "jctc_macedac_mgmof74_co2": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "build/models/mace-dac-1.model",
+      "dispersion": true,
+      "highest_P_bar": 1.0,
+      "max_mol": 160,
+      "max_N_observed": 42,
+      "min_r_guest_fw_A": 2.0626708721532703,
+      "min_r_gg_A": 2.653159317337302
+    },
+    "jctc_macedac_nimof74_co2": {
+      "cif": "data/NiMOF-74.cif",
+      "guest": "co2",
+      "model": "build/models/mace-dac-1.model",
+      "dispersion": true,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 27,
+      "min_r_guest_fw_A": 2.1014357385988434,
+      "min_r_gg_A": 2.6046606523451845
+    },
+    "jctc_parity_direct_irmof1_co2_1bar": {
+      "cif": "data/IRMOF-1.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 15,
+      "min_r_guest_fw_A": 2.367346006871947,
+      "min_r_gg_A": 2.7251851606589175
+    },
+    "jctc_parity_nested_irmof1_co2_1bar": {
+      "cif": "data/IRMOF-1.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 19,
+      "min_r_guest_fw_A": 2.3070305185719713,
+      "min_r_gg_A": 2.7459122059991223
+    },
+    "jctc_remc_cubtc_co2_r2scan": {
+      "cif": "data/Cu-BTC.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 18,
+      "min_r_guest_fw_A": 2.201800624881696,
+      "min_r_gg_A": 2.784732277518545
+    },
+    "jctc_remc_irmof1_ch4_mp0_d3": {
+      "cif": "data/IRMOF-1.cif",
+      "guest": "ch4",
+      "model": "medium",
+      "dispersion": true,
+      "highest_P_bar": 5.0,
+      "max_mol": 128,
+      "max_N_observed": 63,
+      "min_r_guest_fw_A": 1.8266422190528855,
+      "min_r_gg_A": 1.7758742235996046
+    },
+    "jctc_remc_irmof1_co2_r2scan": {
+      "cif": "data/IRMOF-1.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 5.0,
+      "max_mol": 128,
+      "max_N_observed": 41,
+      "min_r_guest_fw_A": 2.222792786799251,
+      "min_r_gg_A": 2.5477546462845413
+    },
+    "jctc_remc_mgmof74_co2_mp0_d3": {
+      "cif": "data/MgMOF-74.cif",
+      "guest": "co2",
+      "model": "medium",
+      "dispersion": true,
+      "highest_P_bar": 1.0,
+      "max_mol": 160,
+      "max_N_observed": 88,
+      "min_r_guest_fw_A": 2.0605271987923497,
+      "min_r_gg_A": 2.4367334836293337
+    },
+    "jctc_remc_nimof74_co2_r2scan": {
+      "cif": "data/NiMOF-74.cif",
+      "guest": "co2",
+      "model": "mace-matpes-r2scan-0",
+      "dispersion": false,
+      "highest_P_bar": 1.0,
+      "max_mol": 128,
+      "max_N_observed": 15,
+      "min_r_guest_fw_A": 2.3338156817458326,
+      "min_r_gg_A": 2.868113178217665
+    }
+  }
+}

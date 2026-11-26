@@ -1,22 +1,29 @@
 """Phase 1 Mathematical & Bit-Exact Verification Suite for Auto-MLIP + 128-Thread GPU-CBMC."""
 
+from collections import OrderedDict
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 import numpy as np
 import pytest
 
 from guests import load_guest
 from mlip_distill import (
+    DISTILL_VERSION,
+    _eval_deployed_2b_lut,
+    _resolve_model_sha256,
     _solve_2b_model,
     _unscaled_gg_pair_energy_K,
     assign_framework_environments,
+    compute_distill_cache_key,
     distill_mlip_surrogate,
     load_distill_cache,
     make_distilled_guest_spec,
 )
 from nested_mc_engine import CudaGcmcProposer, K_TO_KJMOL, run_nested_mc
 from qeq_charges import extract_framework_for_proposer
+from run_metadata import sha256_file
 from run_mlip_gcmc import compute_grid_dims
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,21 +105,537 @@ def test_env_classification_and_guest_channels():
 
 
 def test_2b_model_preserves_short_range_repulsion():
-    """Verify _solve_2b_model cannot crush Pauli LJ core repulsion or extrapolate negative short-range wells."""
+    """Verify _solve_2b_model preserves Pauli LJ core repulsion within [0.65, 1.50] and allows soft-LJ below 0.85."""
     rng = np.random.default_rng(20261125)
     r_com = rng.uniform(2.85, 6.20, size=120)
     u_lj0 = 120.0 * ((3.1 / r_com) ** 12 - (3.1 / r_com) ** 6)
     u_q0 = -180.0 * np.exp(-((r_com - 3.6) / 0.8) ** 2)
     # Deep artificial over-attractive target around 3.2 A to stress-test constraints
     u2_true = 0.3 * u_lj0 + 0.2 * u_q0 - 2500.0 * np.exp(-((r_com - 3.15) / 0.35) ** 2)
-    res = _solve_2b_model(u_lj0, u_q0, r_com, u2_true, r_cut_gg=6.6)
-    assert 0.85 <= res["gg_lj_scale"] <= 1.35
+    res = _solve_2b_model(u_lj0, u_q0, r_com, u2_true, r_cut_gg=6.6, seed=20261125)
+    assert 0.65 <= res["gg_lj_scale"] <= 1.50
     assert 0.50 <= res["gg_q_scale"] ** 2 <= 1.50
+    assert res["n_2b_val"] == 24
+    assert res["n_2b_train"] == 96
+    assert res["r2_2b"] == res["r2_2b_deployed_holdout"]
+    assert res["mae_2b_kJ_mol"] == res["mae_2b_deployed_holdout_kJ_mol"]
     lut = res["gg_com_lut_K"]
     lut_r = np.linspace(res["r_min_A"], res["r_max_A"], len(lut))
     assert np.all(lut[lut_r <= 2.75] == 0.0)
     assert float(np.min(lut)) >= -400.0
     assert abs(float(lut[-1])) < 1e-6
+
+    # Relaxed lower bound [0.65, 1.50]: soft-LJ target (true scale = 0.72) should move below 0.85 without clipping
+    u_lj_strong = 600.0 * ((3.2 / r_com) ** 12 - (3.2 / r_com) ** 6)
+    u2_soft = 0.72 * u_lj_strong + 0.95 * u_q0
+    res_soft = _solve_2b_model(u_lj_strong, u_q0, r_com, u2_soft, r_cut_gg=6.6, seed=20261126)
+    assert 0.65 <= res_soft["gg_lj_scale"] < 0.85
+    assert res_soft["r2_2b_deployed_holdout"] > 0.99
+
+    # Extreme negative-LJ target must still be clamped at 0.65 to keep Pauli repulsion positive
+    u2_crush = -2.0 * u_lj_strong + u_q0
+    res_crush = _solve_2b_model(u_lj_strong, u_q0, r_com, u2_crush, r_cut_gg=6.6, seed=20261127)
+    assert res_crush["gg_lj_scale"] >= 0.65 - 1e-9
+
+
+def test_2b_deployed_lut_eval_matches_cuda_formula():
+    """Verify _eval_deployed_2b_lut matches src/proposer_dll.cu:356-376 across interior and boundary regimes."""
+    r_min_A, r_max_A, n_bins = 2.0, 10.0, 128
+    lut_r = np.linspace(r_min_A, r_max_A, n_bins, dtype=np.float64)
+
+    def _cuda_ref(r_vals, lut_arr):
+        lut_f32 = np.asarray(lut_arr, dtype=np.float32)
+        inv_dr = float(len(lut_f32) - 1) / (r_max_A - r_min_A)
+        out = []
+        for rc_com in r_vals:
+            if rc_com >= r_max_A:
+                out.append(0.0)
+                continue
+            u_pos = (rc_com - r_min_A) * inv_dr
+            if u_pos <= 0.0:
+                slope = float(lut_f32[1]) - float(lut_f32[0])
+                if slope > 0.0:
+                    slope = 0.0
+                out.append(float(lut_f32[0]) + slope * u_pos)
+            else:
+                idx0 = int(math.floor(u_pos))
+                if idx0 >= len(lut_f32) - 1:
+                    out.append(float(lut_f32[-1]))
+                else:
+                    frac = u_pos - float(idx0)
+                    v0 = float(lut_f32[idx0])
+                    v1 = float(lut_f32[idx0 + 1])
+                    out.append(v0 + frac * (v1 - v0))
+        return np.asarray(out, dtype=np.float64)
+
+    # Case 1: Deployed smooth LUT (zero for r <= 2.75 and at r_max_A)
+    lut_deployed = np.clip(-150.0 * np.exp(-((lut_r - 3.9) / 0.85) ** 2), -400.0, 400.0)
+    lut_deployed[lut_r <= 2.75] = 0.0
+    lut_deployed[-1] = 0.0
+    r_test = np.array([1.2, 2.0, 2.5, 2.75, 3.123, 3.9, 5.55, 9.999, 10.0, 12.5], dtype=np.float64)
+    got = _eval_deployed_2b_lut(r_test, lut_deployed, r_min_A, r_max_A)
+    exp = _cuda_ref(r_test, lut_deployed)
+    assert np.allclose(got, exp, atol=1e-13, rtol=0.0)
+    assert got[0] == 0.0 and got[1] == 0.0 and got[-2] == 0.0 and got[-1] == 0.0
+
+    # Case 2: Repulsive downward slope at r_min_A (lut[1] < lut[0]) extrapolates upward for r < r_min_A
+    lut_rep = np.linspace(200.0, 0.0, n_bins, dtype=np.float32)
+    got_rep = _eval_deployed_2b_lut(r_test, lut_rep, r_min_A, r_max_A)
+    exp_rep = _cuda_ref(r_test, lut_rep)
+    assert np.allclose(got_rep, exp_rep, atol=1e-13, rtol=0.0)
+    assert got_rep[0] > float(lut_rep[0])
+
+    # Case 3: Increasing slope at r_min_A (lut[1] > lut[0]) clamps slope to 0 for r < r_min_A
+    lut_inc = np.linspace(-100.0, 0.0, n_bins, dtype=np.float32)
+    got_inc = _eval_deployed_2b_lut(r_test, lut_inc, r_min_A, r_max_A)
+    exp_inc = _cuda_ref(r_test, lut_inc)
+    assert np.allclose(got_inc, exp_inc, atol=1e-13, rtol=0.0)
+    assert got_inc[0] == float(lut_inc[0])
+
+
+def test_2b_honest_holdout_split_and_no_leakage():
+    """Verify honest 80/20 2B deployed LUT validation, zero val leakage, and clean small-N fallback."""
+    rng = np.random.default_rng(20260777)
+    M = 100
+    r_com = rng.uniform(2.85, 6.30, size=M)
+    u_lj0 = 150.0 * ((3.15 / r_com) ** 12 - (3.15 / r_com) ** 6)
+    u_q0 = -160.0 * np.exp(-((r_com - 3.7) / 0.85) ** 2)
+    u2_clean = 0.90 * u_lj0 + 0.85 * u_q0 - 95.0 * np.exp(-((r_com - 3.95) / 0.70) ** 2)
+
+    split_seed = 20268888
+    res = _solve_2b_model(u_lj0, u_q0, r_com, u2_clean, r_cut_gg=6.8, seed=split_seed)
+    assert res["n_2b_val"] == 20
+    assert res["n_2b_train"] == 80
+    assert res["r2_2b"] == res["r2_2b_deployed_holdout"]
+    assert res["mae_2b_kJ_mol"] == res["mae_2b_deployed_holdout_kJ_mol"]
+    assert res["r2_2b_deployed_holdout"] > 0.95
+    assert res["mae_2b_deployed_holdout_kJ_mol"] < res["mae_2b_classical_holdout_kJ_mol"]
+    assert res["r2_2b_train"] is not None and res["mae_2b_train_kJ_mol"] is not None
+
+    # Exact zero-leakage proof: perturbing a validation sample must NOT change CV predictions on val_idx.
+    # Shifting u2[val_idx[0]] from +5000 K to +10000 K must increase hold-out MAE by exactly 5000/n_val * K_TO_KJMOL.
+    perm = np.random.default_rng(split_seed).permutation(M)
+    val_idx = perm[:20]
+    tr_idx = perm[20:]
+    u2_val_5k = u2_clean.copy()
+    u2_val_10k = u2_clean.copy()
+    u2_val_5k[val_idx[0]] += 5000.0
+    u2_val_10k[val_idx[0]] += 10000.0
+    r_5k = _solve_2b_model(u_lj0, u_q0, r_com, u2_val_5k, r_cut_gg=6.8, seed=split_seed)
+    r_10k = _solve_2b_model(u_lj0, u_q0, r_com, u2_val_10k, r_cut_gg=6.8, seed=split_seed)
+    expected_delta_mae = (5000.0 / 20.0) * K_TO_KJMOL
+    actual_delta_mae = r_10k["mae_2b_deployed_holdout_kJ_mol"] - r_5k["mae_2b_deployed_holdout_kJ_mol"]
+    assert abs(actual_delta_mae - expected_delta_mae) < 1e-12
+
+    # Overfitting noisy data / train-only spiky outlier must NOT produce artificially optimistic hold-out error
+    noise = rng.normal(0.0, 220.0, size=M)
+    u2_base = u_lj0 + u_q0 + noise
+    u2_noisy = u2_base.copy()
+    u2_noisy[tr_idx[:3]] -= 1800.0  # strong localized train-only outliers
+    r_base = _solve_2b_model(u_lj0, u_q0, r_com, u2_base, r_cut_gg=6.8, seed=split_seed)
+    r_noisy = _solve_2b_model(u_lj0, u_q0, r_com, u2_noisy, r_cut_gg=6.8, seed=split_seed)
+    assert r_noisy["n_2b_val"] == 20
+    assert r_noisy["mae_2b_train_kJ_mol"] > r_base["mae_2b_train_kJ_mol"]
+    assert r_noisy["mae_2b_deployed_holdout_kJ_mol"] >= r_base["mae_2b_deployed_holdout_kJ_mol"] - 0.15
+    # On i.i.d. noisy data without outliers, honest hold-out R^2 cannot exceed in-sample overfit R^2
+    u2_iid_noise = u_lj0 + u_q0 + rng.normal(0.0, 250.0, size=M)
+    r_iid = _solve_2b_model(u_lj0, u_q0, r_com, u2_iid_noise, r_cut_gg=6.8, seed=split_seed)
+    assert r_iid["r2_2b_deployed_holdout"] < r_iid["r2_2b_train"]
+
+    # Clean fallback when 16 <= M < 24 (n_2b_val = 0, hold-out metrics explicitly None)
+    r_small = _solve_2b_model(u_lj0[:20], u_q0[:20], r_com[:20], u2_clean[:20], r_cut_gg=6.8, seed=split_seed)
+    assert r_small["n_2b_val"] == 0
+    assert r_small["n_2b_train"] == 20
+    assert r_small["r2_2b_deployed_holdout"] is None
+    assert r_small["mae_2b_deployed_holdout_kJ_mol"] is None
+    assert r_small["mae_2b_classical_holdout_kJ_mol"] is None
+    assert r_small["r2_2b"] == r_small["r2_2b_train"]
+
+    # Clean fallback when M < 16 (identity scaling + zero LUT)
+    r_tiny = _solve_2b_model(u_lj0[:10], u_q0[:10], r_com[:10], u2_clean[:10], r_cut_gg=6.8, seed=split_seed)
+    assert r_tiny["n_2b_val"] == 0
+    assert r_tiny["n_2b_train"] == 0
+    assert r_tiny["gg_lj_scale"] == 1.0
+    assert r_tiny["gg_q_scale"] == 1.0
+    assert np.all(r_tiny["gg_com_lut_K"] == 0.0)
+    assert r_tiny["r2_2b"] is None and r_tiny["mae_2b_kJ_mol"] is None
+
+
+def test_only_1b_cache_key_separation_and_model_sha256_in_key():
+    """Verify DISTILL_VERSION bump, only_1b cache key separation, and backward-compatible model_sha256."""
+    assert DISTILL_VERSION == "v1.2"
+    cif = str(DATA / "MgMOF-74.cif")
+    guest = make_distilled_guest_spec(load_guest("co2"))
+
+    k_default = compute_distill_cache_key(
+        cif_path=cif, supercell=(1, 1, 2), guest=guest, grid_dims=(32, 32, 16),
+        model_name="medium", model_file_path=None, dispersion=True, dispersion_xc="pbe",
+        dtype="float32", n_1b=960, n_2b=192, distill_seed=20260001,
+    )
+    k_1b2b = compute_distill_cache_key(
+        cif_path=cif, supercell=(1, 1, 2), guest=guest, grid_dims=(32, 32, 16),
+        model_name="medium", model_file_path=None, dispersion=True, dispersion_xc="pbe",
+        dtype="float32", n_1b=960, n_2b=192, distill_seed=20260001, only_1b=False,
+    )
+    k_only1b = compute_distill_cache_key(
+        cif_path=cif, supercell=(1, 1, 2), guest=guest, grid_dims=(32, 32, 16),
+        model_name="medium", model_file_path=None, dispersion=True, dispersion_xc="pbe",
+        dtype="float32", n_1b=960, n_2b=192, distill_seed=20260001, only_1b=True,
+    )
+    k_n2b_zero_full = compute_distill_cache_key(
+        cif_path=cif, supercell=(1, 1, 2), guest=guest, grid_dims=(32, 32, 16),
+        model_name="medium", model_file_path=None, dispersion=True, dispersion_xc="pbe",
+        dtype="float32", n_1b=960, n_2b=0, distill_seed=20260001, only_1b=False,
+    )
+    assert k_default == k_1b2b
+    assert k_only1b != k_1b2b
+    assert k_only1b != k_n2b_zero_full
+
+    # Explicit model_sha256 distinguishes weights even when model_file_path=None
+    k_sha_a = compute_distill_cache_key(
+        cif_path=cif, supercell=(1, 1, 2), guest=guest, grid_dims=(32, 32, 16),
+        model_name="medium", model_file_path=None, dispersion=True, dispersion_xc="pbe",
+        dtype="float32", n_1b=960, n_2b=192, distill_seed=20260001,
+        model_sha256="state_dict:" + "a" * 64,
+    )
+    k_sha_b = compute_distill_cache_key(
+        cif_path=cif, supercell=(1, 1, 2), guest=guest, grid_dims=(32, 32, 16),
+        model_name="medium", model_file_path=None, dispersion=True, dispersion_xc="pbe",
+        dtype="float32", n_1b=960, n_2b=192, distill_seed=20260001,
+        model_sha256="state_dict:" + "b" * 64,
+    )
+    assert k_sha_a != k_sha_b
+    assert k_sha_a != k_default
+
+
+def test_resolve_model_sha256_deterministic_and_sensitive(tmp_path):
+    """Verify _resolve_model_sha256 handles files, target attrs, and in-memory state_dict deterministically."""
+    # 1. Existing file passed as model_name
+    ckpt = tmp_path / "dummy.model"
+    ckpt.write_bytes(b"mace-dummy-weights-v1")
+    expected_file_sha = sha256_file(str(ckpt))
+    assert _resolve_model_sha256(None, str(ckpt)) == expected_file_sha
+
+    # 2. target.model_file_path and target.model_sha256
+    t_path = SimpleNamespace(model_file_path=str(ckpt))
+    assert _resolve_model_sha256(t_path, "medium") == expected_file_sha
+    t_explicit = SimpleNamespace(model_file_path=None, model_sha256="custom_sha_1234")
+    assert _resolve_model_sha256(t_explicit, "medium") == "custom_sha_1234"
+
+    # 3. target.mace_calc.model_paths
+    t_calc_path = SimpleNamespace(mace_calc=SimpleNamespace(model_paths=[str(ckpt)]))
+    assert _resolve_model_sha256(t_calc_path, "medium") == expected_file_sha
+
+    # 4. In-memory dummy model state_dict (order-independent, deterministic, sensitive to weights & dtype)
+    class _DummyModule:
+        def __init__(self, sd):
+            self._sd = sd
+
+        def state_dict(self):
+            return self._sd
+
+    w1 = np.array([[1.0, -2.5], [3.25, 0.5]], dtype=np.float32)
+    b1 = np.array([0.1, -0.2], dtype=np.float32)
+    t_sd_a = SimpleNamespace(mace_model=_DummyModule(OrderedDict([("b", b1.copy()), ("w", w1.copy())])))
+    t_sd_b = SimpleNamespace(mace_model=_DummyModule(OrderedDict([("w", w1.copy()), ("b", b1.copy())])))
+    sha_a = _resolve_model_sha256(t_sd_a, "mace-matpes-r2scan-0")
+    sha_b = _resolve_model_sha256(t_sd_b, "mace-matpes-r2scan-0")
+    assert sha_a is not None
+    assert sha_a.startswith("state_dict:")
+    assert len(sha_a) == len("state_dict:") + 64
+    assert sha_a == sha_b
+
+    w1_pert = w1.copy()
+    w1_pert[0, 1] += 1e-5
+    t_sd_pert = SimpleNamespace(mace_model=_DummyModule({"w": w1_pert, "b": b1.copy()}))
+    assert _resolve_model_sha256(t_sd_pert, "mace-matpes-r2scan-0") != sha_a
+
+    t_sd_f64 = SimpleNamespace(mace_model=_DummyModule({"w": w1.astype(np.float64), "b": b1.copy()}))
+    assert _resolve_model_sha256(t_sd_f64, "mace-matpes-r2scan-0") != sha_a
+
+    # 5. Real torch.nn.Module if PyTorch is installed locally (pure CPU)
+    try:
+        import torch
+        torch.manual_seed(42)
+        m1 = torch.nn.Linear(4, 2)
+        torch.manual_seed(42)
+        m2 = torch.nn.Linear(4, 2)
+        h1 = _resolve_model_sha256(SimpleNamespace(mace_model=m1), "medium")
+        h2 = _resolve_model_sha256(SimpleNamespace(mace_calc=SimpleNamespace(models=[m2])), "medium")
+        assert h1 is not None and h1.startswith("state_dict:") and h1 == h2
+        with torch.no_grad():
+            m2.weight[0, 0] += 1e-4
+        assert _resolve_model_sha256(SimpleNamespace(mace_model=m2), "medium") != h1
+    except ImportError:
+        pass
+
+    # 6. None target with built-in model name -> None
+    assert _resolve_model_sha256(None, "medium") is None
+
+
+def test_distill_mlip_surrogate_only_1b_and_2b_holdout_pure_numpy(tmp_path, monkeypatch):
+    """Pure-CPU (no torch/ASE required) end-to-end test of distill_mlip_surrogate only_1b, 2B hold-out, and cache."""
+    import mlip_distill
+
+    H = np.diag([14.0, 14.0, 14.0])
+    inv_H = np.linalg.inv(H)
+    fw_frac = np.array([[0.0, 0.0, 0.0], [0.15, 0.15, 0.15]], dtype=np.float64)
+
+    class _FakeUnitCell:
+        def repeat(self, reps):
+            assert tuple(reps) == (1, 1, 1)
+            return self
+
+        def get_cell(self):
+            return H
+
+        def get_scaled_positions(self):
+            return fw_frac
+
+    def _fake_assign_envs(uc, charges=None):
+        return {
+            "env_ids": np.array([0, 1], dtype=np.int32),
+            "unique_sigs": [(12, (8,)), (8, (12,))],
+            "env_counts": np.array([1.0, 1.0], dtype=np.float64),
+            "frac": fw_frac,
+            "pos": fw_frac @ H,
+            "H_unit": H,
+            "inv_H_unit": inv_H,
+            "Z": np.array([12, 8], dtype=np.int32),
+            "active_mask": np.array([True, True], dtype=bool),
+            "is_metal_mask": np.array([True, False], dtype=bool),
+        }
+
+    def _fake_eval_basis(
+        pts_cart, site_chan_idx, n_pts_per_mol, n_chan, guest_chan_q, env_info,
+        r_cut=8.0, ewald_alpha=0.30, k_max=2.0, mu_centers=None, sigma_rbf=0.45,
+        device=None, chunk_pts=8192,
+    ):
+        n_env = len(env_info["unique_sigs"])
+        n_rad = 1 + len(mu_centers)
+        n_mol = len(pts_cart) // n_pts_per_mol
+        pts_f = pts_cart @ inv_H
+        df = pts_f[:, None, :] - fw_frac[None, :, :]
+        df -= np.round(df)
+        d = np.sqrt(np.sum((df @ H) ** 2, axis=-1))  # (M, 2)
+        out_rad = np.zeros((n_mol, n_chan, n_env, n_rad), dtype=np.float64)
+        d_mol = d.reshape(n_mol, n_pts_per_mol, n_env)
+        for s_idx in range(n_pts_per_mol):
+            ch = int(site_chan_idx[s_idx])
+            r_s = np.maximum(d_mol[:, s_idx, :], 1.25)
+            out_rad[:, ch, :, 0] += (2.20 / r_s) ** 12
+            for k, mu in enumerate(mu_centers):
+                out_rad[:, ch, :, 1 + k] += np.exp(-((r_s - mu) ** 2) / (2.0 * sigma_rbf * sigma_rbf))
+        out_phi = np.zeros((n_mol, n_env), dtype=np.float64)
+        mol_dmin = np.min(d_mol, axis=(1, 2))
+        return out_rad, out_phi, mol_dmin
+
+    def _fake_render_grids(grid_dims, env_info, dist_guest, fit_1b, mu_centers, sigma_rbf, r_cut, device=None):
+        nx, ny, nz = [int(x) for x in grid_dims]
+        n_chan = fit_1b["w_sr"].shape[0]
+        return np.zeros((n_chan, nz, ny, nx), dtype=np.float32)
+
+    monkeypatch.setattr(mlip_distill, "assign_framework_environments", _fake_assign_envs)
+    monkeypatch.setattr(mlip_distill, "_eval_unit_basis_torch", _fake_eval_basis)
+    monkeypatch.setattr(mlip_distill, "_render_unit_cell_grids", _fake_render_grids)
+
+    cif_stub = tmp_path / "mini_fake.cif"
+    cif_stub.write_text("# pure-numpy mock cif\n", encoding="utf-8")
+    fw_data = {"uc": _FakeUnitCell(), "charges": np.array([1.0, -1.0], dtype=np.float64)}
+    guest = make_distilled_guest_spec(load_guest("ar"))
+
+    class _PureNumpyOracle:
+        def __init__(self, weight_val: float = 1.0, forbid_dimers: bool = False):
+            self.device = None
+            self.model_file_path = None
+            self.mace_model = SimpleNamespace(
+                state_dict=lambda: {"w": np.array([weight_val, -0.5], dtype=np.float32)}
+            )
+            self.forbid_dimers = forbid_dimers
+            self.n_1b_seen = 0
+            self.n_2b_seen = 0
+
+        def _e1(self, x, y, z):
+            pf = np.array([x, y, z], dtype=np.float64) @ inv_H
+            df = pf[None, :] - fw_frac
+            df -= np.round(df)
+            d = np.sqrt(np.sum((df @ H) ** 2, axis=-1))
+            r = np.maximum(d, 1.5)
+            return float(np.sum(35.0 * ((2.6 / r) ** 12 - (2.6 / r) ** 6)))
+
+        def eval_batch(self, states, mace_chunk=None):
+            out = []
+            for st in states:
+                n = int(st["N"])
+                if n == 1:
+                    self.n_1b_seen += 1
+                    out.append((self._e1(st["cx"][0], st["cy"][0], st["cz"][0]), False))
+                elif n == 2:
+                    if self.forbid_dimers:
+                        raise AssertionError("only_1b=True must never evaluate 2B dimer states!")
+                    self.n_2b_seen += 1
+                    e1a = self._e1(st["cx"][0], st["cy"][0], st["cz"][0])
+                    e1b = self._e1(st["cx"][1], st["cy"][1], st["cz"][1])
+                    sa = {"N": 1, "cx": st["cx"][:1], "cy": st["cy"][:1], "cz": st["cz"][:1],
+                          "qw": st["qw"][:1], "qx": st["qx"][:1], "qy": st["qy"][:1], "qz": st["qz"][:1]}
+                    sb = {"N": 1, "cx": st["cx"][1:], "cy": st["cy"][1:], "cz": st["cz"][1:],
+                          "qw": st["qw"][1:], "qx": st["qx"][1:], "qy": st["qy"][1:], "qz": st["qz"][1:]}
+                    ulj0, uq0, rcom, _ = _unscaled_gg_pair_energy_K(sa, sb, H, inv_H, guest, r_cut_gg=6.72)
+                    u2 = 0.80 * ulj0 + uq0 - 65.0 * math.exp(-((rcom - 3.9) / 0.8) ** 2)
+                    out.append((float(e1a + e1b + u2), False))
+            return out
+
+    cache_dir = tmp_path / "distill_cache"
+
+    # 1. only_1b=True: skips 2B completely, outputs zero 128-pt LUT and non-null state_dict model_sha256
+    oracle_1b = _PureNumpyOracle(weight_val=1.0, forbid_dimers=True)
+    res_1b = distill_mlip_surrogate(
+        cif_path=str(cif_stub), fw_data=fw_data, guest=guest, supercell=(1, 1, 1),
+        target=oracle_1b, grid_dims=(8, 8, 8), n_1b=60, n_2b=64,
+        distill_seed=20269101, cache_dir=str(cache_dir), model_name="medium",
+        dispersion=True, dispersion_xc="pbe", dtype="float32", only_1b=True,
+    )
+    s1 = res_1b["summary"]
+    assert res_1b["cache_hit"] is False
+    assert s1["version"] == "v1.2"
+    assert s1["only_1b"] is True
+    assert s1["n_2b_evaluated"] == 0 and s1["n_2b_train"] == 0 and s1["n_2b_val"] == 0
+    assert s1["t_mace2_s"] == 0.0
+    assert s1["r2_2b"] is None and s1["mae_2b_kJ_mol"] is None
+    assert s1["model_sha256"] is not None and s1["model_sha256"].startswith("state_dict:")
+    assert res_1b["gg_lj_scale"] == 1.0 and res_1b["gg_q_scale"] == 1.0
+    assert res_1b["gg_com_lut_K"].shape == (128,) and np.all(res_1b["gg_com_lut_K"] == 0.0)
+    assert oracle_1b.n_2b_seen == 0 and oracle_1b.n_1b_seen == s1["n_1b_evaluated"]
+
+    # 2. Cache hit with same weights (and with target=None), then cache invalidation if weights change
+    hit_1b = distill_mlip_surrogate(
+        cif_path=str(cif_stub), fw_data=fw_data, guest=guest, supercell=(1, 1, 1),
+        target=None, grid_dims=(8, 8, 8), n_1b=60, n_2b=64,
+        distill_seed=20269101, cache_dir=str(cache_dir), model_name="medium",
+        dispersion=True, dispersion_xc="pbe", dtype="float32", only_1b=True,
+    )
+    assert hit_1b["cache_hit"] is True
+    assert hit_1b["distill_sha256"] == res_1b["distill_sha256"]
+
+    oracle_1b_v2 = _PureNumpyOracle(weight_val=2.0, forbid_dimers=True)
+    res_1b_v2 = distill_mlip_surrogate(
+        cif_path=str(cif_stub), fw_data=fw_data, guest=guest, supercell=(1, 1, 1),
+        target=oracle_1b_v2, grid_dims=(8, 8, 8), n_1b=60, n_2b=64,
+        distill_seed=20269101, cache_dir=str(cache_dir), model_name="medium",
+        dispersion=True, dispersion_xc="pbe", dtype="float32", only_1b=True,
+    )
+    assert res_1b_v2["cache_hit"] is False
+    assert res_1b_v2["summary"]["model_sha256"] != s1["model_sha256"]
+
+    # 3. only_1b=False uses a separate cache key and records honest 2B hold-out metrics
+    oracle_full = _PureNumpyOracle(weight_val=1.0, forbid_dimers=False)
+    res_full = distill_mlip_surrogate(
+        cif_path=str(cif_stub), fw_data=fw_data, guest=guest, supercell=(1, 1, 1),
+        target=oracle_full, grid_dims=(8, 8, 8), n_1b=60, n_2b=48,
+        distill_seed=20269101, cache_dir=str(cache_dir), model_name="medium",
+        dispersion=True, dispersion_xc="pbe", dtype="float32", only_1b=False,
+    )
+    sf = res_full["summary"]
+    assert res_full["distill_sha256"] != res_1b["distill_sha256"]
+    assert sf["only_1b"] is False
+    assert oracle_full.n_2b_seen >= 24
+    assert sf["n_2b_val"] >= 16 and sf["n_2b_train"] > 0
+    assert sf["r2_2b"] == sf["r2_2b_deployed_holdout"]
+    assert sf["mae_2b_kJ_mol"] == sf["mae_2b_deployed_holdout_kJ_mol"]
+    assert sf["r2_2b_train"] is not None and sf["mae_2b_train_kJ_mol"] is not None
+    assert sf["mae_2b_classical_holdout_kJ_mol"] is not None
+    assert sf["model_sha256"] == s1["model_sha256"]
+
+
+def test_only_1b_distill_end_to_end_cpu(tmp_path):
+    """Pure-CPU end-to-end test of distill_mlip_surrogate(..., only_1b=True) with real torch + ASE."""
+    pytest.importorskip("torch")
+    pytest.importorskip("ase")
+    from ase import Atoms
+
+    # Minimal cubic 2-atom framework for fast (<1 s) pure-CPU distillation
+    uc = Atoms("MgO", positions=[[0.0, 0.0, 0.0], [2.1, 2.1, 2.1]], cell=[10.0, 10.0, 10.0], pbc=True)
+    fw_data = {"uc": uc, "charges": np.array([1.2, -1.2], dtype=np.float64)}
+    cif_stub = tmp_path / "mini_mof.cif"
+    cif_stub.write_text("# synthetic cubic framework\n", encoding="utf-8")
+    guest = make_distilled_guest_spec(load_guest("ar"))
+
+    class _CpuMockTarget:
+        def __init__(self):
+            self.device = None
+            self.model_file_path = None
+            self.mace_model = SimpleNamespace(
+                state_dict=lambda: {"layer.weight": np.array([1.0, 2.0, 3.0], dtype=np.float32)}
+            )
+            self.n_calls = 0
+
+        def eval_batch(self, states, mace_chunk=None):
+            self.n_calls += len(states)
+            out = []
+            for st in states:
+                assert int(st["N"]) == 1, "only_1b=True must never evaluate 2B dimer states!"
+                r = np.array([st["cx"][0], st["cy"][0], st["cz"][0]], dtype=np.float64)
+                d = np.linalg.norm(((r / 10.0 + 0.5) % 1.0 - 0.5) * 10.0)
+                u_K = 40.0 * ((2.6 / max(d, 1.5)) ** 12 - (2.6 / max(d, 1.5)) ** 6)
+                out.append((float(u_K), False))
+            return out
+
+    oracle = _CpuMockTarget()
+    cache_dir = tmp_path / "distill_cache"
+    res = distill_mlip_surrogate(
+        cif_path=str(cif_stub),
+        fw_data=fw_data,
+        guest=guest,
+        supercell=(1, 1, 1),
+        target=oracle,
+        grid_dims=(8, 8, 8),
+        n_1b=48,
+        n_2b=64,
+        distill_seed=20269001,
+        cache_dir=str(cache_dir),
+        model_name="medium",
+        dispersion=True,
+        dispersion_xc="pbe",
+        dtype="float32",
+        only_1b=True,
+    )
+    s = res["summary"]
+    assert s["only_1b"] is True
+    assert s["version"] == "v1.2"
+    assert s["n_2b_evaluated"] == 0
+    assert s["n_2b_train"] == 0
+    assert s["n_2b_val"] == 0
+    assert s["t_mace2_s"] == 0.0
+    assert s["r2_2b"] is None and s["mae_2b_kJ_mol"] is None
+    assert s["model_sha256"] is not None and s["model_sha256"].startswith("state_dict:")
+    assert res["gg_lj_scale"] == 1.0
+    assert res["gg_q_scale"] == 1.0
+    assert res["gg_com_lut_K"].shape == (128,)
+    assert np.all(res["gg_com_lut_K"] == 0.0)
+    assert oracle.n_calls == s["n_1b_evaluated"]
+
+    # Cache hit works without loading target
+    hit = distill_mlip_surrogate(
+        cif_path=str(cif_stub),
+        fw_data=fw_data,
+        guest=guest,
+        supercell=(1, 1, 1),
+        target=None,
+        grid_dims=(8, 8, 8),
+        n_1b=48,
+        n_2b=64,
+        distill_seed=20269001,
+        cache_dir=str(cache_dir),
+        model_name="medium",
+        dispersion=True,
+        dispersion_xc="pbe",
+        dtype="float32",
+        only_1b=True,
+    )
+    assert hit["cache_hit"] is True
+    assert hit["summary"]["only_1b"] is True
+    assert hit["summary"]["model_sha256"] == s["model_sha256"]
+    assert np.all(hit["gg_com_lut_K"] == 0.0)
 
 
 def test_external_grid_and_gg_lut_parity_and_reject_restore():
