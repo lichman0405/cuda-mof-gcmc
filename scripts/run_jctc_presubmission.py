@@ -31,7 +31,7 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from guests import load_guest
-from mlip_distill import DISTILL_VERSION, load_distill_cache, make_distilled_guest_spec, resolve_model_sha256
+from mlip_distill import DISTILL_VERSION, load_distill_cache, make_distilled_guest_spec
 from multi_gpu import _configure_worker_env, _init_worker_target, run_distill_on_gpu, run_pressures_parallel, run_remc_parallel
 from nested_mc_engine import K_TO_KJMOL, _deserialize_single_box_state, _serialize_single_box_state, check_hard_core_state_cpp
 from qeq_charges import extract_framework_for_proposer
@@ -404,9 +404,6 @@ def cmd_prepare(args) -> None:
 
     cif_path = ROOT / CIF_REL
     cif_sha = _sha256_file(cif_path)
-    model_sha_local = resolve_model_sha256(MODEL_NAME)
-    if model_sha_local and model_sha_local != EXPECTED_MODEL_SHA256:
-        raise RuntimeError(f"Resolved model SHA-256 {model_sha_local} != expected {EXPECTED_MODEL_SHA256}")
 
     fw_data = extract_framework_for_proposer(str(cif_path), charge_mode="auto")
     guest = make_distilled_guest_spec(load_guest(GUEST_NAME))
@@ -442,16 +439,23 @@ def cmd_prepare(args) -> None:
     d_2b = load_distill_cache(res_2b["cache_npz_path"])
 
     # Strict invariance verification between 1B-only and 1B+2B
-    if d_1b["summary"].get("distill_version") != DISTILL_VERSION or d_2b["summary"].get("distill_version") != DISTILL_VERSION:
+    if d_1b["summary"].get("version") != DISTILL_VERSION or d_2b["summary"].get("version") != DISTILL_VERSION:
         raise RuntimeError("Unexpected distillation version in cache")
+    for tag, d_chk in [("1B_only", d_1b), ("1B_2B", d_2b)]:
+        m_sha = d_chk["summary"].get("model_sha256")
+        if m_sha != EXPECTED_MODEL_SHA256:
+            raise RuntimeError(f"{tag} cache model SHA-256 {m_sha} != expected {EXPECTED_MODEL_SHA256}")
+    for key_1b in ("n_1b_evaluated", "n_1b_kept", "q_env_eff", "mae_1b_kJ_mol", "r2_1b"):
+        if d_1b["summary"].get(key_1b) != d_2b["summary"].get(key_1b):
+            raise RuntimeError(f"1B invariance mismatch on '{key_1b}': {d_1b['summary'].get(key_1b)} vs {d_2b['summary'].get(key_1b)}")
     if not np.array_equal(d_1b["grids_u_lj"], d_2b["grids_u_lj"]):
         max_diff = float(np.max(np.abs(d_1b["grids_u_lj"] - d_2b["grids_u_lj"])))
         raise RuntimeError(f"1B grids differ between 1B-only and 1B+2B caches! max|diff|={max_diff}")
-    rmse_1b_a = float(d_1b["summary"]["fit_rmse_1b_K"])
-    rmse_1b_b = float(d_2b["summary"]["fit_rmse_1b_K"])
-    if rmse_1b_a != rmse_1b_b:
-        raise RuntimeError(f"1B fit RMSE differs: {rmse_1b_a} vs {rmse_1b_b}")
-    print(f"[Prepare] Verified bit-identical 1B grids (shape={d_1b['grids_u_lj'].shape}, RMSE_1B={rmse_1b_a:.2f} K)")
+    print(
+        f"[Prepare] Verified bit-identical 1B grids & coefficients "
+        f"(shape={d_1b['grids_u_lj'].shape}, n_1b={d_1b['summary']['n_1b_kept']}, "
+        f"MAE_1B={d_1b['summary']['mae_1b_kJ_mol']:.3f} kJ/mol, R2_1B={d_1b['summary']['r2_1b']:.5f})"
+    )
 
     # 2. Separate independent-seed 8-GPU Δε calibration for 1B-only and 1B+2B
     cal_1b = _calibrate_surrogate(True, res_1b["cache_npz_path"], fw_data, guest, calib_dir, args.worker_threads)
