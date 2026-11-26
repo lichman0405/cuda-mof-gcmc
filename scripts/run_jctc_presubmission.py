@@ -31,7 +31,7 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from guests import load_guest
-from mlip_distill import DISTILL_VERSION, load_distill_cache, make_distilled_guest_spec
+from mlip_distill import DISTILL_VERSION, derive_only_1b_cache_from_full, load_distill_cache, make_distilled_guest_spec
 from multi_gpu import _configure_worker_env, _init_worker_target, run_distill_on_gpu, run_pressures_parallel, run_remc_parallel
 from nested_mc_engine import K_TO_KJMOL, _deserialize_single_box_state, _serialize_single_box_state, check_hard_core_state_cpp
 from qeq_charges import extract_framework_for_proposer
@@ -427,13 +427,26 @@ def cmd_prepare(args) -> None:
         "worker_threads": int(args.worker_threads),
     }
 
-    t_d0 = time.perf_counter()
-    res_1b = run_distill_on_gpu(GPUS[0], {**base_distill_cfg, "only_1b": True})
-    t_1b_wall = float(time.perf_counter() - t_d0)
-
     t_d1 = time.perf_counter()
     res_2b = run_distill_on_gpu(GPUS[0], {**base_distill_cfg, "only_1b": False})
     t_2b_wall = float(time.perf_counter() - t_d1)
+
+    res_1b = derive_only_1b_cache_from_full(
+        full_cache_npz_path=res_2b["cache_npz_path"],
+        cache_dir=str(cache_dir),
+        cif_path=str(cif_path),
+        supercell=SUPERCELL,
+        guest=guest,
+        grid_dims=GRID_DIMS,
+        model_name=MODEL_NAME,
+        dispersion=DISPERSION,
+        dispersion_xc="pbe",
+        dtype=DTYPE,
+        n_1b=DISTILL_1B,
+        n_2b=DISTILL_2B,
+        distill_seed=DISTILL_SEED,
+    )
+    t_1b_wall = float(res_1b["summary"]["distill_wall_s"])
 
     d_1b = load_distill_cache(res_1b["cache_npz_path"])
     d_2b = load_distill_cache(res_2b["cache_npz_path"])
@@ -451,6 +464,8 @@ def cmd_prepare(args) -> None:
     if not np.array_equal(d_1b["grids_u_lj"], d_2b["grids_u_lj"]):
         max_diff = float(np.max(np.abs(d_1b["grids_u_lj"] - d_2b["grids_u_lj"])))
         raise RuntimeError(f"1B grids differ between 1B-only and 1B+2B caches! max|diff|={max_diff}")
+    if d_1b["gg_q_scale"] != 1.0 or d_1b["gg_lj_scale"] != 1.0 or not np.all(d_1b["gg_com_lut_K"] == 0.0):
+        raise RuntimeError("1B-only cache must have unit classical guest-guest scales and zero 2B LUT")
     print(
         f"[Prepare] Verified bit-identical 1B grids & coefficients "
         f"(shape={d_1b['grids_u_lj'].shape}, n_1b={d_1b['summary']['n_1b_kept']}, "
@@ -576,6 +591,7 @@ def cmd_prepare(args) -> None:
                 "calib_wall_s": cal_2b["wall_s"],
             },
             "shared_1b_grid_bit_exact": True,
+            "derived_1b_from_full": True,
         },
         "init_states": {
             "target_high_loading_mmol_g": INIT_HIGH_LOADING_MMOL_G,

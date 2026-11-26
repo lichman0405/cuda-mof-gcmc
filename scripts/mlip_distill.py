@@ -1480,3 +1480,87 @@ def distill_mlip_surrogate(
         "distill_wall_s": total_wall_s,
         "summary": meta,
     }
+
+
+def derive_only_1b_cache_from_full(
+    full_cache_npz_path: str,
+    cache_dir: str,
+    cif_path: str,
+    supercell,
+    guest,
+    grid_dims,
+    model_name: str,
+    dispersion: bool,
+    dispersion_xc: str,
+    dtype: str,
+    n_1b: int,
+    n_2b: int,
+    distill_seed: int,
+) -> dict:
+    """Construct bit-identical 1B-only cache from an existing 1B+2B cache by zeroing only 2B terms."""
+    full_cache = load_distill_cache(full_cache_npz_path)
+    full_meta = dict(full_cache["summary"])
+    m_sha = full_meta.get("model_sha256")
+    cache_key_1b = compute_distill_cache_key(
+        cif_path=cif_path,
+        supercell=supercell,
+        guest=guest,
+        grid_dims=grid_dims,
+        model_name=model_name,
+        model_sha256=m_sha,
+        dispersion=dispersion,
+        dispersion_xc=dispersion_xc,
+        dtype=dtype,
+        n_1b=n_1b,
+        n_2b=n_2b,
+        distill_seed=distill_seed,
+        only_1b=True,
+    )
+    cdir = Path(cache_dir)
+    cdir.mkdir(parents=True, exist_ok=True)
+    p_npz = cdir / f"distill_{cache_key_1b[:16]}.npz"
+    p_json = p_npz.with_suffix(".json")
+
+    grids_u_lj = np.ascontiguousarray(full_cache["grids_u_lj"], dtype=np.float32).copy()
+    gg_zero = np.zeros(128, dtype=np.float32)
+
+    meta_1b = dict(full_meta)
+    t_1b_total = float(full_meta.get("t_mace1_s", 0.0)) + float(full_meta.get("t_grid_render_s", 0.0))
+    meta_1b.update({
+        "version": DISTILL_VERSION,
+        "hard_core_rule": dict(UNIFIED_HARD_CORE_RULE),
+        "distill_sha256": cache_key_1b,
+        "derived_1b_from_sha256": full_meta.get("distill_sha256"),
+        "only_1b": True,
+        "n_2b_evaluated": 0,
+        "n_2b_train": 0,
+        "n_2b_val": 0,
+        "r2_2b": None,
+        "mae_2b_kJ_mol": None,
+        "r2_2b_deployed_holdout": None,
+        "mae_2b_deployed_holdout_kJ_mol": None,
+        "mae_2b_classical_holdout_kJ_mol": None,
+        "r2_2b_train": None,
+        "mae_2b_train_kJ_mol": None,
+        "mean_offset_classical_gg_kJ_mol": None,
+        "mean_offset_distilled_2b_kJ_mol": None,
+        "gg_q_scale": 1.0,
+        "gg_lj_scale": 1.0,
+        "t_mace2_s": 0.0,
+        "distill_wall_s": t_1b_total,
+    })
+
+    tmp_npz = p_npz.with_suffix(".tmp.npz")
+    with tmp_npz.open("wb") as f:
+        np.savez(f, grids_u_lj=grids_u_lj, gg_com_lut_K=gg_zero)
+    os.replace(tmp_npz, p_npz)
+
+    tmp_json = p_json.with_suffix(".tmp.json")
+    tmp_json.write_text(json.dumps(meta_1b, indent=2), encoding="utf-8")
+    os.replace(tmp_json, p_json)
+
+    print(
+        f"  [Auto-MLIP Derive 1B-only] Copied bit-identical 1B grids/fit from {full_meta.get('distill_sha256', '')[:16]} "
+        f"-> {p_npz} (q_scale=1.0, lj_scale=1.0, LUT=0)"
+    )
+    return load_distill_cache(str(p_npz))
