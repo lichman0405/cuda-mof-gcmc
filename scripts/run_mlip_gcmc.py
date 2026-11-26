@@ -104,6 +104,11 @@ def parse_args(argv=None):
     p.add_argument("--k-min", type=int, default=2, help="Minimum inner k_steps when --adapt-k on")
     p.add_argument("--k-max", type=int, default=24, help="Maximum inner k_steps when --adapt-k on")
     p.add_argument("--remc-swap-every", type=int, default=2, help="Swap interval in outer cycles when --parallel-mode remc")
+    p.add_argument("--remc-swap", choices=["on", "off"], default="on", help="Explicitly enable or disable replica-exchange swap attempts (off records 0 attempts)")
+    p.add_argument("--max-wall-s", type=float, default=None, help="Optional sampling wall-clock budget in seconds for lockstep REMC")
+    p.add_argument("--diag-checkpoint-every-s", type=float, default=300.0, help="Periodic diagnostic checkpoint interval in seconds for budget-capped REMC (0 disables)")
+    p.add_argument("--shift-map-json", default="", help="Optional JSON mapping pressures (bar) to frozen chem-pot shifts (kJ/mol)")
+    p.add_argument("--init-states-json", default="", help="Optional JSON mapping pressures (bar) to shared per-box initial states")
     p.add_argument("--init-mode", choices=["auto", "empty", "high_loading"], default="auto", help="Initial state prepared right before target equilibration (detached from shift calibration)")
     p.add_argument("--init-loading", type=float, default=8.0, help="Target loading (mmol/g) when --init-mode high_loading")
     p.add_argument("--seed", type=int, default=20261400, help="Base PRNG seed")
@@ -129,6 +134,22 @@ def compute_grid_dims(uc_atoms, grid_spacing: float = 0.11):
         n = ((n + 7) // 8) * 8
         dims.append(max(32, min(256, n)))
     return tuple(dims)
+
+
+def lookup_pressure_override(mapping: dict | None, p_bar: float, fallback=None):
+    """Find per-pressure entry from numeric or stringified pressure dictionary."""
+    if not mapping:
+        return fallback
+    p_val = float(p_bar)
+    if p_val in mapping:
+        return mapping[p_val]
+    for k, v in mapping.items():
+        try:
+            if math.isclose(float(k), p_val, rel_tol=1e-6, abs_tol=1e-9):
+                return v
+        except (TypeError, ValueError):
+            continue
+    return fallback
 
 
 def parse_cuda_device_id(device_str: str) -> int:
@@ -773,6 +794,7 @@ def prepare_pressure_proposer(
     p_ins_del: float = 0.50,
     distill_res: dict | None = None,
     skip_calibration: bool = False,
+    init_states_override: list | None = None,
 ) -> dict:
     """Create CudaGcmcProposer, run Stage-1/2/3 shift calibration, and prepare initial box states."""
     t_prop0 = time.perf_counter()
@@ -849,7 +871,7 @@ def prepare_pressure_proposer(
         elif shift_override is not None:
             de_final = float(shift_override)
             prop.set_chem_pot_shift(de_final)
-            if init_mode == "auto":
+            if init_mode == "auto" and init_states_override is None:
                 prop.equilibrate(eq_fast)
             fug_mult = math.exp(-de_final / (K_TO_KJMOL * T_K))
             shift_calib["override_kJ_mol"] = de_final
@@ -954,7 +976,47 @@ def prepare_pressure_proposer(
         shift_calib_wall_s = float(time.perf_counter() - t_calib0)
 
         # Explicitly prepare production initial state AFTER shift calibration (without classical re-equilibration on empty/high_loading)
-        if init_mode == "empty":
+        if init_states_override is not None:
+            deser_states = [
+                {
+                    "N": int(s["N"]),
+                    "cx": np.ascontiguousarray(s["cx"], dtype=np.float64),
+                    "cy": np.ascontiguousarray(s["cy"], dtype=np.float64),
+                    "cz": np.ascontiguousarray(s["cz"], dtype=np.float64),
+                    "qw": np.ascontiguousarray(s["qw"], dtype=np.float64),
+                    "qx": np.ascontiguousarray(s["qx"], dtype=np.float64),
+                    "qy": np.ascontiguousarray(s["qy"], dtype=np.float64),
+                    "qz": np.ascontiguousarray(s["qz"], dtype=np.float64),
+                }
+                for s in init_states_override
+            ]
+            prop.set_accepted_quat(deser_states)
+            if target is not None:
+                tgt_evals = target.eval_batch(deser_states) if hasattr(target, "eval_batch") else [target(st) for st in deser_states]
+                for bi, (ut_v, ov_v) in enumerate(tgt_evals):
+                    if ov_v or not math.isfinite(float(ut_v)):
+                        raise RuntimeError(f"Injected init state in box {bi} failed target check (ov={ov_v}, u={ut_v})")
+                u_tgt_init = [float(ut_v) for ut_v, _ in tgt_evals]
+            else:
+                u_tgt_init = [0.0] * len(deser_states)
+            oms_occ_init = (
+                [
+                    count_oms_occupied(
+                        deser_states[bi], oms_metal_pos, oms_cell_rows,
+                        guest_local_pos=guest_local_pos, inv_cell_rows=np.linalg.inv(oms_cell_rows),
+                    )
+                    for bi in range(len(deser_states))
+                ]
+                if (oms_metal_pos is not None and len(oms_metal_pos) > 0 and oms_cell_rows is not None)
+                else None
+            )
+            init_state_summary = {
+                "init_mode": "override",
+                "init_N_per_box": [int(s["N"]) for s in deser_states],
+                "init_U_tgt_K": u_tgt_init,
+                "init_oms_occ_per_box": oms_occ_init,
+            }
+        elif init_mode == "empty":
             empty_states = [
                 {
                     "N": 0, "cx": np.zeros(0), "cy": np.zeros(0), "cz": np.zeros(0),
@@ -1327,6 +1389,16 @@ def main():
         f"GPUs={gpu_ids if gpu_ids else [device_id]} | ParallelMode={eff_mode} | ResumeMode={resume_mode}"
     )
 
+    remc_enable_swaps = (str(args.remc_swap).strip().lower() == "on")
+    shift_override_map = None
+    if getattr(args, "shift_map_json", ""):
+        raw_smap = json.loads(Path(args.shift_map_json).read_text(encoding="utf-8"))
+        shift_override_map = raw_smap.get("shifts_kJ_mol", raw_smap)
+    init_states_by_pressure = None
+    if getattr(args, "init_states_json", ""):
+        raw_imap = json.loads(Path(args.init_states_json).read_text(encoding="utf-8"))
+        init_states_by_pressure = raw_imap.get("by_pressure", raw_imap)
+
     payload = {
         "cif": str(args.cif),
         "supercell": list(args.supercell),
@@ -1344,7 +1416,10 @@ def main():
         "k_min": int(args.k_min),
         "k_max": int(args.k_max),
         "remc_swap_every": int(args.remc_swap_every),
-        "init_mode": args.init_mode,
+        "remc_enable_swaps": bool(remc_enable_swaps),
+        "max_wall_s": float(args.max_wall_s) if args.max_wall_s is not None else None,
+        "diag_checkpoint_every_s": float(args.diag_checkpoint_every_s),
+        "init_mode": "override" if init_states_by_pressure is not None else args.init_mode,
         "model": args.model,
         "dtype": args.dtype,
         "dispersion": use_disp,
@@ -1478,13 +1553,18 @@ def main():
                 "shift_mode": args.shift_mode,
                 "pilot_cycles": int(args.pilot_cycles),
                 "shift_override": args.shift_override,
+                "shift_override_map": shift_override_map,
                 "adapt_shift_frac": adapt_shift_frac,
                 "adapt_k_frac": adapt_k_frac,
                 "k_min": int(args.k_min),
                 "k_max": int(args.k_max),
                 "remc_swap_every": int(args.remc_swap_every),
+                "remc_enable_swaps": bool(remc_enable_swaps),
+                "max_wall_s": float(args.max_wall_s) if args.max_wall_s is not None else None,
+                "diag_checkpoint_every_s": float(args.diag_checkpoint_every_s),
                 "init_mode": args.init_mode,
                 "init_loading": float(args.init_loading),
+                "init_states_by_pressure": init_states_by_pressure,
                 "checkpoint_dir": args.checkpoint_dir,
                 "checkpoint_every": int(args.checkpoint_every),
                 "resume_mode": resume_mode,
@@ -1500,7 +1580,10 @@ def main():
 
             if eff_mode == "remc":
                 if len(pending) >= 2:
-                    run_remc_parallel(pending, gpu_ids, run_cfg, on_point_done=_upsert_point)
+                    remc_pts = run_remc_parallel(pending, gpu_ids, run_cfg, on_point_done=_upsert_point)
+                    if remc_pts and isinstance(remc_pts[0], dict) and "remc_run_summary" in remc_pts[0]:
+                        payload["remc_run_summary"] = remc_pts[0]["remc_run_summary"]
+                        save_outputs(out_json, out_csv, payload)
                 else:
                     run_pressures_parallel(pending, gpu_ids, run_cfg, on_point_done=_upsert_point)
             elif eff_mode == "pressure":
@@ -1593,7 +1676,7 @@ def main():
                             shift_mode=args.shift_mode,
                             target=None if args.grid_only else target,
                             pilot_cycles=args.pilot_cycles,
-                            shift_override=args.shift_override,
+                            shift_override=lookup_pressure_override(shift_override_map, p_bar, args.shift_override),
                             verify_consistency=(not consistency_checked and target is not None),
                             device_id=device_id,
                             init_mode=args.init_mode,
@@ -1602,6 +1685,7 @@ def main():
                             cbmc_k=int(args.cbmc_k),
                             p_ins_del=float(args.p_ins_del),
                             distill_res=distill_res,
+                            init_states_override=lookup_pressure_override(init_states_by_pressure, p_bar, None),
                         )
                         consistency_checked = True
                         preps.append(prep)
@@ -1672,7 +1756,7 @@ def main():
                         shift_mode=args.shift_mode,
                         target=None if args.grid_only else target,
                         pilot_cycles=args.pilot_cycles,
-                        shift_override=args.shift_override,
+                        shift_override=lookup_pressure_override(shift_override_map, p_bar, args.shift_override),
                         verify_consistency=(not consistency_checked and target is not None),
                         device_id=device_id,
                         init_mode=args.init_mode,
