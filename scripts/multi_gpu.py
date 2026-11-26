@@ -1093,10 +1093,11 @@ def run_remc_parallel(
     cmd_qs = [ctx.Queue() for _ in range(n_workers)]
     result_q = ctx.Queue()
 
+    worker_run_cfg = {k: v for k, v in run_cfg.items() if k != "checkpoint_callback"}
     procs = [
         ctx.Process(
             target=_remc_worker_main,
-            args=(rank, gid, assigned, parent_cvd, run_cfg, cmd_qs[rank], result_q),
+            args=(rank, gid, assigned, parent_cvd, worker_run_cfg, cmd_qs[rank], result_q),
         )
         for rank, gid, assigned in worker_assignments
     ]
