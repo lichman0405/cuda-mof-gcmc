@@ -10,6 +10,16 @@ import sys
 from typing import Any, Dict, List, Optional
 
 
+UNIFIED_HARD_CORE_RULE = {
+    "name": "unified_continuous_mic_v1",
+    "fw_h_A": 1.20,
+    "fw_heavy_A": 1.48,
+    "gg_A": 0.50,
+    "virtual_sites_excluded": True,
+    "continuous_mic": True,
+}
+
+
 def sha256_file(path: Optional[str]) -> Optional[str]:
     """Return lowercase hex SHA-256 of a file, or None if missing."""
     if not path:
@@ -161,6 +171,7 @@ def collect_run_metadata(
         "p_ins_del": float(getattr(args, "p_ins_del", 0.60)),
         "grid_only": bool(getattr(args, "grid_only", False)),
         "distill_sha256": None if prop_info is None else prop_info.get("distill_sha256"),
+        "hard_core_rule": dict(UNIFIED_HARD_CORE_RULE) if str(args.proposer) == "auto_mlip" else None,
         "eq_cycles": int(args.eq_cycles),
         "prod_cycles": int(args.prod_cycles),
         "pilot_cycles": int(args.pilot_cycles),
@@ -204,6 +215,7 @@ def validate_resume_metadata(old_meta: dict, new_meta: dict, allow_extend_prod: 
         "p_ins_del",
         "grid_only",
         "distill_sha256",
+        "hard_core_rule",
         "init_mode",
         "boxes",
         "max_mol",
@@ -211,6 +223,9 @@ def validate_resume_metadata(old_meta: dict, new_meta: dict, allow_extend_prod: 
     for k in exact_keys:
         if k in old_meta and k in new_meta and old_meta[k] != new_meta[k]:
             mismatches.append(f"{k}: {old_meta[k]} != {new_meta[k]}")
+
+    if new_meta.get("proposer") == "auto_mlip" and "hard_core_rule" not in old_meta:
+        mismatches.append("hard_core_rule: missing in legacy checkpoint (incompatible with unified continuous HC)")
 
     if old_meta.get("model_sha256") and new_meta.get("model_sha256"):
         if old_meta["model_sha256"] != new_meta["model_sha256"]:

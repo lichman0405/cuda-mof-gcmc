@@ -3,6 +3,7 @@
 #include "cif_loader.hpp"
 #include "forcefield.hpp"
 #include "grid3d.hpp"
+#include "hard_core.hpp"
 #include "unified_gcmc.hpp"
 
 #include <algorithm>
@@ -44,6 +45,7 @@ struct RigidGuestDef {
     double sigma_A[PROP_MAX_SITES];
     double w_pol[PROP_MAX_SITES];
     int lj_type[PROP_MAX_SITES];
+    int site_Z[PROP_MAX_SITES];
     double lj_eps_K[PROP_MAX_LJ];
     double lj_sigma_A[PROP_MAX_LJ];
     double alpha_par;
@@ -212,30 +214,54 @@ __device__ inline void rot_quat_small(
 
 __device__ inline bool eval_rigid_guest_framework_grid(
     const ProposerGridView& g, const Cell& cell,
-    const RigidGuestDef& guest, int pol_mode, double ke_k,
+    const RigidGuestDef& guest, const HardCoreConfig& hc,
+    const double* fw_unit_frac, int n_fw_unit,
+    int pol_mode, double ke_k,
     double cx, double cy, double cz,
     double qw, double qx, double qy, double qz,
     double& u_lj_out, double& u_elec_out, double& u_pol_out,
     double& mux_out, double& muy_out, double& muz_out) {
 
+    if (hc.enable_continuous_hc) {
+        if (check_mol_fw_hard_core(
+                cell, fw_unit_frac, n_fw_unit,
+                guest.n_sites, guest.lx, guest.ly, guest.lz, guest.site_Z,
+                guest.is_isotropic, cx, cy, cz, qw, qx, qy, qz, hc)) {
+            u_lj_out = 0.0;
+            u_elec_out = 0.0;
+            u_pol_out = 0.0;
+            mux_out = muy_out = muz_out = 0.0;
+            return true;
+        }
+    }
+
     double sa[PROP_MAX_SITES], sb[PROP_MAX_SITES], sc[PROP_MAX_SITES];
     double u_lj = 0.0;
 
-    // Pass 1: VDW overlap check across all sites with LJ grids
+    // Pass 1: VDW overlap check (legacy ff_mode=0/1) or bounded continuous interpolation (hc enabled)
     for (int i = 0; i < guest.n_sites; ++i) {
-        double dx, dy, dz;
-        quat_rotate(qw, qx, qy, qz, guest.lx[i], guest.ly[i], guest.lz[i], dx, dy, dz);
+        double dx = guest.lx[i], dy = guest.ly[i], dz = guest.lz[i];
+        if (!guest.is_isotropic) {
+            quat_rotate(qw, qx, qy, qz, guest.lx[i], guest.ly[i], guest.lz[i], dx, dy, dz);
+        }
         cell.cart_to_unit_frac(cx + dx, cy + dy, cz + dz, sa[i], sb[i], sc[i]);
 
         int lg = guest.lj_type[i];
         if (lg >= 0 && lg < g.n_lj && g.U_lj[lg] != nullptr) {
-            double ulj = tricubic_periodic(g.U_lj[lg], g.nx, g.ny, g.nz, sa[i], sb[i], sc[i], true, 5.0e4f);
-            if (ulj > 1.0e5) {
+            double ulj = hc.enable_continuous_hc
+                ? tricubic_periodic(g.U_lj[lg], g.nx, g.ny, g.nz, sa[i], sb[i], sc[i], false, 5.0e4f)
+                : tricubic_periodic(g.U_lj[lg], g.nx, g.ny, g.nz, sa[i], sb[i], sc[i], true, 5.0e4f);
+            if (!hc.enable_continuous_hc && ulj > 1.0e5) {
                 u_lj_out = 1.0e6;
                 u_elec_out = 0.0;
                 u_pol_out = 0.0;
                 mux_out = muy_out = muz_out = 0.0;
                 return true;
+            }
+            if (hc.enable_continuous_hc) {
+                if (!isfinite(ulj)) ulj = 8.0e4;
+                else if (ulj > 1.0e5) ulj = 1.0e5;
+                else if (ulj < -2.0e5) ulj = -2.0e5;
             }
             u_lj += ulj;
         }
@@ -291,7 +317,7 @@ __device__ inline bool eval_rigid_guest_framework_grid(
 }
 
 __device__ inline double pair_rigid_guest(
-    const Cell& cell, const RigidGuestDef& g,
+    const Cell& cell, const RigidGuestDef& g, const HardCoreConfig& hc,
     double c1x, double c1y, double c1z, double q1w, double q1x, double q1y, double q1z,
     double m1x, double m1y, double m1z,
     double c2x, double c2y, double c2z, double q2w, double q2x, double q2y, double q2z,
@@ -302,20 +328,33 @@ __device__ inline double pair_rigid_guest(
 
     double dmx, dmy, dmz, r2c;
     cell.mic_delta_super(c2x - c1x, c2y - c1y, c2z - c1z, dmx, dmy, dmz, r2c);
-    double skip = r_cut + 2.0 * g.max_radius_A;
-    if (r2c > skip * skip) return 0.0;
+    double rc_hc = (hc.enable_continuous_hc && hc.r_gg > r_cut) ? hc.r_gg : r_cut;
+    double skip = rc_hc + 2.0 * g.max_radius_A;
+    if (cell.min_perp_width_super > 2.1 * skip && r2c > skip * skip) return 0.0;
 
-    double a_off[PROP_MAX_SITES][3];
-    double b_off[PROP_MAX_SITES][3];
+    double a_ox[PROP_MAX_SITES], a_oy[PROP_MAX_SITES], a_oz[PROP_MAX_SITES];
+    double b_ox[PROP_MAX_SITES], b_oy[PROP_MAX_SITES], b_oz[PROP_MAX_SITES];
     for (int i = 0; i < g.n_sites; ++i) {
         if (g.is_isotropic) {
-            a_off[i][0] = g.lx[i]; a_off[i][1] = g.ly[i]; a_off[i][2] = g.lz[i];
-            b_off[i][0] = g.lx[i]; b_off[i][1] = g.ly[i]; b_off[i][2] = g.lz[i];
+            a_ox[i] = g.lx[i]; a_oy[i] = g.ly[i]; a_oz[i] = g.lz[i];
+            b_ox[i] = g.lx[i]; b_oy[i] = g.ly[i]; b_oz[i] = g.lz[i];
         } else {
-            quat_rotate(q1w, q1x, q1y, q1z, g.lx[i], g.ly[i], g.lz[i], a_off[i][0], a_off[i][1], a_off[i][2]);
-            quat_rotate(q2w, q2x, q2y, q2z, g.lx[i], g.ly[i], g.lz[i], b_off[i][0], b_off[i][1], b_off[i][2]);
+            quat_rotate(q1w, q1x, q1y, q1z, g.lx[i], g.ly[i], g.lz[i], a_ox[i], a_oy[i], a_oz[i]);
+            quat_rotate(q2w, q2x, q2y, q2z, g.lx[i], g.ly[i], g.lz[i], b_ox[i], b_oy[i], b_oz[i]);
         }
     }
+
+    if (hc.enable_continuous_hc) {
+        if (check_pair_gg_hard_core(
+                cell, g.n_sites,
+                a_ox, a_oy, a_oz,
+                b_ox, b_oy, b_oz,
+                g.site_Z, c1x, c1y, c1z, c2x, c2y, c2z, hc)) {
+            ovl = 1;
+            return 0.0;
+        }
+    }
+    if (r2c > (r_cut + 2.0 * g.max_radius_A) * (r_cut + 2.0 * g.max_radius_A)) return 0.0;
 
     double e = 0.0;
     for (int a = 0; a < g.n_sites; ++a) {
@@ -324,17 +363,18 @@ __device__ inline double pair_rigid_guest(
             bool has_q  = (g.q[a] != 0.0 && g.q[b] != 0.0);
             if (!has_lj && !has_q) continue;
 
-            double dx = dmx + b_off[b][0] - a_off[a][0];
-            double dy = dmy + b_off[b][1] - a_off[a][1];
-            double dz = dmz + b_off[b][2] - a_off[a][2];
+            double dx = dmx + b_ox[b] - a_ox[a];
+            double dy = dmy + b_oy[b] - a_oy[a];
+            double dz = dmz + b_oz[b] - a_oz[a];
             double r2 = dx * dx + dy * dy + dz * dz;
             if (r2 >= r_cut2) continue;
-            if (r2 < 0.25) { ovl = 1; return 0.0; }
+            if (!hc.enable_continuous_hc && r2 < 0.25) { ovl = 1; return 0.0; }
+            double r2_safe = (r2 < 1.0e-4) ? 1.0e-4 : r2;
 
             if (has_lj) {
                 double sig = 0.5 * (g.sigma_A[a] + g.sigma_A[b]);
                 double eps = sqrt(g.eps_K[a] * g.eps_K[b]);
-                double sr2 = (sig * sig) / r2;
+                double sr2 = (sig * sig) / r2_safe;
                 double sr6 = sr2 * sr2 * sr2;
                 double ulj = 4.0 * eps * (sr6 * sr6 - sr6);
                 if (shifted_lj) {
@@ -345,7 +385,7 @@ __device__ inline double pair_rigid_guest(
                 e += g.gg_lj_scale * ulj;
             }
             if (has_q) {
-                double r = sqrt(r2);
+                double r = sqrt(r2_safe);
                 double uq = KE_K * g.q[a] * g.q[b] *
                             (erfc(dsf_alpha * r) / r - dsf_shift + dsf_deriv * (r - r_cut));
                 e += (g.gg_q_scale * g.gg_q_scale) * uq;
@@ -687,6 +727,7 @@ int build_proposer_uff_grids_gpu(
 struct ProposerStateDev {
     int* d_acc_N = nullptr;
     double* d_acc_U = nullptr;
+    int* d_acc_ovl = nullptr;
     double* d_acc_cx = nullptr;
     double* d_acc_cy = nullptr;
     double* d_acc_cz = nullptr;
@@ -699,6 +740,7 @@ struct ProposerStateDev {
     double* d_tri_U = nullptr;
     double* d_tri_dU = nullptr;
     int* d_tri_acc = nullptr;
+    int* d_tri_ovl = nullptr;
     double* d_tri_cx = nullptr;
     double* d_tri_cy = nullptr;
     double* d_tri_cz = nullptr;
@@ -709,6 +751,9 @@ struct ProposerStateDev {
 
     int* d_commit_mask = nullptr;
     uint64_t* d_rng = nullptr;
+
+    double* d_fw_unit_frac = nullptr;
+    int n_fw_unit = 0;
 
     // Pre-allocated single-state evaluation buffers (avoids dynamic cudaMalloc/Free per call)
     double* d_eval_cx = nullptr;
@@ -734,7 +779,7 @@ struct PropMove {
 };
 
 __global__ void propose_burst_kernel(
-    Cell cell, ProposerGridView grid, RigidGuestDef guest,
+    Cell cell, ProposerGridView grid, RigidGuestDef guest, HardCoreConfig hc,
     double T_K, double beta_f_V, double r_cut_gg, double dsf_alpha,
     int ff_mode, int pol_mode, int max_mol,
     int k_steps, int commit_to_acc,
@@ -767,7 +812,8 @@ __global__ void propose_burst_kernel(
         s_cx[i] = cx; s_cy[i] = cy; s_cz[i] = cz;
         s_qw[i] = qw; s_qx[i] = qx; s_qy[i] = qy; s_qz[i] = qz;
         double ulj = 0.0, uel = 0.0, up = 0.0, mx = 0.0, my = 0.0, mz = 0.0;
-        eval_rigid_guest_framework_grid(grid, cell, guest, pol_mode, KE_K, cx, cy, cz, qw, qx, qy, qz,
+        eval_rigid_guest_framework_grid(grid, cell, guest, hc, st.d_fw_unit_frac, st.n_fw_unit,
+                                        pol_mode, KE_K, cx, cy, cz, qw, qx, qy, qz,
                                         ulj, uel, up, mx, my, mz);
         s_ufw[i] = ulj + uel + up;
         s_mux[i] = mx; s_muy[i] = my; s_muz[i] = mz;
@@ -848,7 +894,7 @@ __global__ void propose_burst_kernel(
                     }
                     double ulj = 0.0, uel = 0.0, up = 0.0;
                     bool ovl = eval_rigid_guest_framework_grid(
-                        grid, cell, guest, pol_mode, KE_K,
+                        grid, cell, guest, hc, st.d_fw_unit_frac, st.n_fw_unit, pol_mode, KE_K,
                         prop.cx, prop.cy, prop.cz, prop.qw, prop.qx, prop.qy, prop.qz,
                         ulj, uel, up, prop.mux, prop.muy, prop.muz);
                     prop.u_fw_new = ulj + uel + up;
@@ -895,7 +941,7 @@ __global__ void propose_burst_kernel(
                 }
                 double ulj = 0.0, uel = 0.0, up = 0.0;
                 bool ov_fw = eval_rigid_guest_framework_grid(
-                    grid, cell, guest, pol_mode, KE_K,
+                    grid, cell, guest, hc, st.d_fw_unit_frac, st.n_fw_unit, pol_mode, KE_K,
                     tcx, tcy, tcz, tqw, tqx, tqy, tqz,
                     ulj, uel, up, tmux, tmuy, tmuz);
                 if (!ov_fw) {
@@ -905,7 +951,7 @@ __global__ void propose_burst_kernel(
                     for (int j = 0; j < N_now; ++j) {
                         if (prop.mv == 3 && j == idx_del) continue;
                         dugg += pair_rigid_guest(
-                            cell, guest,
+                            cell, guest, hc,
                             tcx, tcy, tcz, tqw, tqx, tqy, tqz, tmux, tmuy, tmuz,
                             s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
                             shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, ov_gg);
@@ -935,13 +981,13 @@ __global__ void propose_burst_kernel(
                 if (j == tgt) continue;
                 int o1 = 0, o2 = 0;
                 double enew = pair_rigid_guest(
-                    cell, guest,
+                    cell, guest, hc,
                     prop.cx, prop.cy, prop.cz, prop.qw, prop.qx, prop.qy, prop.qz, prop.mux, prop.muy, prop.muz,
                     s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
                     shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, o1);
                 if (o1) { loc_ovl = 1; break; }
                 double eold = pair_rigid_guest(
-                    cell, guest,
+                    cell, guest, hc,
                     ox, oy, oz, oqw, oqx, oqy, oqz, omx, omy, omz,
                     s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
                     shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, o2);
@@ -1063,14 +1109,18 @@ __global__ void propose_burst_kernel(
         __syncthreads();
     }
 
-    // Exact full recomputation at end of burst (guarantees zero drift in dU_ref)
+    // Exact full recomputation at end of burst (guarantees zero drift in dU_ref and audits hard-core invariance)
     int final_N = prop.cur_N;
     double loc_re = 0.0;
+    int loc_re_ov = (final_N < 0 || final_N > max_mol) ? 1 : 0;
     for (int i = tid; i < final_N; i += PROP_THREADS) {
         double ulj = 0.0, uel = 0.0, up = 0.0, mx = 0.0, my = 0.0, mz = 0.0;
-        eval_rigid_guest_framework_grid(grid, cell, guest, pol_mode, KE_K,
-                                        s_cx[i], s_cy[i], s_cz[i], s_qw[i], s_qx[i], s_qy[i], s_qz[i],
-                                        ulj, uel, up, mx, my, mz);
+        if (eval_rigid_guest_framework_grid(grid, cell, guest, hc, st.d_fw_unit_frac, st.n_fw_unit,
+                                            pol_mode, KE_K,
+                                            s_cx[i], s_cy[i], s_cz[i], s_qw[i], s_qx[i], s_qy[i], s_qz[i],
+                                            ulj, uel, up, mx, my, mz)) {
+            loc_re_ov = 1;
+        }
         loc_re += (ulj + uel + up);
         s_mux[i] = mx; s_muy[i] = my; s_muz[i] = mz;
     }
@@ -1079,27 +1129,37 @@ __global__ void propose_burst_kernel(
         for (int j = i + 1; j < final_N; ++j) {
             int ov = 0;
             loc_re += pair_rigid_guest(
-                cell, guest,
+                cell, guest, hc,
                 s_cx[i], s_cy[i], s_cz[i], s_qw[i], s_qx[i], s_qy[i], s_qz[i], s_mux[i], s_muy[i], s_muz[i],
                 s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
                 shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, ov);
+            if (ov) loc_re_ov = 1;
         }
     }
     int lane = tid & 31, wid = tid >> 5;
-    for (int s = 16; s > 0; s >>= 1) loc_re += __shfl_down_sync(0xFFFFFFFFU, loc_re, s);
-    if (lane == 0) warp_u[wid] = loc_re;
+    for (int s = 16; s > 0; s >>= 1) {
+        loc_re += __shfl_down_sync(0xFFFFFFFFU, loc_re, s);
+        loc_re_ov |= __shfl_down_sync(0xFFFFFFFFU, loc_re_ov, s);
+    }
+    if (lane == 0) {
+        warp_u[wid] = loc_re;
+        warp_ovl[wid] = loc_re_ov;
+    }
     __syncthreads();
     if (tid == 0) {
         s_u_recomp = warp_u[0] + warp_u[1] + warp_u[2] + warp_u[3];
+        int s_ov_recomp = warp_ovl[0] | warp_ovl[1] | warp_ovl[2] | warp_ovl[3];
         if (k_steps > 0) st.d_rng[b] = rng;
         if (commit_to_acc) {
             st.d_acc_N[b] = final_N;
             st.d_acc_U[b] = s_u_recomp;
+            if (st.d_acc_ovl) st.d_acc_ovl[b] = s_ov_recomp;
         } else {
             st.d_tri_N[b] = final_N;
             st.d_tri_U[b] = s_u_recomp;
             st.d_tri_dU[b] = s_u_recomp - U_init;
             st.d_tri_acc[b] = inner_acc;
+            if (st.d_tri_ovl) st.d_tri_ovl[b] = s_ov_recomp;
         }
     }
     __syncthreads();
@@ -1125,6 +1185,7 @@ __global__ void commit_mask_kernel(int n_boxes, int max_mol, const int* mask, Pr
     if (tid == 0) {
         st.d_acc_N[b] = N;
         st.d_acc_U[b] = st.d_tri_U[b];
+        if (st.d_acc_ovl && st.d_tri_ovl) st.d_acc_ovl[b] = st.d_tri_ovl[b];
     }
     int off = b * max_mol;
     for (int i = tid; i < N; i += PROP_THREADS) {
@@ -1139,8 +1200,9 @@ __global__ void commit_mask_kernel(int n_boxes, int max_mol, const int* mask, Pr
 }
 
 __global__ void eval_single_state_kernel(
-    Cell cell, ProposerGridView grid, RigidGuestDef guest,
-    double r_cut_gg, double dsf_alpha, int ff_mode, int pol_mode, int N,
+    Cell cell, ProposerGridView grid, RigidGuestDef guest, HardCoreConfig hc,
+    const double* fw_unit_frac, int n_fw_unit,
+    double r_cut_gg, double dsf_alpha, int ff_mode, int pol_mode, int max_mol, int N,
     const double* cx, const double* cy, const double* cz,
     const double* qw, const double* qx, const double* qy, const double* qz,
     double* out_U, int* out_ovl) {
@@ -1152,6 +1214,14 @@ __global__ void eval_single_state_kernel(
     __shared__ double warp_u[4];
     __shared__ int warp_ovl[4];
 
+    if (hc.enable_continuous_hc && (N < 0 || N > max_mol)) {
+        if (tid == 0) {
+            *out_U = 1.0e9;
+            *out_ovl = 1;
+        }
+        return;
+    }
+
     double loc_u = 0.0;
     int loc_ov = 0;
     for (int i = tid; i < N; i += PROP_THREADS) {
@@ -1161,7 +1231,7 @@ __global__ void eval_single_state_kernel(
         s_qw[i] = rw; s_qx[i] = rx; s_qy[i] = ry; s_qz[i] = rz;
         double ulj = 0.0, uel = 0.0, up = 0.0, mx = 0.0, my = 0.0, mz = 0.0;
         bool ov = eval_rigid_guest_framework_grid(
-            grid, cell, guest, pol_mode, KE_K,
+            grid, cell, guest, hc, fw_unit_frac, n_fw_unit, pol_mode, KE_K,
             x, y, z, rw, rx, ry, rz, ulj, uel, up, mx, my, mz);
         if (ov) loc_ov = 1;
         loc_u += (ulj + uel + up);
@@ -1180,7 +1250,7 @@ __global__ void eval_single_state_kernel(
         for (int j = i + 1; j < N; ++j) {
             int ov = 0;
             double e = pair_rigid_guest(
-                cell, guest,
+                cell, guest, hc,
                 s_cx[i], s_cy[i], s_cz[i], s_qw[i], s_qx[i], s_qy[i], s_qz[i], s_mux[i], s_muy[i], s_muz[i],
                 s_cx[j], s_cy[j], s_cz[j], s_qw[j], s_qx[j], s_qy[j], s_qz[j], s_mux[j], s_muy[j], s_muz[j],
                 shifted_lj, pol_mode, rc, rc2, dsf_alpha, dsf_shift, dsf_deriv, ov);
@@ -1207,6 +1277,7 @@ struct ProposerContext {
     bool owns_unified_grid = false;
     ProposerGridView grid{};
     RigidGuestDef guest{};
+    HardCoreConfig hc{};
     SpeciesDef sp{};
     std::vector<double> unit_frac;
     std::vector<int> unit_Z;
@@ -1228,6 +1299,62 @@ struct ProposerContext {
     ProposerStateDev dev{};
 };
 
+static int host_check_state_hard_core(
+    const Cell& cell,
+    const double* fw_unit_frac,
+    int n_fw_unit,
+    int n_sites,
+    const double* lx, const double* ly, const double* lz,
+    const int* site_Z,
+    int is_isotropic,
+    int N, int max_mol,
+    const double* cx, const double* cy, const double* cz,
+    const double* qw, const double* qx, const double* qy, const double* qz,
+    const HardCoreConfig& hc) {
+
+    if (N < 0 || N > max_mol) return 1;
+    if (N == 0) return 0;
+    if (!cx || !cy || !cz || !qw || !qx || !qy || !qz) return -1;
+
+    for (int i = 0; i < N; ++i) {
+        if (check_mol_fw_hard_core(
+                cell, fw_unit_frac, n_fw_unit,
+                n_sites, lx, ly, lz, site_Z, is_isotropic,
+                cx[i], cy[i], cz[i], qw[i], qx[i], qy[i], qz[i], hc)) {
+            return 1;
+        }
+    }
+
+    double a_ox[PROP_MAX_SITES], a_oy[PROP_MAX_SITES], a_oz[PROP_MAX_SITES];
+    double b_ox[PROP_MAX_SITES], b_oy[PROP_MAX_SITES], b_oz[PROP_MAX_SITES];
+    for (int i = 0; i < N; ++i) {
+        for (int a = 0; a < n_sites; ++a) {
+            if (is_isotropic) {
+                a_ox[a] = lx[a]; a_oy[a] = ly[a]; a_oz[a] = lz[a];
+            } else {
+                hc_quat_rotate(qw[i], qx[i], qy[i], qz[i], lx[a], ly[a], lz[a], a_ox[a], a_oy[a], a_oz[a]);
+            }
+        }
+        for (int j = i + 1; j < N; ++j) {
+            for (int b = 0; b < n_sites; ++b) {
+                if (is_isotropic) {
+                    b_ox[b] = lx[b]; b_oy[b] = ly[b]; b_oz[b] = lz[b];
+                } else {
+                    hc_quat_rotate(qw[j], qx[j], qy[j], qz[j], lx[b], ly[b], lz[b], b_ox[b], b_oy[b], b_oz[b]);
+                }
+            }
+            if (check_pair_gg_hard_core(
+                    cell, n_sites,
+                    a_ox, a_oy, a_oz,
+                    b_ox, b_oy, b_oz,
+                    site_Z, cx[i], cy[i], cz[i], cx[j], cy[j], cz[j], hc)) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 RigidGuestDef make_default_co2_guest(int ff_mode) {
     SpeciesDef sp = (ff_mode == 1) ? make_species_co2_epm2() : make_species_co2();
     RigidGuestDef g{};
@@ -1239,6 +1366,9 @@ RigidGuestDef make_default_co2_guest(int ff_mode) {
     g.lx[0] = 0.0; g.ly[0] = 0.0; g.lz[0] = 0.0;
     g.lx[1] = sp.bond_A; g.ly[1] = 0.0; g.lz[1] = 0.0;
     g.lx[2] = -sp.bond_A; g.ly[2] = 0.0; g.lz[2] = 0.0;
+    g.site_Z[0] = 6;
+    g.site_Z[1] = 8;
+    g.site_Z[2] = 8;
     for (int i = 0; i < 3; ++i) {
         g.q[i] = sp.q[i];
         g.eps_K[i] = sp.eps_K[i];
@@ -1327,6 +1457,7 @@ void* finalize_proposer_context(
     size_t eval_bytes = (size_t)PROP_SMEM_MAX * sizeof(double);
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_N, n_b * sizeof(int)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_U, n_b * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_ovl, n_b * sizeof(int)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_cx, n_m * sizeof(double)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_cy, n_m * sizeof(double)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_acc_cz, n_m * sizeof(double)));
@@ -1339,6 +1470,7 @@ void* finalize_proposer_context(
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_U, n_b * sizeof(double)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_dU, n_b * sizeof(double)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_acc, n_b * sizeof(int)));
+    CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_ovl, n_b * sizeof(int)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_cx, n_m * sizeof(double)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_cy, n_m * sizeof(double)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_tri_cz, n_m * sizeof(double)));
@@ -1349,6 +1481,15 @@ void* finalize_proposer_context(
 
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_commit_mask, n_b * sizeof(int)));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_rng, n_b * sizeof(uint64_t)));
+
+    ctx->dev.n_fw_unit = (int)ctx->unit_Z.size();
+    if (!ctx->unit_frac.empty()) {
+        CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_fw_unit_frac, ctx->unit_frac.size() * sizeof(double)));
+        CUDA_CHECK_FAIL(cudaMemcpy(ctx->dev.d_fw_unit_frac, ctx->unit_frac.data(),
+                                   ctx->unit_frac.size() * sizeof(double), cudaMemcpyHostToDevice));
+    }
+    ctx->hc.enable_continuous_hc = (ctx->ff_mode == 2) ? 1 : 0;
+    ctx->hc.set_radii(1.20, 1.48, 0.50);
 
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_cx, eval_bytes));
     CUDA_CHECK_FAIL(cudaMalloc(&ctx->dev.d_eval_cy, eval_bytes));
@@ -1362,6 +1503,8 @@ void* finalize_proposer_context(
 
     CUDA_CHECK_FAIL(cudaMemset(ctx->dev.d_acc_N, 0, n_b * sizeof(int)));
     CUDA_CHECK_FAIL(cudaMemset(ctx->dev.d_acc_U, 0, n_b * sizeof(double)));
+    CUDA_CHECK_FAIL(cudaMemset(ctx->dev.d_acc_ovl, 0, n_b * sizeof(int)));
+    CUDA_CHECK_FAIL(cudaMemset(ctx->dev.d_tri_ovl, 0, n_b * sizeof(int)));
     std::vector<uint64_t> seeds(n_b);
     for (int b = 0; b < ctx->n_boxes; ++b) {
         uint64_t s = seed + (uint64_t)b * 1000003ULL + 0x9e3779b97f4a7c15ULL;
@@ -1576,6 +1719,7 @@ void* proposer_create_from_data(
         g.eps_K[s] = site_eps_s[s];
         g.sigma_A[s] = site_sig_s[s];
         g.lj_type[s] = site_lj_type_s[s];
+        g.site_Z[s] = (g.eps_K[s] > 0.0 || g.sigma_A[s] > 0.0 || g.lj_type[s] >= 0) ? 6 : 0;
         if (std::fabs(g.q[s]) > 1.0e-12) g.has_charge = 1;
         if (g.lj_type[s] >= 0) {
             if (g.lj_type[s] >= PROP_MAX_LJ) {
@@ -1620,6 +1764,7 @@ void proposer_destroy(void* handle) {
     }
     if (ctx->dev.d_acc_N) cudaFree(ctx->dev.d_acc_N);
     if (ctx->dev.d_acc_U) cudaFree(ctx->dev.d_acc_U);
+    if (ctx->dev.d_acc_ovl) cudaFree(ctx->dev.d_acc_ovl);
     if (ctx->dev.d_acc_cx) cudaFree(ctx->dev.d_acc_cx);
     if (ctx->dev.d_acc_cy) cudaFree(ctx->dev.d_acc_cy);
     if (ctx->dev.d_acc_cz) cudaFree(ctx->dev.d_acc_cz);
@@ -1631,6 +1776,7 @@ void proposer_destroy(void* handle) {
     if (ctx->dev.d_tri_U) cudaFree(ctx->dev.d_tri_U);
     if (ctx->dev.d_tri_dU) cudaFree(ctx->dev.d_tri_dU);
     if (ctx->dev.d_tri_acc) cudaFree(ctx->dev.d_tri_acc);
+    if (ctx->dev.d_tri_ovl) cudaFree(ctx->dev.d_tri_ovl);
     if (ctx->dev.d_tri_cx) cudaFree(ctx->dev.d_tri_cx);
     if (ctx->dev.d_tri_cy) cudaFree(ctx->dev.d_tri_cy);
     if (ctx->dev.d_tri_cz) cudaFree(ctx->dev.d_tri_cz);
@@ -1640,6 +1786,7 @@ void proposer_destroy(void* handle) {
     if (ctx->dev.d_tri_qz) cudaFree(ctx->dev.d_tri_qz);
     if (ctx->dev.d_commit_mask) cudaFree(ctx->dev.d_commit_mask);
     if (ctx->dev.d_rng) cudaFree(ctx->dev.d_rng);
+    if (ctx->dev.d_fw_unit_frac) cudaFree(ctx->dev.d_fw_unit_frac);
     if (ctx->dev.d_eval_cx) cudaFree(ctx->dev.d_eval_cx);
     if (ctx->dev.d_eval_cy) cudaFree(ctx->dev.d_eval_cy);
     if (ctx->dev.d_eval_cz) cudaFree(ctx->dev.d_eval_cz);
@@ -1715,12 +1862,22 @@ int proposer_equilibrate(void* handle, int n_steps) {
     if (!handle || n_steps <= 0) return 0;
     auto* ctx = static_cast<ProposerContext*>(handle);
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
-        ctx->cell, ctx->grid, ctx->guest,
+        ctx->cell, ctx->grid, ctx->guest, ctx->hc,
         ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
         ctx->ff_mode, ctx->pol_mode, ctx->max_mol, n_steps, 1,
         ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
+    if (ctx->hc.enable_continuous_hc && ctx->dev.d_acc_ovl) {
+        std::vector<int> h_ov((size_t)ctx->n_boxes, 0);
+        CUDA_CHECK_RET(cudaMemcpy(h_ov.data(), ctx->dev.d_acc_ovl, (size_t)ctx->n_boxes * sizeof(int), cudaMemcpyDeviceToHost), -1);
+        for (int b = 0; b < ctx->n_boxes; ++b) {
+            if (h_ov[(size_t)b] != 0) {
+                std::fprintf(stderr, "Error: proposer_equilibrate left hard-core violation in box %d.\n", b);
+                return -3;
+            }
+        }
+    }
     return 0;
 }
 
@@ -1733,7 +1890,7 @@ int proposer_propose_k_quat(
     if (!handle) return -1;
     auto* ctx = static_cast<ProposerContext*>(handle);
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
-        ctx->cell, ctx->grid, ctx->guest,
+        ctx->cell, ctx->grid, ctx->guest, ctx->hc,
         ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
         ctx->ff_mode, ctx->pol_mode, ctx->max_mol, k_steps, 0,
         ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
@@ -1753,6 +1910,18 @@ int proposer_propose_k_quat(
     CUDA_CHECK_RET(cudaMemcpy(out_qx, ctx->dev.d_tri_qx, n_m * sizeof(double), cudaMemcpyDeviceToHost), -1);
     CUDA_CHECK_RET(cudaMemcpy(out_qy, ctx->dev.d_tri_qy, n_m * sizeof(double), cudaMemcpyDeviceToHost), -1);
     CUDA_CHECK_RET(cudaMemcpy(out_qz, ctx->dev.d_tri_qz, n_m * sizeof(double), cudaMemcpyDeviceToHost), -1);
+
+    if (ctx->hc.enable_continuous_hc && ctx->dev.d_tri_ovl) {
+        std::vector<int> h_ov(n_b, 0);
+        CUDA_CHECK_RET(cudaMemcpy(h_ov.data(), ctx->dev.d_tri_ovl, n_b * sizeof(int), cudaMemcpyDeviceToHost), -1);
+        for (size_t b = 0; b < n_b; ++b) {
+            if (h_ov[b] != 0 || !std::isfinite(out_U_ref_K[b]) || out_N[b] < 0 || out_N[b] > ctx->max_mol) {
+                std::fprintf(stderr, "Error: proposer_propose_k_quat violated continuous hard-core or finite energy in box %zu (ovl=%d, N=%d, U=%g).\n",
+                             b, h_ov[b], out_N[b], out_U_ref_K[b]);
+                return -3;
+            }
+        }
+    }
     return 0;
 }
 
@@ -1849,6 +2018,38 @@ int proposer_set_accepted_quat(
         h_N[b] = in_N[b];
     }
 
+    if (ctx->hc.enable_continuous_hc) {
+        for (size_t b = 0; b < n_b; ++b) {
+            int nb = h_N[b];
+            if (nb > 0 && (!in_cx || !in_cy || !in_cz || !in_qw || !in_qx || !in_qy || !in_qz)) {
+                return -1;
+            }
+            size_t off = b * (size_t)ctx->max_mol;
+            int hc_rc = host_check_state_hard_core(
+                ctx->cell,
+                ctx->unit_frac.data(),
+                (int)ctx->unit_Z.size(),
+                ctx->guest.n_sites,
+                ctx->guest.lx, ctx->guest.ly, ctx->guest.lz,
+                ctx->guest.site_Z,
+                ctx->guest.is_isotropic,
+                nb, ctx->max_mol,
+                nb > 0 ? (in_cx + off) : nullptr,
+                nb > 0 ? (in_cy + off) : nullptr,
+                nb > 0 ? (in_cz + off) : nullptr,
+                nb > 0 ? (in_qw + off) : nullptr,
+                nb > 0 ? (in_qx + off) : nullptr,
+                nb > 0 ? (in_qy + off) : nullptr,
+                nb > 0 ? (in_qz + off) : nullptr,
+                ctx->hc);
+            if (hc_rc != 0) {
+                std::fprintf(stderr, "Error: proposer_set_accepted_quat rejected illegal hard-core state in box %zu (N=%d).\n",
+                             b, nb);
+                return -2;
+            }
+        }
+    }
+
     CUDA_CHECK_RET(cudaMemcpy(ctx->dev.d_acc_N, h_N.data(), n_b * sizeof(int), cudaMemcpyHostToDevice), -1);
     if (in_cx && in_cy && in_cz && in_qw && in_qx && in_qy && in_qz) {
         CUDA_CHECK_RET(cudaMemcpy(ctx->dev.d_acc_cx, in_cx, n_m * sizeof(double), cudaMemcpyHostToDevice), -1);
@@ -1862,12 +2063,22 @@ int proposer_set_accepted_quat(
 
     // k_steps = 0, commit_to_acc = 1 recomputes exact d_acc_U on GPU
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
-        ctx->cell, ctx->grid, ctx->guest,
+        ctx->cell, ctx->grid, ctx->guest, ctx->hc,
         ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
         ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1,
         ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
     CUDA_CHECK_RET(cudaGetLastError(), -1);
     CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
+    if (ctx->hc.enable_continuous_hc && ctx->dev.d_acc_ovl) {
+        std::vector<int> h_ov(n_b, 0);
+        CUDA_CHECK_RET(cudaMemcpy(h_ov.data(), ctx->dev.d_acc_ovl, n_b * sizeof(int), cudaMemcpyDeviceToHost), -1);
+        for (size_t b = 0; b < n_b; ++b) {
+            if (h_ov[b] != 0) {
+                std::fprintf(stderr, "Error: proposer_set_accepted_quat GPU audit flagged overlap in box %zu.\n", b);
+                return -2;
+            }
+        }
+    }
     return 0;
 }
 
@@ -1893,12 +2104,12 @@ double proposer_eval_energy_quat(
 
     if (!handle) return 0.0;
     if (out_overlap) *out_overlap = 0;
-    if (N <= 0) return 0.0;
     auto* ctx = static_cast<ProposerContext*>(handle);
-    if (N > PROP_SMEM_MAX) {
+    if (N < 0 || N > PROP_SMEM_MAX || (ctx->hc.enable_continuous_hc && N > ctx->max_mol)) {
         if (out_overlap) *out_overlap = 1;
         return 1.0e9;
     }
+    if (N == 0) return 0.0;
 
     size_t sz = (size_t)N * sizeof(double);
 #define EVAL_CUDA_CHECK(call)                                                   \
@@ -1921,8 +2132,9 @@ double proposer_eval_energy_quat(
     EVAL_CUDA_CHECK(cudaMemcpy(ctx->dev.d_eval_qz, qz, sz, cudaMemcpyHostToDevice));
 
     eval_single_state_kernel<<<1, PROP_THREADS>>>(
-        ctx->cell, ctx->grid, ctx->guest,
-        ctx->r_cut_gg, ctx->dsf_alpha, ctx->ff_mode, ctx->pol_mode, N,
+        ctx->cell, ctx->grid, ctx->guest, ctx->hc,
+        ctx->dev.d_fw_unit_frac, ctx->dev.n_fw_unit,
+        ctx->r_cut_gg, ctx->dsf_alpha, ctx->ff_mode, ctx->pol_mode, ctx->max_mol, N,
         ctx->dev.d_eval_cx, ctx->dev.d_eval_cy, ctx->dev.d_eval_cz,
         ctx->dev.d_eval_qw, ctx->dev.d_eval_qx, ctx->dev.d_eval_qy, ctx->dev.d_eval_qz,
         ctx->dev.d_eval_U, ctx->dev.d_eval_ov);
@@ -2059,7 +2271,7 @@ int proposer_set_external_grids(
     }
 
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
-        ctx->cell, ctx->grid, ctx->guest,
+        ctx->cell, ctx->grid, ctx->guest, ctx->hc,
         ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
         ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1,
         ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
@@ -2107,7 +2319,7 @@ int proposer_set_gg_lut(
     }
 
     propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
-        ctx->cell, ctx->grid, ctx->guest,
+        ctx->cell, ctx->grid, ctx->guest, ctx->hc,
         ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
         ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1,
         ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
@@ -2131,6 +2343,111 @@ int proposer_set_mc_params(
     ctx->cbmc_k = cbmc_k;
     ctx->p_ins_del_total = p_ins_del_total;
     return 0;
+}
+
+int proposer_set_hard_core_config(
+    void* handle,
+    const int* site_Z_s,
+    const double* fw_unit_frac_3n,
+    int n_fw_unit,
+    int enable_continuous_hc,
+    double r_fw_h_A,
+    double r_fw_heavy_A,
+    double r_gg_A) {
+
+    if (!handle || !std::isfinite(r_fw_h_A) || !std::isfinite(r_fw_heavy_A) || !std::isfinite(r_gg_A) ||
+        r_fw_h_A < 0.0 || r_fw_heavy_A < 0.0 || r_gg_A < 0.0) {
+        std::fprintf(stderr, "Error: invalid arguments to proposer_set_hard_core_config.\n");
+        return -1;
+    }
+    auto* ctx = static_cast<ProposerContext*>(handle);
+    if (site_Z_s != nullptr) {
+        for (int s = 0; s < ctx->guest.n_sites; ++s) {
+            ctx->guest.site_Z[s] = site_Z_s[s];
+        }
+    }
+    if (fw_unit_frac_3n != nullptr) {
+        if (n_fw_unit < 0) return -1;
+        if (ctx->dev.d_fw_unit_frac) {
+            cudaFree(ctx->dev.d_fw_unit_frac);
+            ctx->dev.d_fw_unit_frac = nullptr;
+        }
+        ctx->unit_frac.resize((size_t)n_fw_unit * 3);
+        ctx->unit_Z.resize((size_t)n_fw_unit, 0);
+        for (int i = 0; i < n_fw_unit; ++i) {
+            double sa = fw_unit_frac_3n[3 * i + 0]; sa -= std::floor(sa);
+            double sb = fw_unit_frac_3n[3 * i + 1]; sb -= std::floor(sb);
+            double sc = fw_unit_frac_3n[3 * i + 2]; sc -= std::floor(sc);
+            ctx->unit_frac[3 * (size_t)i + 0] = sa;
+            ctx->unit_frac[3 * (size_t)i + 1] = sb;
+            ctx->unit_frac[3 * (size_t)i + 2] = sc;
+        }
+        ctx->dev.n_fw_unit = n_fw_unit;
+        if (!ctx->unit_frac.empty()) {
+            CUDA_CHECK_RET(cudaMalloc(&ctx->dev.d_fw_unit_frac, ctx->unit_frac.size() * sizeof(double)), -1);
+            CUDA_CHECK_RET(cudaMemcpy(ctx->dev.d_fw_unit_frac, ctx->unit_frac.data(),
+                                      ctx->unit_frac.size() * sizeof(double), cudaMemcpyHostToDevice), -1);
+        }
+    }
+    ctx->hc.enable_continuous_hc = enable_continuous_hc ? 1 : 0;
+    ctx->hc.set_radii(r_fw_h_A, r_fw_heavy_A, r_gg_A);
+
+    propose_burst_kernel<<<ctx->n_boxes, PROP_THREADS>>>(
+        ctx->cell, ctx->grid, ctx->guest, ctx->hc,
+        ctx->T_K, ctx->beta_f_V_ref, ctx->r_cut_gg, ctx->dsf_alpha,
+        ctx->ff_mode, ctx->pol_mode, ctx->max_mol, 0, 1,
+        ctx->cbmc_k, ctx->p_ins_del_total, ctx->dev);
+    CUDA_CHECK_RET(cudaGetLastError(), -1);
+    CUDA_CHECK_RET(cudaDeviceSynchronize(), -1);
+    return 0;
+}
+
+int proposer_check_hard_core_cpu(
+    const double H_unit_cols9[9],
+    int sc_a, int sc_b, int sc_c,
+    const double* fw_unit_frac_3n,
+    int n_fw_unit,
+    int n_guest_sites,
+    const double* site_lxyz_3s,
+    const int* site_Z_s,
+    int is_isotropic,
+    int N, int max_mol,
+    const double* cx, const double* cy, const double* cz,
+    const double* qw, const double* qx, const double* qy, const double* qz,
+    double r_fw_h_A, double r_fw_heavy_A, double r_gg_A) {
+
+    if (!H_unit_cols9 || sc_a <= 0 || sc_b <= 0 || sc_c <= 0 ||
+        n_fw_unit < 0 || n_guest_sites <= 0 || n_guest_sites > PROP_MAX_SITES ||
+        !site_lxyz_3s || !site_Z_s) {
+        return -1;
+    }
+    if (!std::isfinite(r_fw_h_A) || !std::isfinite(r_fw_heavy_A) || !std::isfinite(r_gg_A) ||
+        r_fw_h_A < 0.0 || r_fw_heavy_A < 0.0 || r_gg_A < 0.0) {
+        return -1;
+    }
+    Cell cell{};
+    double H_u[3][3];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            H_u[r][c] = H_unit_cols9[r * 3 + c];
+        }
+    }
+    cell.init_from_H_unit(H_u, sc_a, sc_b, sc_c);
+
+    double lx[PROP_MAX_SITES], ly[PROP_MAX_SITES], lz[PROP_MAX_SITES];
+    for (int s = 0; s < n_guest_sites; ++s) {
+        lx[s] = site_lxyz_3s[3 * s + 0];
+        ly[s] = site_lxyz_3s[3 * s + 1];
+        lz[s] = site_lxyz_3s[3 * s + 2];
+    }
+    HardCoreConfig hc{};
+    hc.enable_continuous_hc = 1;
+    hc.set_radii(r_fw_h_A, r_fw_heavy_A, r_gg_A);
+
+    return host_check_state_hard_core(
+        cell, fw_unit_frac_3n, n_fw_unit,
+        n_guest_sites, lx, ly, lz, site_Z_s, is_isotropic ? 1 : 0,
+        N, max_mol, cx, cy, cz, qw, qx, qy, qz, hc);
 }
 
 } // extern "C"

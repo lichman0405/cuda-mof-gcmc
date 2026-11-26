@@ -290,21 +290,21 @@ def build_legal_dispersed_high_loading_states(
 
     has_oms = oms_metal_pos is not None and len(oms_metal_pos) > 0
     oms_arr = np.asarray(oms_metal_pos, dtype=np.float64) if has_oms else None
+    v_arm = None
+    r_arm = 0.0
+    if guest_local_pos is not None and len(guest_local_pos) > 0:
+        g_arr = np.asarray(guest_local_pos, dtype=np.float64)
+        norms = np.linalg.norm(g_arr, axis=1)
+        idx_max = int(np.argmax(norms))
+        if float(norms[idx_max]) > 0.1:
+            r_arm = float(norms[idx_max])
+            v_arm = g_arr[idx_max] / r_arm
+            ref_orth = np.cross(v_arm, np.array([1.0, 0.0, 0.0], dtype=np.float64))
+            if float(np.linalg.norm(ref_orth)) < 1e-6:
+                ref_orth = np.cross(v_arm, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+            ref_orth /= np.linalg.norm(ref_orth)
 
     def _sample_pos_quat_batch(n_samp: int):
-        if has_oms:
-            n_half = n_samp // 2
-            # Half around random OMS shells (r in 2.7..3.9 A), half uniform in supercell
-            m_idx = rng.integers(0, len(oms_arr), size=n_half)
-            u_dir = rng.normal(size=(n_half, 3))
-            u_dir /= np.maximum(1e-12, np.linalg.norm(u_dir, axis=1, keepdims=True))
-            radii = rng.uniform(2.7, 3.9, size=(n_half, 1))
-            pos_oms = oms_arr[m_idx] + radii * u_dir
-            pos_oms = ((pos_oms @ inv_H) % 1.0) @ H_rows
-            pos_uni = rng.random((n_samp - n_half, 3)) @ H_rows
-            pos = np.vstack([pos_oms, pos_uni])
-        else:
-            pos = rng.random((n_samp, 3)) @ H_rows
         r1 = rng.random(n_samp)
         r2 = rng.random(n_samp) * (2.0 * math.pi)
         r3 = rng.random(n_samp) * (2.0 * math.pi)
@@ -313,6 +313,42 @@ def build_legal_dispersed_high_loading_states(
         quat = np.stack(
             [s2 * np.cos(r3), s1 * np.sin(r2), s1 * np.cos(r2), s2 * np.sin(r3)], axis=1
         )
+        if has_oms:
+            n_half = n_samp // 2
+            m_idx = rng.integers(0, len(oms_arr), size=n_half)
+            u_dir = rng.normal(size=(n_half, 3))
+            u_dir /= np.maximum(1e-12, np.linalg.norm(u_dir, axis=1, keepdims=True))
+            radii = rng.uniform(2.7, 3.9, size=(n_half, 1))
+            n_ori = (n_half // 2) if (v_arm is not None) else 0
+            if n_ori > 0:
+                radii[:n_ori, 0] = r_arm + rng.uniform(2.15, 2.55, size=n_ori)
+                t_vec = -u_dir[:n_ori] + rng.normal(scale=0.15, size=(n_ori, 3))
+                t_vec /= np.maximum(1e-12, np.linalg.norm(t_vec, axis=1, keepdims=True))
+                dots = np.clip(t_vec @ v_arm, -1.0, 1.0)
+                cross = np.cross(np.broadcast_to(v_arm, t_vec.shape), t_vec)
+                q_align = np.empty((n_ori, 4), dtype=np.float64)
+                anti = dots <= -0.9999
+                q_align[~anti, 0] = 1.0 + dots[~anti]
+                q_align[~anti, 1:] = cross[~anti]
+                if np.any(anti):
+                    q_align[anti, 0] = 0.0
+                    q_align[anti, 1:] = ref_orth
+                q_align /= np.maximum(1e-12, np.linalg.norm(q_align, axis=1, keepdims=True))
+                half_tw = 0.5 * rng.uniform(0.0, 2.0 * math.pi, size=n_ori)
+                cw, sw = np.cos(half_tw), np.sin(half_tw)
+                tw0 = cw
+                tw1, tw2, tw3 = sw * v_arm[0], sw * v_arm[1], sw * v_arm[2]
+                aw, ax, ay, az = q_align[:, 0], q_align[:, 1], q_align[:, 2], q_align[:, 3]
+                quat[:n_ori, 0] = aw * tw0 - ax * tw1 - ay * tw2 - az * tw3
+                quat[:n_ori, 1] = aw * tw1 + ax * tw0 + ay * tw3 - az * tw2
+                quat[:n_ori, 2] = aw * tw2 - ax * tw3 + ay * tw0 + az * tw1
+                quat[:n_ori, 3] = aw * tw3 + ax * tw2 - ay * tw1 + az * tw0
+            pos_oms = oms_arr[m_idx] + radii * u_dir
+            pos_oms = ((pos_oms @ inv_H) % 1.0) @ H_rows
+            pos_uni = rng.random((n_samp - n_half, 3)) @ H_rows
+            pos = np.vstack([pos_oms, pos_uni])
+        else:
+            pos = rng.random((n_samp, 3)) @ H_rows
         return pos, quat
 
     boxes = [

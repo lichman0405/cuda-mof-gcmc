@@ -66,8 +66,8 @@ def _make_synthetic_oms_distill_res(fw_data: dict, guest, grid_dims=(64, 64, 24)
         -1200.0 * np.exp(-((d_nonm - 3.45) / 0.55) ** 2)
         + 25.0 * np.power(2.20 / np.maximum(d_nonm, 1.4), 12.0) * (d_nonm < 3.2)
     )
-    v_o = np.where((d_nonm < 1.8) | (d_mg < 1.8), 1.0e6, np.clip(v_o, -2.0e5, 1.0e5))
-    v_c = np.where((d_nonm < 1.8) | (d_mg < 1.8), 1.0e6, np.clip(v_c, -2.0e5, 1.0e5))
+    v_o = np.clip(v_o, -2.0e4, 8.0e4)
+    v_c = np.clip(v_c, -2.0e4, 8.0e4)
 
     n_chan = max(1, max(s.lj_type for s in guest.sites) + 1)
     grids = np.zeros((n_chan, nz, ny, nx), dtype=np.float32)
@@ -263,7 +263,7 @@ def test_2b_honest_holdout_split_and_no_leakage():
 
 def test_only_1b_cache_key_separation_and_model_sha256_in_key():
     """Verify DISTILL_VERSION bump, only_1b cache key separation, and backward-compatible model_sha256."""
-    assert DISTILL_VERSION == "v1.2"
+    assert DISTILL_VERSION == "v1.4"
     cif = str(DATA / "MgMOF-74.cif")
     guest = make_distilled_guest_spec(load_guest("co2"))
 
@@ -497,7 +497,7 @@ def test_distill_mlip_surrogate_only_1b_and_2b_holdout_pure_numpy(tmp_path, monk
     )
     s1 = res_1b["summary"]
     assert res_1b["cache_hit"] is False
-    assert s1["version"] == "v1.2"
+    assert s1["version"] == DISTILL_VERSION
     assert s1["only_1b"] is True
     assert s1["n_2b_evaluated"] == 0 and s1["n_2b_train"] == 0 and s1["n_2b_val"] == 0
     assert s1["t_mace2_s"] == 0.0
@@ -601,7 +601,7 @@ def test_only_1b_distill_end_to_end_cpu(tmp_path):
     )
     s = res["summary"]
     assert s["only_1b"] is True
-    assert s["version"] == "v1.2"
+    assert s["version"] == DISTILL_VERSION
     assert s["n_2b_evaluated"] == 0
     assert s["n_2b_train"] == 0
     assert s["n_2b_val"] == 0

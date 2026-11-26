@@ -7,11 +7,13 @@ import numpy as np
 from nested_mc_engine import (
     EV_TO_K,
     K_TO_KJMOL,
+    check_hard_core_state_cpp,
     compute_ess_stats,
     compute_pooled_jackknife_qst,
     count_oms_occupied,
     quat_rotate_batch,
 )
+from mlip_distill import UNIFIED_HARD_CORE_RULE
 
 KB_SI = 1.380649e-23
 R_BAR_L = 0.08314462618
@@ -226,6 +228,33 @@ def has_hard_sphere_overlap(
     return False
 
 
+def check_hard_core_state(
+    uc_atoms,
+    supercell,
+    guest,
+    state: dict,
+    max_mol: int = 128,
+    r_fw_h_A: float = DISTILLED_FW_R_HS_H_A,
+    r_fw_heavy_A: float = DISTILLED_FW_R_HS_HEAVY_A,
+    r_gg_A: float = DISTILLED_GG_R_HS_A,
+) -> bool:
+    """Evaluate the shared C++ unified continuous-coordinate hard-core predicate on a configuration state."""
+    uc_cell_rows = np.asarray(uc_atoms.get_cell(), dtype=np.float64)
+    H_unit_cols = np.ascontiguousarray(uc_cell_rows.T, dtype=np.float64)
+    fw_unit_frac = np.ascontiguousarray(np.mod(np.asarray(uc_atoms.get_scaled_positions(), dtype=np.float64), 1.0))
+    return check_hard_core_state_cpp(
+        H_unit_cols=H_unit_cols,
+        supercell=tuple(int(x) for x in supercell),
+        fw_unit_frac=fw_unit_frac,
+        guest=guest,
+        state=state,
+        max_mol=int(max_mol),
+        r_fw_h_A=float(r_fw_h_A),
+        r_fw_heavy_A=float(r_fw_heavy_A),
+        r_gg_A=float(r_gg_A),
+    )
+
+
 class SerialAseMaceD3Target:
     """Standard ASE-based serial single-point MLIP target evaluator (analogous to ASE GCMC / MLIP-MC)."""
 
@@ -392,6 +421,22 @@ def run_direct_gcmc(
     else:
         shifts_27 = None
 
+    uc_cell_rows = np.asarray(uc_atoms.get_cell(), dtype=np.float64)
+    H_unit_cols = np.ascontiguousarray(uc_cell_rows.T, dtype=np.float64)
+    fw_unit_frac = np.ascontiguousarray(np.mod(np.asarray(uc_atoms.get_scaled_positions(), dtype=np.float64), 1.0))
+    sc_tuple = tuple(int(x) for x in supercell)
+    use_cpp_hc = False
+    if match_distilled_hard_core:
+        # Use the exact compiled C++ include/hard_core.hpp predicate shared with CUDA auto_mlip.
+        try:
+            _ = check_hard_core_state_cpp(
+                H_unit_cols, sc_tuple, fw_unit_frac, guest, {"N": 0},
+                max_mol=int(max_mol), r_fw_h_A=eff_fw_h, r_fw_heavy_A=eff_fw_heavy, r_gg_A=eff_gg,
+            )
+            use_cpp_hc = True
+        except FileNotFoundError:
+            use_cpp_hc = False
+
     oms_inv_cell = None
     oms_cell_rows_arr = None
     if oms_metal_pos is not None and len(oms_metal_pos) > 0:
@@ -420,6 +465,14 @@ def run_direct_gcmc(
         boxes = [_copy_box_state(st) for st in initial_states]
     else:
         boxes = [_copy_box_state({"N": 0}) for _ in range(n_b)]
+
+    if use_cpp_hc:
+        for b in range(n_b):
+            if check_hard_core_state_cpp(
+                H_unit_cols, sc_tuple, fw_unit_frac, guest, boxes[b],
+                max_mol=int(max_mol), r_fw_h_A=eff_fw_h, r_fw_heavy_A=eff_fw_heavy, r_gg_A=eff_gg,
+            ):
+                raise RuntimeError(f"Initial state of box {b} violates unified C++ hard-core / N_max={max_mol}")
 
     if batch_target_fn is not None:
         init_evals = batch_target_fn(boxes)
@@ -494,32 +547,39 @@ def run_direct_gcmc(
                     )
                     tri["qw"][idx], tri["qx"][idx], tri["qy"][idx], tri["qz"][idx] = nqw, nqx, nqy, nqz
 
-                trial_offs = quat_rotate_batch(
-                    np.array([tri["qw"][idx]]), np.array([tri["qx"][idx]]),
-                    np.array([tri["qy"][idx]]), np.array([tri["qz"][idx]]), local_pos,
-                )[0]
-                trial_pos = np.array([tri["cx"][idx], tri["cy"][idx], tri["cz"][idx]])[None, :] + trial_offs
-                if cur_N > 1:
-                    mask_other = np.ones(cur_N, dtype=bool)
-                    mask_other[idx] = False
-                    other_st = {
-                        "N": cur_N - 1,
-                        "cx": tri["cx"][mask_other], "cy": tri["cy"][mask_other], "cz": tri["cz"][mask_other],
-                        "qw": tri["qw"][mask_other], "qx": tri["qx"][mask_other],
-                        "qy": tri["qy"][mask_other], "qz": tri["qz"][mask_other],
-                    }
-                    other_pos = _all_guest_positions(other_st, local_pos)
+                if use_cpp_hc:
+                    ovl_hc = check_hard_core_state_cpp(
+                        H_unit_cols, sc_tuple, fw_unit_frac, guest, tri,
+                        max_mol=int(max_mol), r_fw_h_A=eff_fw_h, r_fw_heavy_A=eff_fw_heavy, r_gg_A=eff_gg,
+                    )
                 else:
-                    other_pos = np.zeros((0, 3), dtype=np.float64)
+                    trial_offs = quat_rotate_batch(
+                        np.array([tri["qw"][idx]]), np.array([tri["qx"][idx]]),
+                        np.array([tri["qy"][idx]]), np.array([tri["qz"][idx]]), local_pos,
+                    )[0]
+                    trial_pos = np.array([tri["cx"][idx], tri["cy"][idx], tri["cz"][idx]])[None, :] + trial_offs
+                    if cur_N > 1:
+                        mask_other = np.ones(cur_N, dtype=bool)
+                        mask_other[idx] = False
+                        other_st = {
+                            "N": cur_N - 1,
+                            "cx": tri["cx"][mask_other], "cy": tri["cy"][mask_other], "cz": tri["cz"][mask_other],
+                            "qw": tri["qw"][mask_other], "qx": tri["qx"][mask_other],
+                            "qy": tri["qy"][mask_other], "qz": tri["qz"][mask_other],
+                        }
+                        other_pos = _all_guest_positions(other_st, local_pos)
+                    else:
+                        other_pos = np.zeros((0, 3), dtype=np.float64)
+                    ovl_hc = has_hard_sphere_overlap(
+                        trial_pos, fw_pos, other_pos, cell_rows, inv_cell_rows, r_hs_A, shifts_27,
+                        trial_guest_Z=guest_real_Z,
+                        fw_r_hs_heavy_A=eff_fw_heavy,
+                        fw_r_hs_h_A=eff_fw_h,
+                        gg_r_hs_A=eff_gg,
+                        match_distilled_hard_core=match_distilled_hard_core,
+                    )
 
-                if has_hard_sphere_overlap(
-                    trial_pos, fw_pos, other_pos, cell_rows, inv_cell_rows, r_hs_A, shifts_27,
-                    trial_guest_Z=guest_real_Z,
-                    fw_r_hs_heavy_A=eff_fw_heavy,
-                    fw_r_hs_h_A=eff_fw_h,
-                    gg_r_hs_A=eff_gg,
-                    match_distilled_hard_core=match_distilled_hard_core,
-                ):
+                if ovl_hc:
                     hs_rejected += 1
                     proposals[b] = ("hs_ovl", mv, idx, None)
                     continue
@@ -537,23 +597,6 @@ def run_direct_gcmc(
                     nqw, nqx, nqy, nqz = 1.0, 0.0, 0.0, 0.0
                 else:
                     nqw, nqx, nqy, nqz = rand_uniform_quat(rng)
-                trial_offs = quat_rotate_batch(
-                    np.array([nqw]), np.array([nqx]), np.array([nqy]), np.array([nqz]), local_pos
-                )[0]
-                trial_pos = c_new[None, :] + trial_offs
-                other_pos = _all_guest_positions(st, local_pos)
-                if has_hard_sphere_overlap(
-                    trial_pos, fw_pos, other_pos, cell_rows, inv_cell_rows, r_hs_A, shifts_27,
-                    trial_guest_Z=guest_real_Z,
-                    fw_r_hs_heavy_A=eff_fw_heavy,
-                    fw_r_hs_h_A=eff_fw_h,
-                    gg_r_hs_A=eff_gg,
-                    match_distilled_hard_core=match_distilled_hard_core,
-                ):
-                    hs_rejected += 1
-                    proposals[b] = ("hs_ovl", mv, -1, None)
-                    continue
-
                 tri = {
                     "N": cur_N + 1,
                     "cx": np.append(st["cx"], c_new[0]),
@@ -564,6 +607,30 @@ def run_direct_gcmc(
                     "qy": np.append(st["qy"], nqy),
                     "qz": np.append(st["qz"], nqz),
                 }
+                if use_cpp_hc:
+                    ovl_hc = check_hard_core_state_cpp(
+                        H_unit_cols, sc_tuple, fw_unit_frac, guest, tri,
+                        max_mol=int(max_mol), r_fw_h_A=eff_fw_h, r_fw_heavy_A=eff_fw_heavy, r_gg_A=eff_gg,
+                    )
+                else:
+                    trial_offs = quat_rotate_batch(
+                        np.array([nqw]), np.array([nqx]), np.array([nqy]), np.array([nqz]), local_pos
+                    )[0]
+                    trial_pos = c_new[None, :] + trial_offs
+                    other_pos = _all_guest_positions(st, local_pos)
+                    ovl_hc = has_hard_sphere_overlap(
+                        trial_pos, fw_pos, other_pos, cell_rows, inv_cell_rows, r_hs_A, shifts_27,
+                        trial_guest_Z=guest_real_Z,
+                        fw_r_hs_heavy_A=eff_fw_heavy,
+                        fw_r_hs_h_A=eff_fw_h,
+                        gg_r_hs_A=eff_gg,
+                        match_distilled_hard_core=match_distilled_hard_core,
+                    )
+                if ovl_hc:
+                    hs_rejected += 1
+                    proposals[b] = ("hs_ovl", mv, -1, None)
+                    continue
+
                 proposals[b] = ("eval", mv, -1, tri)
                 eval_indices.append(b)
                 eval_states.append(tri)
@@ -720,6 +787,8 @@ def run_direct_gcmc(
         "max_mol": int(max_mol),
         "max_N_observed": int(max_N_observed),
         "match_distilled_hard_core": bool(match_distilled_hard_core),
+        "used_cpp_hard_core": bool(use_cpp_hc),
+        "hard_core_rule": dict(UNIFIED_HARD_CORE_RULE) if match_distilled_hard_core else None,
         "hard_core_cutoffs_A": {
             "fw_heavy": float(eff_fw_heavy),
             "fw_h": float(eff_fw_h),

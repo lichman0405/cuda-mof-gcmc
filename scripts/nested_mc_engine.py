@@ -169,6 +169,103 @@ def _find_proposer_lib() -> Path:
     )
 
 
+_CACHED_PROPOSER_LIB = None
+
+
+def get_proposer_cdll():
+    """Load and bind stateless host hard-core C ABI functions from the proposer shared library."""
+    global _CACHED_PROPOSER_LIB
+    if _CACHED_PROPOSER_LIB is not None:
+        return _CACHED_PROPOSER_LIB
+    _register_dll_dirs()
+    dll_path = _find_proposer_lib()
+    lib = ctypes.CDLL(str(dll_path))
+    lib.proposer_check_hard_core_cpu.argtypes = [
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_int, ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int),
+        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ctypes.c_double, ctypes.c_double, ctypes.c_double,
+    ]
+    lib.proposer_check_hard_core_cpu.restype = ctypes.c_int
+    _CACHED_PROPOSER_LIB = lib
+    return lib
+
+
+def check_hard_core_state_cpp(
+    H_unit_cols: np.ndarray,
+    supercell,
+    fw_unit_frac: np.ndarray,
+    guest,
+    state: dict,
+    max_mol: int = 128,
+    r_fw_h_A: float = 1.20,
+    r_fw_heavy_A: float = 1.48,
+    r_gg_A: float = 0.50,
+) -> bool:
+    """Evaluate exact C++ continuous-coordinate periodic MIC hard-core overlap predicate."""
+    lib = get_proposer_cdll()
+    h9 = np.ascontiguousarray(H_unit_cols, dtype=np.float64).reshape(9)
+    sc_a, sc_b, sc_c = int(supercell[0]), int(supercell[1]), int(supercell[2])
+    frac_arr = np.ascontiguousarray(fw_unit_frac, dtype=np.float64).reshape(-1, 3)
+    n_fw = int(frac_arr.shape[0])
+    g = guest.to_c_arrays()
+    n_sites = int(g["n_sites"])
+    site_lxyz = np.ascontiguousarray(g["lxyz"], dtype=np.float64).reshape(-1)
+    site_z = np.ascontiguousarray(
+        g["Z"] if "Z" in g else [int(s.Z) for s in guest.sites],
+        dtype=np.int32,
+    ).reshape(-1)
+    n_mol = int(state["N"])
+    if n_mol < 0 or n_mol > int(max_mol):
+        return True
+    if n_mol == 0:
+        return False
+
+    cx = np.ascontiguousarray(state["cx"], dtype=np.float64)
+    cy = np.ascontiguousarray(state["cy"], dtype=np.float64)
+    cz = np.ascontiguousarray(state["cz"], dtype=np.float64)
+    if "qw" in state:
+        qw = np.ascontiguousarray(state["qw"], dtype=np.float64)
+        qx = np.ascontiguousarray(state["qx"], dtype=np.float64)
+        qy = np.ascontiguousarray(state["qy"], dtype=np.float64)
+        qz = np.ascontiguousarray(state["qz"], dtype=np.float64)
+    else:
+        qw = np.ones(n_mol, dtype=np.float64)
+        qx = np.zeros(n_mol, dtype=np.float64)
+        qy = np.zeros(n_mol, dtype=np.float64)
+        qz = np.zeros(n_mol, dtype=np.float64)
+
+    fw_ptr = (
+        frac_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        if n_fw > 0 else ctypes.POINTER(ctypes.c_double)()
+    )
+    rc = lib.proposer_check_hard_core_cpu(
+        h9.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        sc_a, sc_b, sc_c,
+        fw_ptr, n_fw, n_sites,
+        site_lxyz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        site_z.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        int(g["is_isotropic"]),
+        n_mol, int(max_mol),
+        cx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        cy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        cz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        qw.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        qx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        qy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        qz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        float(r_fw_h_A), float(r_fw_heavy_A), float(r_gg_A),
+    )
+    if rc < 0:
+        raise RuntimeError(f"proposer_check_hard_core_cpu failed with code {rc}")
+    return bool(rc != 0)
+
+
 class CudaGcmcProposer:
     """Zero-I/O ctypes wrapper around mof_gcmc_proposer (.dll / .so)."""
 
@@ -321,6 +418,16 @@ class CudaGcmcProposer:
             r_max_A=float(distill_res.get("gg_lut_rmax_A", 10.0)),
             gg_com_lut_K=distill_res.get("gg_com_lut_K"),
         )
+        site_z = np.ascontiguousarray([int(s.Z) for s in guest.sites], dtype=np.int32)
+        fw_frac = np.ascontiguousarray(np.mod(np.asarray(fw_data["frac"], dtype=np.float64), 1.0))
+        obj.set_hard_core_config(
+            site_z=site_z,
+            fw_unit_frac=fw_frac,
+            enable_continuous_hc=True,
+            r_fw_h_A=1.20,
+            r_fw_heavy_A=1.48,
+            r_gg_A=0.50,
+        )
         return obj
 
     def _init_after_handle(self):
@@ -472,6 +579,48 @@ class CudaGcmcProposer:
         L.proposer_set_gg_lut.restype = ctypes.c_int
         L.proposer_set_mc_params.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double]
         L.proposer_set_mc_params.restype = ctypes.c_int
+        L.proposer_set_hard_core_config.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_double, ctypes.c_double, ctypes.c_double,
+        ]
+        L.proposer_set_hard_core_config.restype = ctypes.c_int
+
+    def set_hard_core_config(
+        self,
+        site_z: Optional[np.ndarray] = None,
+        fw_unit_frac: Optional[np.ndarray] = None,
+        enable_continuous_hc: bool = True,
+        r_fw_h_A: float = 1.20,
+        r_fw_heavy_A: float = 1.48,
+        r_gg_A: float = 0.50,
+    ) -> None:
+        z_ptr = ctypes.POINTER(ctypes.c_int)()
+        if site_z is not None:
+            z_arr = np.ascontiguousarray(site_z, dtype=np.int32).reshape(-1)
+            z_ptr = z_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+        fw_ptr = ctypes.POINTER(ctypes.c_double)()
+        n_fw = 0
+        if fw_unit_frac is not None:
+            fw_arr = np.ascontiguousarray(fw_unit_frac, dtype=np.float64).reshape(-1, 3)
+            n_fw = int(fw_arr.shape[0])
+            if n_fw > 0:
+                fw_ptr = fw_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        rc = self.lib.proposer_set_hard_core_config(
+            self.handle,
+            z_ptr,
+            fw_ptr,
+            n_fw,
+            1 if enable_continuous_hc else 0,
+            float(r_fw_h_A),
+            float(r_fw_heavy_A),
+            float(r_gg_A),
+        )
+        if rc != 0:
+            raise RuntimeError(f"proposer_set_hard_core_config failed with code {rc}")
 
     def set_external_grids(self, grids_u_lj: np.ndarray, phi_elec: Optional[np.ndarray] = None) -> None:
         arr = np.ascontiguousarray(grids_u_lj, dtype=np.float32)
@@ -650,15 +799,21 @@ class CudaGcmcProposer:
             return 0.0, False
         if "qw" in state:
             return self.eval_energy_quat(state)
+        cx = np.ascontiguousarray(state["cx"], dtype=np.float64)
+        cy = np.ascontiguousarray(state["cy"], dtype=np.float64)
+        cz = np.ascontiguousarray(state["cz"], dtype=np.float64)
+        ux = np.ascontiguousarray(state["ux"], dtype=np.float64)
+        uy = np.ascontiguousarray(state["uy"], dtype=np.float64)
+        uz = np.ascontiguousarray(state["uz"], dtype=np.float64)
         ov = ctypes.c_int(0)
         u = self.lib.proposer_eval_energy(
             self.handle, n,
-            state["cx"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            state["cy"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            state["cz"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            state["ux"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            state["uy"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            state["uz"].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            cx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            cy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            cz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            ux.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            uy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            uz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             ctypes.byref(ov),
         )
         return float(u), bool(ov.value != 0)
@@ -713,6 +868,8 @@ class CudaGcmcProposer:
         self._buf_qz.fill(0.0)
         for b, st in enumerate(states):
             n = int(st["N"])
+            if n < 0 or n > self.max_mol:
+                raise ValueError(f"Box {b} N={n} out of allowed [0, {self.max_mol}]")
             self._buf_N[b] = n
             if n > 0:
                 s = b * self.max_mol
@@ -735,6 +892,8 @@ class CudaGcmcProposer:
             self._buf_qy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             self._buf_qz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
         )
+        if rc == -2:
+            raise ValueError("proposer_set_accepted_quat rejected illegal hard-core state")
         if rc != 0:
             raise RuntimeError(f"proposer_set_accepted_quat failed with code {rc}")
 
@@ -761,16 +920,23 @@ class CudaGcmcProposer:
         n = int(state["N"])
         if n == 0:
             return 0.0, False
+        cx = np.ascontiguousarray(state["cx"], dtype=np.float64)
+        cy = np.ascontiguousarray(state["cy"], dtype=np.float64)
+        cz = np.ascontiguousarray(state["cz"], dtype=np.float64)
+        qw = np.ascontiguousarray(state["qw"], dtype=np.float64)
+        qx = np.ascontiguousarray(state["qx"], dtype=np.float64)
+        qy = np.ascontiguousarray(state["qy"], dtype=np.float64)
+        qz = np.ascontiguousarray(state["qz"], dtype=np.float64)
         ov = ctypes.c_int(0)
         u = self.lib.proposer_eval_energy_quat(
             self.handle, n,
-            np.asarray(state["cx"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            np.asarray(state["cy"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            np.asarray(state["cz"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            np.asarray(state["qw"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            np.asarray(state["qx"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            np.asarray(state["qy"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-            np.asarray(state["qz"], dtype=np.float64).ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            cx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            cy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            cz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            qw.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            qx.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            qy.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            qz.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             ctypes.byref(ov),
         )
         return float(u), bool(ov.value != 0)
@@ -1990,7 +2156,7 @@ class NestedMCChain:
         }
 
     def apply_swapped_boxes(self, box_updates: dict) -> None:
-        """Install REMC-swapped box states and resynchronize proposer U_ref_K cleanly."""
+        """Install REMC-swapped box states, validate hard-core legality, and resync proposer U_ref_K cleanly."""
         if not box_updates:
             return
         for b, (st_dict, n_val, u_tgt_val) in box_updates.items():
@@ -2010,6 +2176,12 @@ class NestedMCChain:
                 u_ref_new = float(refreshed[b]["U_ref_K"])
                 if not math.isfinite(u_ref_new):
                     raise RuntimeError(f"Non-finite U_ref_K after REMC swap sync in box {b}: {u_ref_new}")
+                if b in box_updates and hasattr(self.proposer, "eval_energy_quat"):
+                    u_chk, ov_chk = self.proposer.eval_energy_quat(refreshed[b])
+                    if ov_chk or not math.isfinite(float(u_chk)):
+                        raise RuntimeError(f"REMC swap box {b} failed independent hard-core/energy verification (ov={ov_chk}, u={u_chk})")
+                    if abs(float(u_chk) - u_ref_new) > 1e-6:
+                        raise RuntimeError(f"REMC swap U_ref mismatch in box {b}: {u_chk} vs {u_ref_new}")
                 self.U_ref_curr[b] = u_ref_new
             self.curr = refreshed
         else:
@@ -2018,6 +2190,31 @@ class NestedMCChain:
                 self.U_ref_curr[bi] = float(self.curr[bi].get("U_ref_K", 0.0))
         if len(self.N_curr) > 0:
             self.max_N_observed = max(self.max_N_observed, int(np.max(self.N_curr)))
+
+    def partial_snapshot(self) -> dict:
+        """Return lightweight current post-equilibration traces and counters for periodic checkpoint evaluation."""
+        return {
+            "completed_cycles": int(self.cyc),
+            "eq_cycles": int(self.eq_cycles),
+            "prod_cycles_done": int(len(self.prod_N_history)),
+            "k_steps": int(self.k_cur),
+            "delta_eps_kJ_mol": float(self.delta_eps_K * K_TO_KJMOL),
+            "target_evals": int(self.target_evals),
+            "total_inner_steps": int(self.total_inner_steps),
+            "prod_ins_att": int(self.prod_ins_att),
+            "prod_ins_acc": int(self.prod_ins_acc),
+            "prod_del_att": int(self.prod_del_att),
+            "prod_del_acc": int(self.prod_del_acc),
+            "prod_acc_outer": [int(x) for x in self.prod_acc_outer],
+            "prod_total_trials": int(self.prod_total_trials),
+            "acc_empty_to_empty": int(self.acc_empty_to_empty),
+            "acc_identity_nonempty": int(self.acc_identity_nonempty),
+            "acc_same_N_changed": int(self.acc_same_N_changed),
+            "acc_dN_changed": int(self.acc_dN_changed),
+            "prod_N_history": [list(r) for r in self.prod_N_history],
+            "prod_U_history": [list(r) for r in self.prod_U_history],
+            "prod_oms_occ_history": [list(r) for r in self.prod_oms_occ_history],
+        }
 
     def step_cycles(self, n_steps: int) -> None:
         end_cyc = min(self.total_cycles, self.cyc + max(0, int(n_steps)))
@@ -2187,17 +2384,19 @@ class NestedMCChain:
         if self.checkpoint_fn is not None and self.cyc > self.start_cyc:
             self.checkpoint_fn(final_ckpt)
 
-        prod_denom = max(1, self.prod_cycles)
-        tot_denom = max(1, self.total_cycles)
-        box_uptakes = (self.sum_N / prod_denom) * self.conv_mmol_g if self.prod_cycles > 0 else np.zeros(self.n_b, dtype=np.float64)
+        actual_prod = len(self.prod_N_history)
+        actual_tot = len(self.box_N_history)
+        prod_denom = max(1, actual_prod)
+        tot_denom = max(1, actual_tot)
+        box_uptakes = (self.sum_N / prod_denom) * self.conv_mmol_g if actual_prod > 0 else np.zeros(self.n_b, dtype=np.float64)
         box_qst = []
         box_molar_bind = []
         box_molar_qst = []
         for b in range(self.n_b):
-            mN = self.sum_N[b] / prod_denom if self.prod_cycles > 0 else 0.0
-            mN2 = self.sum_N2[b] / prod_denom if self.prod_cycles > 0 else 0.0
-            mU = self.sum_U[b] / prod_denom if self.prod_cycles > 0 else 0.0
-            mUN = self.sum_UN[b] / prod_denom if self.prod_cycles > 0 else 0.0
+            mN = self.sum_N[b] / prod_denom if actual_prod > 0 else 0.0
+            mN2 = self.sum_N2[b] / prod_denom if actual_prod > 0 else 0.0
+            mU = self.sum_U[b] / prod_denom if actual_prod > 0 else 0.0
+            mUN = self.sum_UN[b] / prod_denom if actual_prod > 0 else 0.0
             varN = mN2 - mN * mN
             mb = (-mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
             mq = (self.T_K - mU / mN) * K_TO_KJMOL if mN > 1e-12 else 0.0
@@ -2219,7 +2418,7 @@ class NestedMCChain:
         )
         box_moments = [
             {
-                "n_samples": int(self.prod_cycles),
+                "n_samples": int(actual_prod),
                 "sum_N": float(self.sum_N[b]),
                 "sum_N2": float(self.sum_N2[b]),
                 "sum_U": float(self.sum_U[b]),
@@ -2272,7 +2471,9 @@ class NestedMCChain:
             "k_steps_initial": int(self.k_steps_initial),
             "grid_only": bool(self.grid_only),
             "eq_cycles": int(self.eq_cycles),
-            "prod_cycles": int(self.prod_cycles),
+            "prod_cycles": int(actual_prod),
+            "prod_cycles_requested": int(self.prod_cycles),
+            "completed_cycles": int(self.cyc),
             "delta_eps_initial_kJ_mol": float(self.delta_eps_initial_K * K_TO_KJMOL),
             "delta_eps_kJ_mol": float(self.delta_eps_K * K_TO_KJMOL),
             "adapt_shift_end_cycle": int(self.adapt_shift_end),
@@ -2313,7 +2514,7 @@ class NestedMCChain:
             "sjd_N_per_s": ess_stats["sjd_N_per_s"],
             "dN_moves_per_s": ess_stats["dN_moves_per_s"],
             "outer_acc_rate": float(np.mean(self.acc_outer) / tot_denom),
-            "prod_outer_acc_rate": float(np.mean(self.prod_acc_outer) / prod_denom) if self.prod_cycles > 0 else 0.0,
+            "prod_outer_acc_rate": float(np.mean(self.prod_acc_outer) / prod_denom) if actual_prod > 0 else 0.0,
             "prod_ins_att": int(self.prod_ins_att),
             "prod_ins_acc": int(self.prod_ins_acc),
             "prod_del_att": int(self.prod_del_att),

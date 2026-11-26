@@ -14,7 +14,16 @@ from run_metadata import sha256_file, sha256_json_obj
 
 K_TO_KJMOL = 8.31446261815324e-3
 KE_K = 167100.9558738398
-DISTILL_VERSION = "v1.3"
+DISTILL_VERSION = "v1.4"
+
+UNIFIED_HARD_CORE_RULE = {
+    "name": "unified_continuous_mic_v1",
+    "fw_h_A": 1.20,
+    "fw_heavy_A": 1.48,
+    "gg_A": 0.50,
+    "virtual_sites_excluded": True,
+    "continuous_mic": True,
+}
 
 # Mild generic LJ defaults (eps_K, sigma_A) used ONLY for guest-guest steric core
 # when a guest site carries zero classical LJ parameters (e.g. SPC/E or TIP-style H).
@@ -847,9 +856,9 @@ def _render_unit_cell_grids(
         rad_2d = rad_pts.reshape(g1 - g0, -1).astype(np.float64)
         for c in range(n_chan):
             val = rad_2d @ w_sr_flat[c] + chan_q[c] * phi_term
-            r_hard = 1.20 if chan_Z[c] == 1 else 1.48
-            ovl = (dmin_pts < r_hard) | (val > 1.0e5)
-            grids_flat[c, g0:g1] = np.where(ovl, 1.0e6, np.clip(val, -2.0e4, 1.0e5)).astype(np.float32)
+            # Continuous-coordinate hard-core rejection is enforced directly in C++/CUDA (include/hard_core.hpp);
+            # keep all grid voxels finite and bounded so interpolation near legal walls never falsely rejects.
+            grids_flat[c, g0:g1] = np.clip(val, -2.0e4, 8.0e4).astype(np.float32)
 
     return np.ascontiguousarray(grids_flat.reshape(n_chan, nz, ny, nx), dtype=np.float32)
 
@@ -1028,6 +1037,7 @@ def compute_distill_cache_key(
     )
     key_obj = {
         "version": DISTILL_VERSION,
+        "hard_core_rule": UNIFIED_HARD_CORE_RULE,
         "cif_sha256": sha256_file(cif_path) or Path(cif_path).name,
         "supercell": [int(x) for x in supercell],
         "guest_real_geom_sha256": sha256_json_obj(real_geom),
@@ -1387,6 +1397,7 @@ def distill_mlip_surrogate(
 
     meta = {
         "version": DISTILL_VERSION,
+        "hard_core_rule": dict(UNIFIED_HARD_CORE_RULE),
         "distill_sha256": cache_key,
         "only_1b": bool(only_1b),
         "cif_path": str(cif_path),

@@ -60,6 +60,7 @@ class GuestSpec:
         eps = np.array([s.eps_K for s in self.sites], dtype=np.float64)
         sig = np.array([s.sigma_A for s in self.sites], dtype=np.float64)
         lj_type = np.array([s.lj_type for s in self.sites], dtype=np.int32)
+        z_arr = np.array([int(s.Z) for s in self.sites], dtype=np.int32)
         return {
             "n_sites": n,
             "lxyz": np.ascontiguousarray(lxyz),
@@ -67,6 +68,7 @@ class GuestSpec:
             "eps": np.ascontiguousarray(eps),
             "sig": np.ascontiguousarray(sig),
             "lj_type": np.ascontiguousarray(lj_type),
+            "Z": np.ascontiguousarray(z_arr),
             "Tc_K": float(self.Tc_K),
             "Pc_bar": float(self.Pc_bar),
             "omega": float(self.omega),

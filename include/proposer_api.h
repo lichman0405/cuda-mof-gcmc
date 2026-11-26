@@ -156,4 +156,33 @@ PROPOSER_API int proposer_set_mc_params(
     int cbmc_k,
     double p_ins_del_total);
 
+// Configure continuous-coordinate periodic MIC hard-core rule on both host and GPU.
+// site_Z_s (length guest.n_sites) marks real guest atoms (Z > 0) vs virtual sites (Z <= 0); may be nullptr to keep existing.
+// fw_unit_frac_3n (length 3*n_fw_unit) supplies unit-cell fractional coords; may be nullptr to reuse context unit_frac.
+PROPOSER_API int proposer_set_hard_core_config(
+    void* handle,
+    const int* site_Z_s,
+    const double* fw_unit_frac_3n,
+    int n_fw_unit,
+    int enable_continuous_hc,
+    double r_fw_h_A,
+    double r_fw_heavy_A,
+    double r_gg_A);
+
+// Stateless host C predicate implementing the exact same continuous-coordinate periodic MIC hard-core check
+// as CUDA auto_mlip. Returns 0 if legal, 1 if hard-core violation or N out of [0, max_mol], -1 on invalid args.
+PROPOSER_API int proposer_check_hard_core_cpu(
+    const double H_unit_cols9[9],
+    int sc_a, int sc_b, int sc_c,
+    const double* fw_unit_frac_3n,
+    int n_fw_unit,
+    int n_guest_sites,
+    const double* site_lxyz_3s,
+    const int* site_Z_s,
+    int is_isotropic,
+    int N, int max_mol,
+    const double* cx, const double* cy, const double* cz,
+    const double* qw, const double* qx, const double* qy, const double* qz,
+    double r_fw_h_A, double r_fw_heavy_A, double r_gg_A);
+
 } // extern "C"
