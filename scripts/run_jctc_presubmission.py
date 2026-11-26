@@ -94,41 +94,50 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
-def _check_gpus_idle(gpus: List[int], max_used_mib: int = 250) -> Dict[str, Any]:
-    """Query nvidia-smi compute apps and GPU memory to ensure zero contention before starting."""
-    try:
-        mem_out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
-            text=True,
-        )
-        apps_out = subprocess.check_output(
-            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader"],
-            text=True,
-        )
-    except Exception as exc:
-        return {"checked": False, "error": str(exc), "idle": False, "details": []}
-
-    details = []
-    busy = []
+def _check_gpus_idle(gpus: List[int], max_used_mib: int = 250, settle_wait_s: float = 15.0) -> Dict[str, Any]:
+    """Query nvidia-smi compute apps and GPU memory (allowing trailing util window to settle) before starting."""
     gpu_set = set(int(g) for g in gpus)
-    for line in mem_out.strip().splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 3:
-            continue
-        idx, util, mem = int(parts[0]), int(parts[1]), int(parts[2])
-        if idx in gpu_set:
-            rec = {"gpu": idx, "util_pct": util, "memory_used_mib": mem}
-            details.append(rec)
-            if mem > max_used_mib or util > 10:
-                busy.append(rec)
-    active_apps = [ln.strip() for ln in apps_out.strip().splitlines() if ln.strip()]
-    return {
-        "checked": True,
-        "idle": len(busy) == 0 and len(active_apps) == 0,
-        "busy_gpus": busy,
-        "active_compute_apps": active_apps,
-        "details": details,
-    }
+    deadline = time.perf_counter() + max(0.0, float(settle_wait_s))
+    while True:
+        try:
+            mem_out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+                text=True,
+            )
+            apps_out = subprocess.check_output(
+                ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader"],
+                text=True,
+            )
+        except Exception as exc:
+            return {"checked": False, "error": str(exc), "idle": False, "details": []}
+
+        details = []
+        busy = []
+        mem_busy = False
+        for line in mem_out.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            idx, util, mem = int(parts[0]), int(parts[1]), int(parts[2])
+            if idx in gpu_set:
+                rec = {"gpu": idx, "util_pct": util, "memory_used_mib": mem}
+                details.append(rec)
+                if mem > max_used_mib:
+                    mem_busy = True
+                    busy.append(rec)
+                elif util > 10:
+                    busy.append(rec)
+        active_apps = [ln.strip() for ln in apps_out.strip().splitlines() if ln.strip()]
+        idle = (len(busy) == 0 and len(active_apps) == 0)
+        if idle or mem_busy or len(active_apps) > 0 or time.perf_counter() >= deadline:
+            return {
+                "checked": True,
+                "idle": idle,
+                "busy_gpus": busy,
+                "active_compute_apps": active_apps,
+                "details": details,
+            }
+        time.sleep(1.5)
 
 
 def _git_info() -> Dict[str, Any]:
