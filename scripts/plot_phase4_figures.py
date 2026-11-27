@@ -788,66 +788,50 @@ def _draw_unavailable(ax, title, msg):
         sp.set_visible(False)
 
 
-def fig_jctc1_architecture(s, arch_npz_path: Path, out_dir: Path):
-    """JCTC Fig. 1: Method architecture (1B+2B distillation, adaptive Nested MC + REMC, multi-GPU)."""
-    fig = plt.figure(figsize=(13.8, 8.6))
+def fig_jctc1_architecture(s, arch_npz_path: Path, out_dir: Path, presub: dict = None):
+    """JCTC Fig. 1: Three-step workflow (1. Auto grid cache; 2. Hand-written CUDA CBMC burst; 3. Batched MLIP outer check)."""
+    fig = plt.figure(figsize=(14.0, 8.8))
 
-    # (a) One-time surrogate construction
-    axa = fig.add_axes([0.015, 0.515, 0.635, 0.445])
+    # (a) Step 1: Automated reference grid construction & caching
+    axa = fig.add_axes([0.015, 0.52, 0.635, 0.44])
     axa.set_xlim(0, 100); axa.set_ylim(0, 44); axa.axis("off")
-    axa.text(0, 43.2, "a", fontsize=13, fontweight="bold", va="top")
-    axa.text(3.2, 43.0, "One-time self-distillation  (per framework, guest, and target MLIP)",
-             fontsize=10.5, va="top", color=C["ink"])
+    axa.text(0, 43.4, "a", fontsize=13, fontweight="bold", va="top")
+    axa.text(3.0, 43.2, "Step 1 — Automated on-demand reference-potential distillation & caching (once per MOF, guest, MLIP)",
+             fontsize=10.2, va="top", color=C["ink"], fontweight="bold")
 
     blue_fc, blue_ec = "#EEF3FA", "#2F5D8A"
-    _box(axa, 0.5, 12, 22.5, 23, "Inputs",
-         "Rigid framework (CIF,\n  any space group)\nRigid guest (\u2264 12 sites)\nTarget MLIP + SHA-256:\n  r2SCAN, MP0+D3, DAC-1\nT, pressure ladder", blue_fc, blue_ec)
-    _box(axa, 25.8, 12, 22.5, 23, "Typing",
-         "Framework atoms typed by\n  element + neighbour\n  graph (6\u20138 classes)\nGuest sites grouped into\n  symmetry channels\nZero hand-tuned FF types", blue_fc, blue_ec)
-    _box(axa, 51.1, 12, 22.5, 23, "Target sampling",
-         "1,200 single-guest poses\n  stratified by wall dist.\n192 in-pore dimers\nBatched MACE (\u00b1 D3)\n  energies\nUnified hard-core domain", blue_fc, blue_ec)
-    _box(axa, 76.4, 12, 23.1, 23, "Constrained fit",
-         "1B: radial basis + $r^{-12}$\n  + neutral Ewald modes\n2B: scaled LJ/Coulomb\n  + COM residual table\nIndependent 85/15 hold-out\n  on BOTH 1B and 2B", blue_fc, blue_ec)
+    _box(axa, 0.5, 12.2, 22.5, 23, "1. Inputs",
+         "Rigid MOF (CIF,\n  any space group)\nRigid guest (\u2264 12 sites)\nTarget MLIP + SHA-256\nT, pressure ladder", blue_fc, blue_ec)
+    _box(axa, 25.8, 12.2, 22.5, 23, "2. Auto typing",
+         "Framework grouped by\n  element + coordination\n  graph (6\u20138 classes)\nGuest symmetry channels\nZero manual FF typing", blue_fc, blue_ec)
+    _box(axa, 51.1, 12.2, 22.5, 23, "3. Target poses",
+         "1,200 1B single poses +\n  192 in-pore 2B dimers\nUnified continuous MIC\n  hard-core (1.20/1.48/\n  0.50 \u00c5), $N_{\\max}=128$", blue_fc, blue_ec)
+    _box(axa, 76.4, 12.2, 23.1, 23, "4. Grid & LUT cache",
+         "1B: radial + neutral Ewald\n  \u2192 FP32 tricubic grids\n2B: scaled LJ/DSF + 128-\n  bin COM residual LUT\n85/15 & 80/20 hold-out", blue_fc, blue_ec)
     for x0 in (23.0, 48.3, 73.6):
-        _arrow(axa, (x0 + 0.2, 23.5), (x0 + 2.6, 23.5))
+        _arrow(axa, (x0 + 0.2, 23.7), (x0 + 2.6, 23.7))
 
-    # Dynamic caption from distillation caches in jctc_summary.json
     dists = list(s.get("distillation", {}).values())
-    d_ex = None
-    for d in dists:
-        if "jctc_exp1_auto_mlip_r2scan_remc" in (d.get("used_by_runs") or []):
-            d_ex = d
-            break
-    if d_ex is None:
-        for d in dists:
-            if "mgmof" in str(d.get("cif_path", "")).lower() and "r2scan" in str(d.get("model", "")).lower() and not d.get("distill_1b_only"):
-                d_ex = d
-                break
-    if d_ex is None and dists:
-        d_ex = dists[0]
     walls = [float(d["distill_wall_s"]) for d in dists if d.get("distill_wall_s")]
-    wall_txt = f"{min(walls):.0f}\u2013{max(walls):.0f} s" if len(walls) >= 2 else (f"{walls[0]:.0f} s" if walls else "~60\u2013210 s")
-    axa.text(50, 7.6, f"Cached by SHA-256 provenance key; {wall_txt} per (framework, guest, MLIP) on one RTX 3090",
-             ha="center", fontsize=8.3, color=C["muted"], style="italic")
-    if d_ex is not None:
-        m2_dep = d_ex.get("mae_2b_deployed_holdout_kJ_mol")
-        if m2_dep is not None:
-            m2_str = f"2B deployed hold-out MAE = {m2_dep:.2f} kJ/mol"
-        elif d_ex.get("mae_2b_kJ_mol") is not None:
-            m2_str = f"2B fit MAE = {d_ex['mae_2b_kJ_mol']:.2f} kJ/mol"
-        else:
-            m2_str = "1B-only"
-        axa.text(
-            50, 3.6,
-            f"Example ({Path(str(d_ex.get('cif_path', ''))).stem}, {str(d_ex.get('guest_name', '')).upper()}, {_short_model_label(str(d_ex.get('model', '')))}): "
-            f"1B hold-out R$^2$ = {float(d_ex.get('r2_1b', 0.0)):.3f}, "
-            f"1B MAE = {float(d_ex.get('mae_1b_kJ_mol', 0.0)):.2f} kJ/mol, {m2_str}",
-            ha="center", fontsize=8.0, color=C["muted"], style="italic",
+    if presub is not None:
+        s12 = presub["surrogates"]["1B_2B"]["summary"]
+        s1 = presub["surrogates"]["1B_only"]["summary"]
+        walls.extend([float(s12["distill_wall_s"]), float(s1["distill_wall_s"])])
+        ex_txt = (
+            f"Mg-MOF-74 + CO$_2$ (r2SCAN, v1.4): 1B hold-out R$^2$ = {float(s12['r2_1b']):.3f} "
+            f"(MAE {float(s12['mae_1b_kJ_mol']):.2f} kJ/mol); 2B deployed hold-out MAE "
+            f"{float(s12['mae_2b_classical_holdout_kJ_mol']):.2f} \u2192 {float(s12['mae_2b_deployed_holdout_kJ_mol']):.2f} kJ/mol"
         )
+    else:
+        ex_txt = "Cached Surrogate: 1B tricubic grids + 2B residual LUT uploaded once to GPU memory"
+    wall_txt = f"{min(walls):.0f}\u2013{max(walls):.0f} s" if len(walls) >= 2 else "~40\u2013213 s"
+    axa.text(50, 7.7, f"Cached on disk by SHA-256 key ({wall_txt} on 1\u00d7RTX 3090); uploaded once (H\u2192D) to GPU global memory",
+             ha="center", fontsize=8.1, color=C["muted"], style="italic")
+    axa.text(50, 3.6, ex_txt, ha="center", fontsize=7.8, color=C["muted"], style="italic")
 
-    # Real 1B grid + 2B LUT panels if arch_npz exists
-    axg = fig.add_axes([0.665, 0.545, 0.17, 0.37])
-    axl = fig.add_axes([0.875, 0.61, 0.11, 0.27])
+    # Real 1B grid + 2B LUT panels
+    axg = fig.add_axes([0.665, 0.55, 0.17, 0.365])
+    axl = fig.add_axes([0.875, 0.615, 0.11, 0.265])
     if arch_npz_path.is_file():
         arch = np.load(arch_npz_path)
         Z = np.clip(arch["o_min_kJ"], -45.0, 5.0)
@@ -869,8 +853,8 @@ def fig_jctc1_architecture(s, arch_npz_path: Path, out_dir: Path):
             sp.set_visible(True); sp.set_linewidth(0.6)
         axg.plot([cx - half + 2, cx - half + 12], [cy - half + 2] * 2, color="#111827", lw=2.2)
         axg.text(cx - half + 7, cy - half + 3.2, "10 \u00c5", color="#111827", ha="center", fontsize=8, fontweight="bold")
-        axg.set_title("1B grid, Mg-MOF-74 (r2SCAN)\nO(CO$_2$) channel, min along c", fontsize=8.3, color=C["ink"])
-        cax = fig.add_axes([0.665, 0.522, 0.17, 0.012])
+        axg.set_title("1B grid, Mg-MOF-74 (r2SCAN)\nO(CO$_2$) channel, min along c", fontsize=8.2, color=C["ink"])
+        cax = fig.add_axes([0.665, 0.526, 0.17, 0.012])
         cb = fig.colorbar(im, cax=cax, orientation="horizontal")
         cb.set_label("U$_{1B}$ (kJ mol$^{-1}$)", fontsize=7.8, labelpad=1)
         cb.ax.tick_params(labelsize=7)
@@ -882,57 +866,59 @@ def fig_jctc1_architecture(s, arch_npz_path: Path, out_dir: Path):
         axl.set_xlabel("r$_{COM}$ (\u00c5)", fontsize=8)
         axl.set_ylabel("\u0394U$_{2B}$ (kJ mol$^{-1}$)", fontsize=8)
         axl.tick_params(labelsize=7)
-        axl.set_title("2B residual LUT", fontsize=8.3, color=C["ink"])
+        axl.set_title("2B residual LUT", fontsize=8.2, color=C["ink"])
     else:
         _draw_unavailable(axg, "1B grid", "arch_inputs NPZ\nnot provided")
         _draw_unavailable(axl, "2B LUT", "arch_inputs NPZ\nnot provided")
 
-    # (b) Adaptive Nested MC + REMC cycle
-    axb = fig.add_axes([0.015, 0.03, 0.635, 0.45])
-    axb.set_xlim(0, 100); axb.set_ylim(0, 46); axb.axis("off")
-    axb.text(0, 45.4, "b", fontsize=13, fontweight="bold", va="top")
-    axb.text(3.2, 45.2, "Exact Nested MC outer cycle with burn-in adaptation & pressure-REMC swaps",
-             fontsize=10.5, va="top", color=C["ink"])
+    # (b) Step 2 (CUDA inner burst) & Step 3 (Batched MLIP outer check + accept/rollback)
+    axb = fig.add_axes([0.015, 0.025, 0.635, 0.465])
+    axb.set_xlim(0, 100); axb.set_ylim(0, 47); axb.axis("off")
+    axb.text(0, 46.4, "b", fontsize=13, fontweight="bold", va="top")
+    axb.text(3.0, 46.2, "Steps 2 & 3 — Hand-written CUDA multi-step GCMC inner burst + batched full-system MLIP outer check",
+             fontsize=10.2, va="top", color=C["ink"], fontweight="bold")
 
-    _box(axb, 0.5, 14.5, 19.5, 17, "Accepted state",
-         "$x=(N,\\{\\mathbf{r}_i,\\mathbf{q}_i\\})$\n4 independent chains\nper pressure $P_m$", "#F3F4F6", "#4B5563")
-    _box(axb, 27.5, 24.5, 39.5, 17.5, "GPU inner CBMC burst  (1 CUDA block / box)",
-         "$k$ moves on shifted surrogate $U_{\\rm ref}(x)+\\Delta\\varepsilon\\,N$\n"
-         "translate, rotate, insert, delete (K = 128 CBMC trials)\n"
-         "burn-in only: adapt $\\Delta\\varepsilon$ (Robbins\u2013Monro) & $k$;\n"
-         "strictly frozen during production (exact Markov chain)", "#FDF5EA", "#B5651D")
-    _box(axb, 74.5, 14.5, 25.0, 17, "Target MLIP",
-         "$\\tilde{U}_{\\rm MLIP}(x')$ batched\nacross all boxes\n(unified hard-core\nregularized domain)", "#EEF3FA", "#2F5D8A")
-    _box(axb, 27.5, 1.0, 39.5, 17.0, "Outer Metropolis & Pressure-REMC swap", "", "#F1EEF8", "#5B4B8A")
-    axb.text(47.25, 10.0,
-             r"$\alpha=\min\left\{1,\ \exp\left(-\beta\,[\,\Delta\tilde{U}_{\rm MLIP}-\Delta U_{\rm ref}-\Delta\varepsilon\,\Delta N\,]\right)\right\}$",
-             ha="center", va="center", fontsize=10.0, color=C["ink"])
-    axb.text(47.25, 4.4,
-             r"every $n_{\rm swap}$ cycles: swap $P_m\leftrightarrow P_{m+1}$ with $\alpha_{\rm swap}=\min\{1,\ (f_{m+1}/f_m)^{N_m-N_{m+1}}\}$",
-             ha="center", va="center", fontsize=7.6, color=C["ink"])
+    _box(axb, 0.5, 16.0, 19.5, 17.5, "GPU accepted state",
+         "$x_b=(N_b,\\{\\mathbf{r}_i,\\mathbf{q}_i\\})$\n$B$ independent boxes\nin device memory\n($N_b \\leq N_{\\max}=128$)", "#F3F4F6", "#4B5563", body_size=8.0)
+    _box(axb, 25.5, 25.2, 43.0, 17.8, "Step 2: Hand-written CUDA burst (1 block = 128 threads / box)",
+         "\u2022 $k$ moves on device ($\\tilde{U}_{\\rm ref}+\\Delta\\varepsilon N$, zero host I/O inside burst)\n"
+         "\u2022 ins/del: 128 threads evaluate $K=128$ CBMC trial poses in parallel\n"
+         "\u2022 Unified continuous periodic MIC hard-core + FP64 shared memory\n"
+         "\u2022 Exact full FP64 $\\tilde{U}_{\\rm ref}(x'_b)$ recompute at end of $k$-step burst", "#FDF5EA", "#B5651D", title_size=8.9, body_size=7.8, body_lines=1.34)
+    _box(axb, 74.0, 16.0, 25.5, 17.5, "Step 3a: Batched MLIP",
+         "1 batched MACE(\u00b1D3) call\nacross all $B$ end states\n(static fw graph on GPU;\nFP32 msg + FP64 sum)", "#EEF3FA", "#2F5D8A", body_size=7.9)
+    _box(axb, 25.5, 4.4, 43.0, 16.5, "Step 3b: Outer Metropolis & GPU commit / rollback", "", "#F1EEF8", "#5B4B8A", title_size=8.9)
+    axb.text(47.0, 12.8,
+             r"$\alpha_b=\min\left\{1,\ \exp\left(-\beta\,[\,\Delta\tilde{U}_{\rm MLIP}-\Delta\tilde{U}_{\rm ref}-\Delta\varepsilon\,\Delta N\,]\right)\right\}$",
+             ha="center", va="center", fontsize=9.6, color=C["ink"])
+    axb.text(47.0, 7.4,
+             "accept: commit $x'_b$ on GPU   |   reject: roll back to $x_b$ on GPU\n"
+             "optional $\\mu$-REMC: swap $P_m\\leftrightarrow P_{m+1}$ every $n_{\\rm swap}$ cycles (0 MLIP calls)",
+             ha="center", va="center", fontsize=7.4, color=C["ink"], linespacing=1.26)
 
-    _arrow(axb, (11.0, 31.6), (27.3, 35.5), rad=-0.25)
-    axb.text(13.5, 37.0, "$x$", fontsize=9.5)
-    _arrow(axb, (67.2, 33.0), (80.0, 31.7), rad=-0.25)
-    axb.text(70.5, 36.0, "candidate $x'$", fontsize=8.5)
-    _arrow(axb, (86.5, 14.3), (67.2, 9.5), rad=-0.25)
-    axb.text(77.0, 7.2, "$\\tilde{U}_{\\rm MLIP}(x')$", fontsize=8.5)
-    _arrow(axb, (27.3, 9.5), (10.5, 14.3), rad=-0.25)
+    _arrow(axb, (10.5, 33.7), (25.3, 36.4), rad=-0.22)
+    axb.text(11.5, 38.6, "in-device\nload $x_b$", fontsize=7.6, color=C["ink"])
+    _arrow(axb, (68.7, 33.8), (82.0, 33.7), rad=-0.22)
+    axb.text(70.0, 38.0, "D\u2192H C ABI (~29 KB)\n+ H\u2192D guest edges", fontsize=7.3, color="#B5651D")
+    _arrow(axb, (86.5, 15.8), (68.7, 11.8), rad=-0.22)
+    axb.text(75.2, 9.0, "$\\tilde{U}_{\\rm MLIP}(x'_b)$\n(1 batch / $k$ steps)", fontsize=7.5, color="#2F5D8A")
+    _arrow(axb, (25.3, 11.8), (10.5, 15.8), rad=-0.22)
+    axb.text(8.8, 9.6, "H\u2192D mask ($B$ ints)\ncommit / rollback", fontsize=7.3, color="#5B4B8A")
 
-    axb.text(0.5, 8.6, "Both Nested MC and pressure-REMC\nsatisfy exact detailed balance for\n"
-                       "$\\tilde{\\pi}_\\mu(x)\\propto (\\beta f V)^N/N!\\,e^{-\\beta \\tilde{U}_{\\rm MLIP}(x)}$\n"
-                       "for any fixed $(\\Delta\\varepsilon, k)$.",
-             fontsize=7.2, color=C["muted"], va="top", linespacing=1.3)
+    axb.text(50.0, 0.3,
+             "Amortization: 1 batched MLIP call per $k=24$ GPU moves (~1,536 CBMC trials/box); "
+             "frozen $(\\Delta\\varepsilon, k)$ + common MIC hard-core $\\Rightarrow$ exact $\\tilde{\\pi}_{\\rm MLIP}$.",
+             ha="center", va="bottom", fontsize=7.1, color=C["muted"])
 
     # (c) Multi-GPU & REMC parallelization
-    axc = fig.add_axes([0.665, 0.03, 0.325, 0.45])
-    axc.set_xlim(0, 100); axc.set_ylim(0, 46); axc.axis("off")
-    axc.text(0, 45.4, "c", fontsize=13, fontweight="bold", va="top")
-    axc.text(5.5, 45.2, "Multi-GPU & REMC execution", fontsize=10.5, va="top", color=C["ink"])
+    axc = fig.add_axes([0.665, 0.025, 0.325, 0.465])
+    axc.set_xlim(0, 100); axc.set_ylim(0, 47); axc.axis("off")
+    axc.text(0, 46.4, "c", fontsize=13, fontweight="bold", va="top")
+    axc.text(5.5, 46.2, "Multi-GPU isolated ladders & sharding", fontsize=10.2, va="top", color=C["ink"], fontweight="bold")
     shades = ["#C7D7EC", "#93B4DA", "#5E8FC6", "#2F5D8A"]
 
     def _draw_row(y0, label, mode_tag, note):
-        axc.text(0, y0 + 13.0, label, fontsize=8.5, fontweight="bold", color=C["ink"])
+        axc.text(0, y0 + 13.0, label, fontsize=8.4, fontweight="bold", color=C["ink"])
         for gi in range(4):
             gx = 2 + gi * 24.5
             axc.add_patch(FancyBboxPatch((gx, y0), 22.0, 10.5, boxstyle="round,pad=0,rounding_size=0.8",
@@ -940,7 +926,7 @@ def fig_jctc1_architecture(s, arch_npz_path: Path, out_dir: Path):
             axc.text(gx + 11.0, y0 + 8.5, f"GPU {gi}", ha="center", fontsize=7.4, color=C["muted"])
             if mode_tag == "remc":
                 for bi in range(4):
-                    axc.add_patch(Rectangle((gx + 2.0 + bi * 4.6, y0 + 1.5), 3.8, 4.0, fc=shades[gi], ec="none"))
+                    axc.add_patch(Rectangle((gx + 2.0 + bi * 4.6, y0 + 1.5), 3.8, 4.0, fc=shades[bi], ec="none"))
                 axc.text(gx + 11.0, y0 + 6.2, f"$P_{gi + 1}$", ha="center", fontsize=7.8, color=C["ink"])
                 if gi < 3:
                     _arrow(axc, (gx + 22.2, y0 + 5.2), (gx + 24.3, y0 + 5.2), color=C["remc"], lw=1.1)
@@ -949,27 +935,18 @@ def fig_jctc1_architecture(s, arch_npz_path: Path, out_dir: Path):
                 for bi in range(2):
                     axc.add_patch(Rectangle((gx + 6.4 + bi * 4.8, y0 + 1.5), 3.8, 4.0, fc=shades[2], ec="none"))
                 axc.text(gx + 11.0, y0 + 6.2, "$P$", ha="center", fontsize=7.8, color=C["ink"])
-        axc.text(0, y0 - 2.3, note, fontsize=7.5, color=C["muted"], va="top")
+        axc.text(0, y0 - 2.3, note, fontsize=7.4, color=C["muted"], va="top", linespacing=1.25)
 
-    remc_runs = (s.get("audit") or {}).get("remc_runs") or {}
-    if remc_runs:
-        rates = [p["acc_rate"] for r in remc_runs.values() for p in r.get("pairs", []) if p.get("acc_rate") is not None]
-        remc_note = (
-            f"Exact fugacity swaps across pressure ladder (mean swap acc: {100*np.mean(rates):.1f}%)"
-            if rates else "Exact fugacity swaps across pressure ladder (zero extra MLIP calls)"
-        )
-    else:
-        remc_note = "Exact fugacity swaps across pressure ladder (zero extra MLIP calls)"
-
+    remc_note = "1 pressure/GPU, 4 isolated ladders (colors: never cross-mix);\nzero-MLIP fugacity swaps boost whole-ladder ESS rate 2.26\u20132.29\u00d7"
     p1_r = s.get("runs", {}).get("phase3_scale_1gpu_replica")
     p4_r = s.get("runs", {}).get("phase3_scale_4gpu_replica")
     if p1_r and p4_r and p1_r.get("points") and p4_r.get("points"):
         r1 = float(p1_r["points"][0]["elapsed_s"]); r4 = float(p4_r["points"][0]["elapsed_s"])
-        rep_note = f"MC wall time: {r1:.0f} s \u2192 {r4:.0f} s ({r1 / max(r4, 1e-6):.2f}\u00d7); chains merged for Vehtari stats"
+        rep_note = f"Single-$P$ sharding: {r1:.0f} s \u2192 {r4:.0f} s ({r1 / max(r4, 1e-6):.2f}\u00d7 pure MC on 4\u00d7RTX 3090)"
     else:
-        rep_note = "Independent chains sharded across GPUs and merged exactly for Vehtari stats"
+        rep_note = "Independent chains sharded across GPUs and merged for Vehtari stats"
 
-    _draw_row(26.0, "Pressure-REMC / pressure queue across GPUs", "remc", remc_note)
+    _draw_row(26.5, "Isolated-ladder \u03bc-REMC across GPUs (8 GPUs in formal 2\u00d72)", "remc", remc_note)
     _draw_row(5.5, "Replica sharding for single-pressure scaling", "replica", rep_note)
 
     out_p = out_dir / "fig1_architecture.png"
@@ -1191,13 +1168,13 @@ def fig_jctc2_presubmission_ablation(ps: dict, out_dir: Path):
     ax_a.set_ylim(0, 780)
     ax_a.set_xlabel("Cumulative whole-ladder compute (10$^3$ GPU-s; 8$\\times$RTX 3090)")
     ax_a.set_ylabel("Bulk ESS of loading $N$ at 0.28 bar")
-    ax_a.set_title("Mixing growth vs. whole-ladder budget (3 replicates/group)", loc="left")
+    ax_a.set_title("Mixing growth vs. whole-ladder budget (3 seeds/group)", loc="left")
     handles_a, labels_a = ax_a.get_legend_handles_labels()
     handles_a.extend([
-        Line2D([0], [0], marker="o", color="none", mfc="#374151", mec="#374151", ms=5.5, label="Filled: 11/11 gates PASS"),
-        Line2D([0], [0], marker="o", color="none", mfc="white", mec="#374151", ms=5.5, mew=1.2, label="Open: budget-censored FAIL"),
+        Line2D([0], [0], marker="o", color="none", mfc="#374151", mec="#374151", ms=5.5, label="Filled: endpoint 11/11 PASS"),
+        Line2D([0], [0], marker="o", color="none", mfc="white", mec="#374151", ms=5.5, mew=1.2, label="Open: not converged in budget"),
     ])
-    ax_a.legend(handles=handles_a, loc="upper left", fontsize=7.1, handlelength=2.0)
+    ax_a.legend(handles=handles_a, loc="upper left", fontsize=7.0, handlelength=2.0)
     panel_label(ax_a, "a")
 
     # ---- (b) Fixed-budget efficiency ESS_bulk(N) / total_ladder_GPU_s ----
@@ -1209,8 +1186,8 @@ def fig_jctc2_presubmission_ablation(ps: dict, out_dir: Path):
         med_v = float(gs_map[grp]["ess_bulk_N_per_total_gpu_s"]["median"]) * 1000.0
         med_effs.append(med_v)
         ax_b.bar(idx, med_v, width=0.52, color=col, alpha=0.28, edgecolor=col, lw=1.3, zorder=2)
-        offsets = np.linspace(-0.12, 0.12, len(g_runs))
-        for dx, r, vk in zip(offsets, g_runs, vals_k):
+        offsets = np.linspace(-0.14, 0.14, len(g_runs))
+        for s_i, (dx, r, vk) in enumerate(zip(offsets, g_runs, vals_k), start=1):
             passed_fin = bool(r["primary_028bar"]["converged"])
             ax_b.scatter(
                 [idx + dx], [vk],
@@ -1221,40 +1198,44 @@ def fig_jctc2_presubmission_ablation(ps: dict, out_dir: Path):
         ax_b.text(
             idx, max(vals_k) + 0.55,
             f"med {med_v:.2f}\n[{min(vals_k):.2f}, {max(vals_k):.2f}]",
-            ha="center", va="bottom", fontsize=7.4, color=C["ink"],
+            ha="center", va="bottom", fontsize=7.3, color=C["ink"],
         )
 
     c_over_a = float(contrasts["C_over_A_REMC_effect_1B_only"]["eff_ratio"])
     d_over_b = float(contrasts["D_over_B_REMC_effect_1B_2B"]["eff_ratio"])
     b_over_a = float(contrasts["B_over_A_2B_effect_REMC_OFF"]["eff_ratio"])
     d_over_c = float(contrasts["D_over_C_2B_effect_REMC_ON"]["eff_ratio"])
+    s12_sum = ps["surrogates"]["1B_2B"]["summary"]
+    mae_cls = float(s12_sum["mae_2b_classical_holdout_kJ_mol"])
+    mae_dep = float(s12_sum["mae_2b_deployed_holdout_kJ_mol"])
     ratio_txt = (
-        f"2$\\times$2 median contrasts:\n"
-        f"REMC ON/OFF: {c_over_a:.2f}$\\times$ (1B), {d_over_b:.2f}$\\times$ (1B+2B)\n"
-        f"2B fit (1B+2B / 1B): {b_over_a:.2f}$\\times$ (OFF), {d_over_c:.2f}$\\times$ (ON)\n"
-        f"*1B-only retains unscaled classical guest–guest pair terms"
+        f"Whole-ladder $\\mu$-REMC ESS$_N$/GPU-s gain:\n"
+        f"  {c_over_a:.2f}$\\times$ (1B: C/A), {d_over_b:.2f}$\\times$ (1B+2B: D/B)\n"
+        f"2B hold-out MAE: {mae_cls:.2f} $\\rightarrow$ {mae_dep:.2f} kJ mol$^{{-1}}$,\n"
+        f"  matched-budget ESS$_N$/GPU-s: {b_over_a:.2f}$\\times$ (OFF), {d_over_c:.2f}$\\times$ (ON)\n"
+        f"*1B-only retains unscaled classical guest–guest terms"
     )
     ax_b.text(
-        0.03, 0.96, ratio_txt, transform=ax_b.transAxes,
-        va="top", ha="left", fontsize=7.1, color=C["ink"],
-        bbox=dict(boxstyle="round,pad=0.35", fc="#F9FAFB", ec="#D1D5DB", lw=0.7),
+        0.025, 0.97, ratio_txt, transform=ax_b.transAxes,
+        va="top", ha="left", fontsize=6.85, color=C["ink"], linespacing=1.22,
+        bbox=dict(boxstyle="round,pad=0.32", fc="#F9FAFB", ec="#D1D5DB", lw=0.7),
     )
     ax_b.set_xticks(x_pos)
     ax_b.set_xticklabels([g[2] for g in _PRESUB_GROUPS], fontsize=8.0)
-    ax_b.set_ylim(0, 17.8)
-    ax_b.set_ylabel("Sampling efficiency (ESS$_N$ per 10$^3$ ladder GPU-s)")
-    ax_b.set_title("0.28 bar fixed-budget efficiency (57.6k GPU-s/run)", loc="left")
+    ax_b.set_ylim(0, 18.6)
+    ax_b.set_ylabel("Whole-ladder ESS$_{\\rm bulk}(N)$ per 10$^3$ GPU-s")
+    ax_b.set_title("0.28 bar efficiency (8$\\times$RTX 3090, 7,200 s = 57.6k GPU-s/run)", loc="left")
     panel_label(ax_b, "b")
 
-    # ---- (c) 0.28 bar uptake +/- MCSE_eff with R-hat / ESS & pass markers ----
+    # ---- (c) 0.28 bar per-seed point estimates +/- MCSE_eff & endpoint vs 2-ckpt pass counts ----
     all_q = [float(r["primary_028bar"]["uptake_mmol_g"]) for r in runs]
     grand_med = float(np.median(all_q))
     ax_c.axhline(grand_med, color="#9CA3AF", lw=0.9, ls="--", zorder=1)
 
     for g_idx, (grp, _, _, col, _, mk) in enumerate(_PRESUB_GROUPS):
         g_runs = [r for r in runs if r["group"] == grp]
-        offsets = np.linspace(-0.20, 0.20, len(g_runs))
-        for dx, r in zip(offsets, g_runs):
+        offsets = np.linspace(-0.21, 0.21, len(g_runs))
+        for s_i, (dx, r) in enumerate(zip(offsets, g_runs), start=1):
             p0 = r["primary_028bar"]
             ec = r["empirical_convergence"]
             q_val = float(p0["uptake_mmol_g"])
@@ -1275,7 +1256,8 @@ def fig_jctc2_presubmission_ablation(ps: dict, out_dir: Path):
                 zorder=5,
             )
             if conf_pass:
-                ax_c.scatter([g_idx + dx], [q_val + mcse + 0.022], s=48, marker="*", color=col, edgecolor="#111827", linewidths=0.4, zorder=6)
+                ax_c.scatter([g_idx + dx], [q_val + mcse + 0.021], s=48, marker="*", color=col, edgecolor="#111827", linewidths=0.4, zorder=6)
+            ax_c.text(g_idx + dx, q_val - mcse - 0.012, f"S{s_i}", ha="center", va="top", fontsize=6.1, color=C["muted"])
         gs = gs_map[grp]
         n_fin = int(gs["n_passed_final"])
         n_conf = int(gs["n_passed_confirmed_empirical"])
@@ -1284,40 +1266,40 @@ def fig_jctc2_presubmission_ablation(ps: dict, out_dir: Path):
         ess_u_med = float(gs["ess_bulk_U"]["median"])
         ess_o_med = float(gs["ess_bulk_OMS"]["median"])
         ax_c.text(
-            g_idx, 5.955,
-            f"Fin {n_fin}/3 | Conf {n_conf}/3\n"
-            f"$\\hat{{R}}_N$ {rh_med:.3f}\n"
+            g_idx, 5.916,
+            f"End {n_fin}/3 | 2-ckpt {n_conf}/3\n"
+            f"$\\hat{{R}}_N$={rh_med:.3f}\n"
             f"ESS {ess_n_med:.0f}/{ess_u_med:.0f}/{ess_o_med:.0f}",
-            ha="center", va="bottom", fontsize=6.7, color=C["ink"],
-            bbox=dict(boxstyle="round,pad=0.22", fc="#F9FAFB", ec="#E5E7EB", lw=0.6),
+            ha="center", va="bottom", fontsize=5.85, color=C["ink"], linespacing=1.18,
+            bbox=dict(boxstyle="round,pad=0.16", fc="#F9FAFB", ec="#E5E7EB", lw=0.6),
         )
 
     ax_c.set_xticks(x_pos)
     ax_c.set_xticklabels([g[2] for g in _PRESUB_GROUPS], fontsize=8.0)
     ax_c.set_xlim(-0.55, 3.55)
-    ax_c.set_ylim(5.93, 6.48)
-    ax_c.set_ylabel("CO$_2$ uptake at 0.28 bar (mmol g$^{-1}$, bars: $\\pm$MCSE$_{\\rm eff}$)")
-    ax_c.set_title("Equilibrium parity & convergence summary (ESS: $N/U/$OMS)", loc="left")
+    ax_c.set_ylim(5.90, 6.49)
+    ax_c.set_ylabel("CO$_2$ uptake at 0.28 bar (mmol g$^{-1}$, $\\pm$MCSE$_{\\rm eff}$)")
+    ax_c.set_title("Per-seed fixed-budget point estimates & pass counts", loc="left")
     leg_c = [
-        Line2D([0], [0], marker="*", color="none", mfc="#0F766E", mec="#111827", mew=0.6, ms=8.0, label="Star + black ring: 2-ckpt confirmed PASS"),
-        Line2D([0], [0], marker="D", color="none", mfc="#0F766E", mec="#0F766E", mew=1.2, ms=5.5, label="Filled: final-endpoint PASS only"),
-        Line2D([0], [0], marker="o", color="none", mfc="white", mec="#64748B", mew=1.2, ms=5.5, label="Open: budget-censored FAIL"),
-        Line2D([0], [0], color="#9CA3AF", lw=1.0, ls="--", label=f"Grand median: {grand_med:.2f} mmol g$^{{-1}}$"),
+        Line2D([0], [0], marker="*", color="none", mfc="#0F766E", mec="#111827", mew=0.6, ms=8.0, label="Star + black ring: 2-ckpt confirmed PASS (0/3, 0/3, 1/3, 1/3)"),
+        Line2D([0], [0], marker="D", color="none", mfc="#0F766E", mec="#0F766E", mew=1.2, ms=5.5, label="Filled: endpoint 11/11 PASS (0/3, 0/3, 1/3, 2/3)"),
+        Line2D([0], [0], marker="o", color="none", mfc="white", mec="#64748B", mew=1.2, ms=5.5, label="Open: not converged within 7,200 s budget"),
+        Line2D([0], [0], color="#9CA3AF", lw=1.0, ls="--", label=f"12-run median point estimate: {grand_med:.2f} mmol g$^{{-1}}$"),
     ]
-    ax_c.legend(handles=leg_c, loc="upper left", fontsize=6.8, ncol=1)
+    ax_c.legend(handles=leg_c, loc="upper left", fontsize=6.45, ncol=1)
     panel_label(ax_c, "c")
 
-    # ---- (d) Empirical time-to-convergence (confirmed 2 consecutive 5-min ckpts) + right censoring ----
+    # ---- (d) Empirical time-to-convergence (confirmed 2 consecutive 5-min ckpts) + budget cutoff ----
     y_rows = []
     for grp, _, _, col, _, mk in _PRESUB_GROUPS:
         g_runs = [r for r in runs if r["group"] == grp]
         for r_i, r in enumerate(g_runs, start=1):
-            y_rows.append((f"{grp}-R{r_i}", col, mk, r))
+            y_rows.append((f"{grp}-S{r_i}", col, mk, r))
 
     yy = np.arange(len(y_rows))[::-1]
     ax_d.axvline(budget_wall_s, color="#DC2626", lw=1.2, ls="--", zorder=1)
     ax_d.text(budget_wall_s - 150, len(y_rows) - 0.15, "Budget cutoff:\n7,200 s (57.6k GPU-s)",
-              ha="right", va="top", fontsize=6.9, color="#DC2626",
+              ha="right", va="top", fontsize=6.8, color="#DC2626",
               bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.88))
 
     for yi, (lbl, col, mk, r) in zip(yy, y_rows):
@@ -1332,34 +1314,34 @@ def fig_jctc2_presubmission_ablation(ps: dict, out_dir: Path):
             ax_d.scatter([t_cf], [yi], s=26, marker="|", color="#111827", linewidths=1.5, zorder=5)
             ax_d.text(
                 t_cf + 150, yi, f"{t_c:,.0f} s (conf. {t_cf:,.0f} s)",
-                va="center", ha="left", fontsize=6.7, color=col, fontweight="bold",
+                va="center", ha="left", fontsize=6.6, color=col, fontweight="bold",
                 bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="none", alpha=0.92), zorder=6,
             )
         elif ec.get("unconfirmed_terminal_pass"):
             ax_d.hlines(yi, 0, budget_wall_s, color=col, lw=2.0, ls="-", alpha=0.55, zorder=2)
             ax_d.scatter([budget_wall_s], [yi], s=48, marker=mk, facecolor=col, edgecolor=col, linewidths=1.2, zorder=5)
-            ax_d.annotate("", xy=(budget_wall_s + 520, yi), xytext=(budget_wall_s + 40, yi),
+            ax_d.annotate("", xy=(budget_wall_s + 480, yi), xytext=(budget_wall_s + 40, yi),
                           arrowprops=dict(arrowstyle="->", color=col, lw=1.1))
-            ax_d.text(budget_wall_s + 580, yi, ">7,200 s (11/11 @ end)", va="center", ha="left", fontsize=6.7, color=col)
+            ax_d.text(budget_wall_s + 530, yi, "Endpoint pass @ 7,200 s (unconf.)", va="center", ha="left", fontsize=6.35, color=col)
         else:
             ax_d.hlines(yi, 0, budget_wall_s, color=col, lw=1.5, ls="--", alpha=0.40, zorder=2)
             ax_d.scatter([budget_wall_s], [yi], s=42, marker=mk, facecolor="white", edgecolor=col, linewidths=1.2, zorder=5)
-            ax_d.annotate("", xy=(budget_wall_s + 520, yi), xytext=(budget_wall_s + 40, yi),
+            ax_d.annotate("", xy=(budget_wall_s + 480, yi), xytext=(budget_wall_s + 40, yi),
                           arrowprops=dict(arrowstyle="->", color=col, lw=1.0, alpha=0.75))
             n_g = sum(1 for v in p0["gates"].values() if v)
-            ax_d.text(budget_wall_s + 580, yi, f">7,200 s ({n_g}/11 gates)", va="center", ha="left", fontsize=6.7, color=C["muted"])
+            ax_d.text(budget_wall_s + 530, yi, f"Not converged in budget ({n_g}/11)", va="center", ha="left", fontsize=6.35, color=C["muted"])
 
     # Horizontal group separators
     for sep in (2.5, 5.5, 8.5):
         ax_d.axhline(sep, color="#E5E7EB", lw=0.7, zorder=0)
 
     ax_d.set_yticks(yy)
-    ax_d.set_yticklabels([row[0] for row in y_rows], fontsize=7.6)
-    ax_d.set_xlim(0, 11100)
+    ax_d.set_yticklabels([row[0] for row in y_rows], fontsize=7.5)
+    ax_d.set_xlim(0, 11650)
     ax_d.set_ylim(-0.7, len(y_rows) + 0.15)
     ax_d.set_xticks([0, 1800, 3600, 5400, 7200])
     ax_d.set_xlabel("Empirical time to 2-ckpt convergence, wall-clock (s; 8 GPUs)")
-    ax_d.set_title("Empirical convergence time & right-censoring (no extrapolation)", loc="left")
+    ax_d.set_title("Per-seed convergence time & budget cutoff (no extrapolation)", loc="left")
 
     ax_d_top = ax_d.twiny()
     ax_d_top.set_xlim(ax_d.get_xlim()[0] * 8.0 / 1000.0, ax_d.get_xlim()[1] * 8.0 / 1000.0)
@@ -2120,17 +2102,20 @@ def main():
         ps_path = _resolve_presub_summary(args.presubmission_summary)
         pt_path = Path(args.presubmission_traces)
         ps = json.loads(ps_path.read_text(encoding="utf-8"))
+        if ARCH_NPZ.is_file():
+            s_opt = json.loads(JCTC_SUMMARY.read_text(encoding="utf-8")) if JCTC_SUMMARY.is_file() else {}
+            fig_jctc1_architecture(s_opt, ARCH_NPZ, OUT, presub=ps)
         fig_jctc2_presubmission_ablation(ps, OUT)
         if pt_path.is_file():
             fig_si_presubmission_diagnostics(ps, pt_path, OUT)
     elif args.mode == "jctc":
         summary_path = Path(args.summary) if args.summary else JCTC_SUMMARY
         s = json.loads(summary_path.read_text(encoding="utf-8"))
-        fig_jctc1_architecture(s, ARCH_NPZ, OUT)
         ps_path = _resolve_presub_summary(args.presubmission_summary)
         pt_path = Path(args.presubmission_traces)
-        if ps_path.is_file():
-            ps = json.loads(ps_path.read_text(encoding="utf-8"))
+        ps = json.loads(ps_path.read_text(encoding="utf-8")) if ps_path.is_file() else None
+        fig_jctc1_architecture(s, ARCH_NPZ, OUT, presub=ps)
+        if ps is not None:
             fig_jctc2_presubmission_ablation(ps, OUT)
             if pt_path.is_file():
                 fig_si_presubmission_diagnostics(ps, pt_path, OUT)

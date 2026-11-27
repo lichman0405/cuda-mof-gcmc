@@ -429,9 +429,12 @@ def _safe_ratio(num: Optional[float], den: Optional[float]) -> Optional[float]:
 def main():
     p = argparse.ArgumentParser(description="Deterministic audit for JCTC pre-submission matched-budget ablation")
     p.add_argument("--root", default=str(ROOT / "build" / "jctc_presubmission"))
+    p.add_argument("--out-dir", default="", help="Optional output directory (defaults to --root)")
     args = p.parse_args()
 
     out_root = Path(args.root)
+    write_root = Path(args.out_dir) if args.out_dir else out_root
+    write_root.mkdir(parents=True, exist_ok=True)
     proto = json.loads((out_root / "protocol.json").read_text(encoding="utf-8"))
     runs_dir = out_root / "runs"
 
@@ -532,9 +535,9 @@ def main():
         "factorial_contrasts": contrasts,
     }
 
-    sum_json = out_root / "matched_budget_summary.json"
-    npz_out = out_root / "matched_budget_traces.npz"
-    md_out = out_root / "matched_budget_audit.md"
+    sum_json = write_root / "matched_budget_summary.json"
+    npz_out = write_root / "matched_budget_traces.npz"
+    md_out = write_root / "matched_budget_audit.md"
     sum_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     np.savez_compressed(npz_out, **traces_npz)
 

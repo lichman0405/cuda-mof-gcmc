@@ -1,4 +1,4 @@
-# JCTC Pre-Submission Matched-Budget 2x2 Ablation Audit (Mg-MOF-74 / CO2, 298 K, 0.28 bar)
+# Matched-Budget 2x2 Ablation Audit (Mg-MOF-74 / CO2, 298 K, 0.28 bar)
 
 - Total archived runs: **12** (expected 12)
 - Model: `mace-matpes-r2scan-0` (SHA-256 `8f147ecffa1d06a696e5648b13b81abda9c96fda9d0fb3faba3cd3fb27d9bba9`), D3 `False`, `N_max=128`, FP32+FP64.

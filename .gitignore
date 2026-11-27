@@ -9,12 +9,4 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .venv-mlip/
-
-# Keep unpublished JCTC manuscript, SI, internal review notes/checklists, local PDF outputs, and 28 MB raw trace archive local
-docs/MANUSCRIPT_JCTC*.md
-docs/SI_JCTC*.md
-docs/NOVELTY_ASSESSMENT.zh-CN.md
-docs/JCTC_PRESUBMISSION_CHECKLIST*.md
-docs/results/jctc_traces.npz
 output/
-

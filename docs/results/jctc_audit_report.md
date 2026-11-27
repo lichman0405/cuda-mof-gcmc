@@ -1,4 +1,4 @@
-# JCTC v2 Simulation & Reproducibility Audit Report
+# Multi-MOF Nested MC & REMC Simulation Audit Report
 
 - **Source directory**: `/share/SL/cuda-mof-gcmc/build/jctc_v2_prod`
 - **Traces archive**: `jctc_traces.npz` (SHA-256: `e507cb2435a5a826...`)
