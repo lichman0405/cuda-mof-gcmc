@@ -26,15 +26,11 @@ All headline numbers below come from archived raw production trajectories and de
 - **On-demand 1B+2B distillation & cross-MOF transferability:** Across 4 MOFs (Mg-MOF-74, Ni-MOF-74, Cu-BTC, IRMOF-1), 3 guests ($\text{CO}_2$, $\text{CH}_4$, $\text{H}_2\text{O}$), and 4 MLIP setups (`39.7–212.7 s` single-GPU build), 1B hold-out $R^2$ spans `0.9236–0.9942` (MAE `0.89–2.85 kJ/mol`), 2B deployed-LUT hold-out MAE spans `0.04–1.54 kJ/mol`, and domain-fine-tuned **`MACE-DAC-1+PBE-D3` $\text{CO}_2$ isotherms converge on 18/18 (100%)** state points across all four frameworks. Widom and equilibrium partitioning show D3(BJ) supplies `47.9%–53.0%` (`MACE-DAC-1`) and `45.8%–54.1%` (`MP0+D3`) of Mg-MOF-74 interaction energy.
 - **Numerical precision, multi-GPU & classical baseline:** `FP32` forward with `FP64` `node_energy` summation matches full `FP64` to RMS `0.00044–0.00130 kJ/mol` with **`0%` accept/reject flips** across 64 outer test pairs and `5.93×–9.49×` speedup; 4×RTX 3090 replica sharding accelerates MC by **`3.26×`** (`2.19×` pressure queue end-to-end); classical Tricubic GCMC matches single-core `RASPA3 3.0.29` within `≤ 0.54σ` at `598,669 MC-steps/s`, and `Pol-SCF` matches `36×36` matrix inversion to `1.83×10⁻⁸ K`.
 
-````carousel
-![Matched-budget 2x2 ablation on Mg-MOF-74 + CO2 at 0.28 bar](assets/fig2_parity_efficiency.png)
-<!-- slide -->
-![Cross-MOF transferability and MACE-DAC-1 vs r2SCAN isotherms](assets/fig3_transferability_finetuned.png)
-<!-- slide -->
-![Target functional sensitivity, Widom, D3 partitioning, and exploratory 1x1x4 test](assets/fig4_physics_diagnostics.png)
-<!-- slide -->
-![Global Vehtari convergence audit, REMC swap acceptance, consistency, and GPU cost](assets/fig5_convergence_scaling.png)
-````
+| Matched-budget 2×2 ablation (`0.28 bar`) | Cross-MOF transferability (`MACE-DAC-1` vs. `r2SCAN`) |
+| :---: | :---: |
+| ![Matched-budget 2x2 ablation on Mg-MOF-74 + CO2 at 0.28 bar](assets/fig2_parity_efficiency.png) | ![Cross-MOF transferability and MACE-DAC-1 vs r2SCAN isotherms](assets/fig3_transferability_finetuned.png) |
+| **Target functional sensitivity, Widom & D3 breakdown** | **Global convergence audit, REMC swaps & GPU cost** |
+| ![Target functional sensitivity, Widom, D3 partitioning, and exploratory 1x1x4 test](assets/fig4_physics_diagnostics.png) | ![Global Vehtari convergence audit, REMC swap acceptance, consistency, and GPU cost](assets/fig5_convergence_scaling.png) |
 
 ## Code layout
 

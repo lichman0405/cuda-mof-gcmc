@@ -26,15 +26,11 @@
 - **自动化按需 1B+2B 蒸馏与跨 MOF 迁移：** 覆盖 4 种 MOF（Mg-MOF-74、Ni-MOF-74、Cu-BTC、IRMOF-1）、3 种客体（$\text{CO}_2$、$\text{CH}_4$、$\text{H}_2\text{O}$）与 4 种 MLIP 设置（单卡建势 `39.7–212.7 s`），1B 留出集 $R^2$ 为 `0.9236–0.9942`（MAE `0.89–2.85 kJ/mol`），2B 线上 LUT 留出集 MAE 为 `0.04–1.54 kJ/mol`；领域微调的 **`MACE-DAC-1+PBE-D3` $\text{CO}_2$ 等温线跨全部 4 种 MOF 实现 18/18（100%）全收敛**。Widom 与平衡态分解显示 D3(BJ) 贡献了 Mg-MOF-74 结合能的 `47.9%–53.0%`（`MACE-DAC-1`）与 `45.8%–54.1%`（`MP0+D3`）。
 - **数值精度、多卡扩展与经典基线：** `FP32` 前向配合 `FP64` 节点累加与全 `FP64` 对比在 64 组外层转移对上达成 **`0%` 接受/拒绝判决翻转**（RMS 偏差 `0.00044–0.00130 kJ/mol`，推理提速 `5.93×–9.49×`）；4×RTX 3090 上副本分片纯 MC 加速 **`3.26×`**，压力队列端到端加速 `2.19×`；经典三维插值内核与单核 `RASPA3 3.0.29` 偏差 `≤ 0.54σ`（`598,669 MC-steps/s`），`Pol-SCF` 极化求解与精确矩阵求逆偏差 `1.83×10⁻⁸ K`。
 
-````carousel
-![Mg-MOF-74 0.28 bar 同预算 2×2 消融基准结果](assets/fig2_parity_efficiency.png)
-<!-- slide -->
-![跨 MOF 迁移性与 MACE-DAC-1 全压力等温线](assets/fig3_transferability_finetuned.png)
-<!-- slide -->
-![泛函敏感性、Widom 基准、MACE/D3 分解与探索性 1x1x4 检验](assets/fig4_physics_diagnostics.png)
-<!-- slide -->
-![76 点 Vehtari 收敛审计、REMC 交换率与蒸馏/采样 GPU 开销对比](assets/fig5_convergence_scaling.png)
-````
+| 同预算 2×2 消融基准（`0.28 bar`） | 跨 MOF 迁移性与 `MACE-DAC-1` vs. `r2SCAN` 等温线 |
+| :---: | :---: |
+| ![Mg-MOF-74 0.28 bar 同预算 2×2 消融基准结果](assets/fig2_parity_efficiency.png) | ![跨 MOF 迁移性与 MACE-DAC-1 全压力等温线](assets/fig3_transferability_finetuned.png) |
+| **泛函敏感性、Widom 基准与 D3 色散分解** | **76 点收敛审计、REMC 交换率与 GPU 耗时** |
+| ![泛函敏感性、Widom 基准、MACE/D3 分解与探索性 1x1x4 检验](assets/fig4_physics_diagnostics.png) | ![76 点 Vehtari 收敛审计、REMC 交换率与蒸馏/采样 GPU 开销对比](assets/fig5_convergence_scaling.png) |
 
 ## 代码结构
 
