@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SUMMARY = ROOT / "docs" / "results" / "phase2_phase3_summary.json"
 JCTC_SUMMARY = ROOT / "docs" / "results" / "jctc_summary.json"
 PRESUB_SUMMARY = ROOT / "build" / "jctc_presubmission" / "matched_budget_summary.json"
+PRESUB_SUMMARY_PUBLISHED = ROOT / "docs" / "results" / "presubmission" / "matched_budget_summary.json"
 PRESUB_TRACES = ROOT / "build" / "jctc_presubmission" / "matched_budget_traces.npz"
 ARCH_NPZ = ROOT / "docs" / "results" / "arch_inputs_mgmof74_r2scan.npz"
 EXP = ROOT / "data" / "exp_isotherms"
@@ -2107,8 +2108,16 @@ def main():
     ARCH_NPZ = Path(args.arch_npz)
     OUT.mkdir(parents=True, exist_ok=True)
 
+    def _resolve_presub_summary(arg_path: str) -> Path:
+        p = Path(arg_path)
+        if p.is_file():
+            return p
+        if PRESUB_SUMMARY_PUBLISHED.is_file():
+            return PRESUB_SUMMARY_PUBLISHED
+        return p
+
     if args.mode == "presubmission":
-        ps_path = Path(args.presubmission_summary)
+        ps_path = _resolve_presub_summary(args.presubmission_summary)
         pt_path = Path(args.presubmission_traces)
         ps = json.loads(ps_path.read_text(encoding="utf-8"))
         fig_jctc2_presubmission_ablation(ps, OUT)
@@ -2118,7 +2127,7 @@ def main():
         summary_path = Path(args.summary) if args.summary else JCTC_SUMMARY
         s = json.loads(summary_path.read_text(encoding="utf-8"))
         fig_jctc1_architecture(s, ARCH_NPZ, OUT)
-        ps_path = Path(args.presubmission_summary)
+        ps_path = _resolve_presub_summary(args.presubmission_summary)
         pt_path = Path(args.presubmission_traces)
         if ps_path.is_file():
             ps = json.loads(ps_path.read_text(encoding="utf-8"))

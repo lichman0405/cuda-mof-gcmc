@@ -1,0 +1,69 @@
+{
+  "gate1_passed": true,
+  "git_commit": "c492ad37306cfdfc40c23c63d7d632905d8bb219",
+  "parent_commit": "834e3ac87fb643600a639c0ef58a42a44e7daeae",
+  "hard_core_rule": {
+    "r_fw_h_A": 1.2,
+    "r_fw_heavy_A": 1.48,
+    "r_gg_A": 0.5,
+    "comparison": "strict < on squared periodic MIC distances; Z <= 0 virtual sites excluded",
+    "N_max": 128,
+    "skewed_cell_mic": "exact Cauchy-Schwarz integer image bounds around nearest unit/supercell fractional shift in include/hard_core.hpp",
+    "grid_corner_rejection_removed": true
+  },
+  "distill_version": "v1.4",
+  "file_sha256": {
+    "include/hard_core.hpp": "6925e1dab09a94b1056dcc26d74736a57e92c09d4d40c985e459141c8a6eef30",
+    "include/proposer_api.h": "f9eed12f9dc3976a55b73ff9e51604f5ebc664735fd74b4d669a85d789c76e05",
+    "src/proposer_dll.cu": "a5f009c0838532710f48737bc0d0b074b0b2ae71ad9dc6d1b9f848fb38ad0b14",
+    "scripts/guests.py": "e50fd767e0fbcb75674ec403473a04dc02181fd5c4bd516366894eed5ac7a275",
+    "scripts/mlip_distill.py": "e1d46678fa5e232f93ac7364391916bc82468c7d054997a1d643909d48d9a4ce",
+    "scripts/nested_mc_engine.py": "18f9ced2041759b5ad5f574dcaa2f40f62d8f0025411f80842e61dce752812c0",
+    "scripts/direct_mlip_gcmc.py": "b8d800e2d34463adf1c9e664dde62235a6fc6fbfd6b69306599e8e84b1b9e3fd",
+    "scripts/run_metadata.py": "c1dbf8413f09039d20e296375287c699911460509259fee02d7d44f1bbffbe1b",
+    "scripts/run_mlip_gcmc.py": "728112c0f10e241b247968f6ff5722a61b275210a38c4bce26bd621c85537897",
+    "tests/test_phase1_distill_and_cbmc.py": "548a7a43014a0a83f9e9c678b05defbdfa9b7600dd0cc9b3c1505b25f6e4e933",
+    "tests/test_unified_hard_core.py": "e89e013ef5e87718b27ee2ae95d2673ddecbe61c66ab9451048078132c53329d"
+  },
+  "pytest_full_non_mlip": {
+    "passed": 58,
+    "failed": 0,
+    "deselected_mlip": 2,
+    "wall_s": 461.09,
+    "log": "build/jctc_presubmission/gate1/gate1_pytest_full.log"
+  },
+  "verify_scf_pol": {
+    "passed": true,
+    "log": "build/jctc_presubmission/gate1/gate1_scf_pol.log"
+  },
+  "verify_cli": {
+    "all_4_presets_completed_with_zero_drift_and_detailed_balance": true,
+    "halted_at_postcheck_missing_optional_file": "build/raspa3_uff_grid_bench.csv",
+    "log": "build/jctc_presubmission/gate1/gate1_cli_scf.log"
+  },
+  "coord_parity_archive": {
+    "path": "build/jctc_presubmission/gate1/gate1_coord_parity.json",
+    "total_checked": 1040,
+    "mismatches": 0,
+    "by_suite": {
+      "boundary": {
+        "checked": 40,
+        "legal": 24,
+        "illegal": 16,
+        "mismatches": 0
+      },
+      "random_MgMOF-74.cif_co2": {
+        "checked": 500,
+        "legal": 206,
+        "illegal": 294,
+        "mismatches": 0
+      },
+      "random_IRMOF-1.cif_ch4": {
+        "checked": 500,
+        "legal": 285,
+        "illegal": 215,
+        "mismatches": 0
+      }
+    }
+  }
+}

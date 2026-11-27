@@ -1,0 +1,1330 @@
+{
+  "protocol_version": "jctc_presubmission_v1",
+  "git": {
+    "commit": "9e90f2a1e33627a32760b6d8b725f70ceacb6148",
+    "dirty": true
+  },
+  "system": {
+    "cif": "data/MgMOF-74.cif",
+    "cif_sha256": "a3b87aff1677263df0cdb032776f79baee44409b8b81099c3403f5ca958c4d21",
+    "supercell": [
+      1,
+      1,
+      2
+    ],
+    "guest": "co2",
+    "T_K": 298.0,
+    "pressures_bar": [
+      0.012,
+      0.04,
+      0.08,
+      0.16,
+      0.22,
+      0.28,
+      0.55,
+      1.0
+    ],
+    "primary_pressure_bar": 0.28,
+    "model": "mace-matpes-r2scan-0",
+    "expected_model_sha256": "8f147ecffa1d06a696e5648b13b81abda9c96fda9d0fb3faba3cd3fb27d9bba9",
+    "verified_model_sha256": "8f147ecffa1d06a696e5648b13b81abda9c96fda9d0fb3faba3cd3fb27d9bba9",
+    "dispersion": false,
+    "dtype": "float32",
+    "mace_chunk": 2
+  },
+  "sampling": {
+    "n_boxes": 4,
+    "max_mol": 128,
+    "grid_dims": [
+      240,
+      240,
+      64
+    ],
+    "distill_version": "v1.4",
+    "distill_1b_samples": 1200,
+    "distill_2b_samples": 192,
+    "distill_seed": 2026112551,
+    "cbmc_k": 128,
+    "k_steps": 24,
+    "p_ins_del": 0.5,
+    "eq_cycles": 1500,
+    "adapt_k": "off",
+    "adapt_shift": "off",
+    "pilot_cycles": 0,
+    "gpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "remc_swap_every": 2,
+    "formal_budget_wall_s": 7200.0,
+    "diag_checkpoint_every_s": 300.0,
+    "calib_seed": 2026112500,
+    "calib_pilot_cycles": 40,
+    "replicate_seeds": [
+      2026112601,
+      2026112602,
+      2026112603
+    ],
+    "rotated_orders": {
+      "2026112601": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "2026112602": [
+        "B",
+        "D",
+        "A",
+        "C"
+      ],
+      "2026112603": [
+        "D",
+        "C",
+        "B",
+        "A"
+      ]
+    }
+  },
+  "surrogates": {
+    "1B_only": {
+      "cache_npz_path": "/share/SL/cuda-mof-gcmc/build/jctc_presubmission/distill_cache/distill_4a509597c4fde07e.npz",
+      "cache_npz_sha256": "bd3afc96ab661bcecc5a4fec63c867b2eddeed538d5743573f84fb0b32521790",
+      "distill_sha256": "4a509597c4fde07e01ef5c00cf9b34c9e108d16233b63482cdbdabefef9e0c94",
+      "distill_wall_s": 39.66773507499602,
+      "summary": {
+        "version": "v1.4",
+        "hard_core_rule": {
+          "name": "unified_continuous_mic_v1",
+          "fw_h_A": 1.2,
+          "fw_heavy_A": 1.48,
+          "gg_A": 0.5,
+          "virtual_sites_excluded": true,
+          "continuous_mic": true
+        },
+        "distill_sha256": "4a509597c4fde07e01ef5c00cf9b34c9e108d16233b63482cdbdabefef9e0c94",
+        "only_1b": true,
+        "cif_path": "/share/SL/cuda-mof-gcmc/data/MgMOF-74.cif",
+        "supercell": [
+          1,
+          1,
+          2
+        ],
+        "guest_name": "co2",
+        "model": "mace-matpes-r2scan-0",
+        "model_sha256": "8f147ecffa1d06a696e5648b13b81abda9c96fda9d0fb3faba3cd3fb27d9bba9",
+        "dispersion": false,
+        "dispersion_xc": "pbe",
+        "dtype": "float32",
+        "grid_dims": [
+          240,
+          240,
+          64
+        ],
+        "n_chan": 2,
+        "n_fw_envs": 8,
+        "fw_env_sigs": [
+          [
+            1,
+            [
+              6
+            ]
+          ],
+          [
+            6,
+            [
+              1,
+              6,
+              6
+            ]
+          ],
+          [
+            6,
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          [
+            6,
+            [
+              6,
+              6,
+              8
+            ]
+          ],
+          [
+            6,
+            [
+              6,
+              8,
+              8
+            ]
+          ],
+          [
+            8,
+            [
+              6,
+              12
+            ]
+          ],
+          [
+            8,
+            [
+              6,
+              12,
+              12
+            ]
+          ],
+          [
+            12,
+            [
+              8,
+              8,
+              8,
+              8,
+              8
+            ]
+          ]
+        ],
+        "q_env_eff": [
+          0.2835939973640943,
+          -0.37617673410724567,
+          -0.7207179854296712,
+          0.9657644744492884,
+          1.307250444913366,
+          -0.858461796306925,
+          -1.1955633702969495,
+          1.7898743397109926
+        ],
+        "n_1b_evaluated": 1200,
+        "n_1b_kept": 988,
+        "n_2b_evaluated": 0,
+        "n_2b_train": 0,
+        "n_2b_val": 0,
+        "r2_1b": 0.9785486164033714,
+        "mae_1b_kJ_mol": 2.498845379721108,
+        "mae_pocket_kJ_mol": 4.357066899774171,
+        "r2_2b": null,
+        "mae_2b_kJ_mol": null,
+        "r2_2b_deployed_holdout": null,
+        "mae_2b_deployed_holdout_kJ_mol": null,
+        "mae_2b_classical_holdout_kJ_mol": null,
+        "r2_2b_train": null,
+        "mae_2b_train_kJ_mol": null,
+        "mean_offset_classical_gg_kJ_mol": null,
+        "mean_offset_distilled_2b_kJ_mol": null,
+        "gg_q_scale": 1.0,
+        "gg_lj_scale": 1.0,
+        "gg_lut_rmin_A": 2.0,
+        "gg_lut_rmax_A": 6.664319999999999,
+        "t_mace1_s": 20.929749800998252,
+        "t_mace2_s": 0.0,
+        "t_grid_render_s": 18.737985273997765,
+        "distill_wall_s": 39.66773507499602,
+        "derived_1b_from_sha256": "15f04aa248a3f4b03ffdcbc4cfe7b51f6fce45f365075029fe6e26b9b32bac71"
+      },
+      "calib_path": "/share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_only.json",
+      "shifts_kJ_mol": {
+        "0.012": -0.47553684752654934,
+        "0.04": 0.5400908818432661,
+        "0.08": -0.9873125885874678,
+        "0.16": -2.1316795091762017,
+        "0.22": -0.8934210069686657,
+        "0.28": -3.053903569648014,
+        "0.55": -1.598649239992341,
+        "1": -2.614684762945899
+      },
+      "calib_wall_s": 88.8871971659828
+    },
+    "1B_2B": {
+      "cache_npz_path": "/share/SL/cuda-mof-gcmc/build/jctc_presubmission/distill_cache/distill_15f04aa248a3f4b0.npz",
+      "cache_npz_sha256": "e6cc4e70502ca2ae104e7e89b50b7102b1db344bae8dddf4c84bf970eef1f95b",
+      "distill_sha256": "15f04aa248a3f4b03ffdcbc4cfe7b51f6fce45f365075029fe6e26b9b32bac71",
+      "distill_wall_s": 7.527808594983071,
+      "summary": {
+        "version": "v1.4",
+        "hard_core_rule": {
+          "name": "unified_continuous_mic_v1",
+          "fw_h_A": 1.2,
+          "fw_heavy_A": 1.48,
+          "gg_A": 0.5,
+          "virtual_sites_excluded": true,
+          "continuous_mic": true
+        },
+        "distill_sha256": "15f04aa248a3f4b03ffdcbc4cfe7b51f6fce45f365075029fe6e26b9b32bac71",
+        "only_1b": false,
+        "cif_path": "/share/SL/cuda-mof-gcmc/data/MgMOF-74.cif",
+        "supercell": [
+          1,
+          1,
+          2
+        ],
+        "guest_name": "co2",
+        "model": "mace-matpes-r2scan-0",
+        "model_sha256": "8f147ecffa1d06a696e5648b13b81abda9c96fda9d0fb3faba3cd3fb27d9bba9",
+        "dispersion": false,
+        "dispersion_xc": "pbe",
+        "dtype": "float32",
+        "grid_dims": [
+          240,
+          240,
+          64
+        ],
+        "n_chan": 2,
+        "n_fw_envs": 8,
+        "fw_env_sigs": [
+          [
+            1,
+            [
+              6
+            ]
+          ],
+          [
+            6,
+            [
+              1,
+              6,
+              6
+            ]
+          ],
+          [
+            6,
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          [
+            6,
+            [
+              6,
+              6,
+              8
+            ]
+          ],
+          [
+            6,
+            [
+              6,
+              8,
+              8
+            ]
+          ],
+          [
+            8,
+            [
+              6,
+              12
+            ]
+          ],
+          [
+            8,
+            [
+              6,
+              12,
+              12
+            ]
+          ],
+          [
+            12,
+            [
+              8,
+              8,
+              8,
+              8,
+              8
+            ]
+          ]
+        ],
+        "q_env_eff": [
+          0.2835939973640943,
+          -0.37617673410724567,
+          -0.7207179854296712,
+          0.9657644744492884,
+          1.307250444913366,
+          -0.858461796306925,
+          -1.1955633702969495,
+          1.7898743397109926
+        ],
+        "n_1b_evaluated": 1200,
+        "n_1b_kept": 988,
+        "n_2b_evaluated": 192,
+        "n_2b_train": 154,
+        "n_2b_val": 38,
+        "r2_1b": 0.9785486164033714,
+        "mae_1b_kJ_mol": 2.498845379721108,
+        "mae_pocket_kJ_mol": 4.357066899774171,
+        "r2_2b": 0.8177441354941203,
+        "mae_2b_kJ_mol": 1.5095004906069827,
+        "r2_2b_deployed_holdout": 0.8177441354941203,
+        "mae_2b_deployed_holdout_kJ_mol": 1.5095004906069827,
+        "mae_2b_classical_holdout_kJ_mol": 2.5952289856008735,
+        "r2_2b_train": 0.6264972263315105,
+        "mae_2b_train_kJ_mol": 1.701138179294664,
+        "mean_offset_classical_gg_kJ_mol": -1.6972644991931085,
+        "mean_offset_distilled_2b_kJ_mol": -0.3968231359275046,
+        "gg_q_scale": 0.7071067811865476,
+        "gg_lj_scale": 0.6500000000000001,
+        "gg_lut_rmin_A": 2.0,
+        "gg_lut_rmax_A": 6.664319999999999,
+        "t_mace1_s": 20.929749800998252,
+        "t_mace2_s": 3.359987526986515,
+        "t_grid_render_s": 18.737985273997765,
+        "distill_wall_s": 43.70778142698691
+      },
+      "calib_path": "/share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_2b.json",
+      "shifts_kJ_mol": {
+        "0.012": 1.3855836940464257,
+        "0.04": -1.3139184030628428,
+        "0.08": -0.9551500339726715,
+        "0.16": -3.1716579842479886,
+        "0.22": -0.9726309455633007,
+        "0.28": -1.4219526262453144,
+        "0.55": -1.1926219794697497,
+        "1": -3.905146747226964
+      },
+      "calib_wall_s": 93.34670819397434
+    },
+    "shared_1b_grid_bit_exact": true,
+    "derived_1b_from_full": true
+  },
+  "init_states": {
+    "target_high_loading_mmol_g": 8.5,
+    "generation_wall_s": 328.56515189498896,
+    "replicates": {
+      "2026112601": {
+        "path": "/share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112601.json",
+        "sha256": "02e391591f5540df2be2ab77ced7dbcb502af05f77c59e81ade9e4fbb5867729",
+        "summary_by_pressure": {
+          "0.012": {
+            "P_bar": 0.012,
+            "hl_seed": 2026113610,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              36
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.2404
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -78036.75884086578,
+              -82009.33881852363
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -82595.61639432053,
+              -83872.51364179504
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              32,
+              31
+            ],
+            "init_min_gg_A": 3.282783294271357
+          },
+          "0.04": {
+            "P_bar": 0.04,
+            "hl_seed": 2026114619,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              34,
+              34
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              7.7826,
+              7.7826
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -93026.75072306387,
+              -77073.60661252087
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -101491.1132358715,
+              -75816.05141658755
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              30,
+              28
+            ],
+            "init_min_gg_A": 3.2433083615675535
+          },
+          "0.08": {
+            "P_bar": 0.08,
+            "hl_seed": 2026115628,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -73373.9426839968,
+              -72498.19984252851
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -77258.42695974454,
+              -78933.94691549598
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              31,
+              32
+            ],
+            "init_min_gg_A": 3.1276027196616814
+          },
+          "0.16": {
+            "P_bar": 0.16,
+            "hl_seed": 2026116637,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -73110.32285680794,
+              -81426.93328040796
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -78944.22514243082,
+              -84732.12821632423
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              27,
+              33
+            ],
+            "init_min_gg_A": 3.2728874956425815
+          },
+          "0.22": {
+            "P_bar": 0.22,
+            "hl_seed": 2026117646,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              34
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              7.7826
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -82228.256545128,
+              -83012.03319092703
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -87258.68941325883,
+              -85568.58830429256
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              33,
+              32
+            ],
+            "init_min_gg_A": 3.4978743832788175
+          },
+          "0.28": {
+            "P_bar": 0.28,
+            "hl_seed": 2026118655,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              36,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.2404,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -93972.53340338195,
+              -70657.31825862118
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -99704.41046889412,
+              -73268.68438319888
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              35,
+              32
+            ],
+            "init_min_gg_A": 3.7318390429162474
+          },
+          "0.55": {
+            "P_bar": 0.55,
+            "hl_seed": 2026119664,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              32
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              7.3248
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -82428.83083378752,
+              -75301.91824725049
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -81177.36873860427,
+              -78326.77046498164
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              31,
+              31
+            ],
+            "init_min_gg_A": 3.2716665776294276
+          },
+          "1": {
+            "P_bar": 1.0,
+            "hl_seed": 2026120673,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -82637.34011189287,
+              -92175.2472269704
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -87116.33621273156,
+              -94618.33683405581
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              32,
+              29
+            ],
+            "init_min_gg_A": 3.385111925534543
+          }
+        }
+      },
+      "2026112602": {
+        "path": "/share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112602.json",
+        "sha256": "c4ceb8814672ae4df02a8c79fd72ff2675f163437e4b58da5b65388a50e3fafa",
+        "summary_by_pressure": {
+          "0.012": {
+            "P_bar": 0.012,
+            "hl_seed": 2026113611,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -84339.81312466454,
+              -81088.76384003295
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -88051.55058353163,
+              -81021.15932946645
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              33,
+              28
+            ],
+            "init_min_gg_A": 3.2443947935752324
+          },
+          "0.04": {
+            "P_bar": 0.04,
+            "hl_seed": 2026114620,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              30,
+              36
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              6.867,
+              8.2404
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -70454.9400602271,
+              -87653.46527059
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -73693.09611003281,
+              -92811.63107893501
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              29,
+              33
+            ],
+            "init_min_gg_A": 3.498931197606902
+          },
+          "0.08": {
+            "P_bar": 0.08,
+            "hl_seed": 2026115629,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              32,
+              36
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              7.3248,
+              8.2404
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -76333.59414491367,
+              -64071.263184918054
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -78068.60161882476,
+              -65648.98936167429
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              29,
+              31
+            ],
+            "init_min_gg_A": 3.2084184408774727
+          },
+          "0.16": {
+            "P_bar": 0.16,
+            "hl_seed": 2026116638,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              35
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.0115
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -67432.79640732522,
+              -73102.0420257719
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -68727.85438633566,
+              -79118.46676634728
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              31,
+              32
+            ],
+            "init_min_gg_A": 3.3213525840300906
+          },
+          "0.22": {
+            "P_bar": 0.22,
+            "hl_seed": 2026117647,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -96840.26846981856,
+              -83236.12194098826
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -99684.18778169515,
+              -88216.95505685241
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              31,
+              32
+            ],
+            "init_min_gg_A": 3.2407528327955366
+          },
+          "0.28": {
+            "P_bar": 0.28,
+            "hl_seed": 2026118656,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              35,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.0115,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -73232.5488082544,
+              -73274.84661810372
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -75131.26975437842,
+              -82088.2227088732
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              31,
+              32
+            ],
+            "init_min_gg_A": 3.518429380738016
+          },
+          "0.55": {
+            "P_bar": 0.55,
+            "hl_seed": 2026119665,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              35
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.0115
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -85194.26319110663,
+              -74922.77626199984
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -92360.62002784874,
+              -81215.74372948747
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              32,
+              34
+            ],
+            "init_min_gg_A": 3.363699457489938
+          },
+          "1": {
+            "P_bar": 1.0,
+            "hl_seed": 2026120674,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              36
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.2404
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -92998.4083130628,
+              -83123.1534772286
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -92104.42954557546,
+              -84503.90977362396
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              28,
+              34
+            ],
+            "init_min_gg_A": 3.563524072065945
+          }
+        }
+      },
+      "2026112603": {
+        "path": "/share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112603.json",
+        "sha256": "efbe23070dfee14c76e20f52f90bcf7815b259500925cc1f174c666dd8a9dbda",
+        "summary_by_pressure": {
+          "0.012": {
+            "P_bar": 0.012,
+            "hl_seed": 2026113612,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              32
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              7.3248
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -76679.14799492291,
+              -89145.28202066428
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -80181.97781364579,
+              -90170.29362531436
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              29,
+              29
+            ],
+            "init_min_gg_A": 3.342037392349247
+          },
+          "0.04": {
+            "P_bar": 0.04,
+            "hl_seed": 2026114621,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -79010.82582979776,
+              -98868.71516512801
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -85372.66467762607,
+              -96938.65612985234
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              32,
+              32
+            ],
+            "init_min_gg_A": 3.3200902561645593
+          },
+          "0.08": {
+            "P_bar": 0.08,
+            "hl_seed": 2026115630,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -73606.10752687267,
+              -84939.56884367796
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -77812.17438727811,
+              -85276.65134596513
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              32,
+              28
+            ],
+            "init_min_gg_A": 3.4749706089432815
+          },
+          "0.16": {
+            "P_bar": 0.16,
+            "hl_seed": 2026116639,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              35
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.0115
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -81043.89020201971,
+              -75809.1516573176
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -86188.76091805777,
+              -78216.93178769201
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              33,
+              33
+            ],
+            "init_min_gg_A": 3.543675956035257
+          },
+          "0.22": {
+            "P_bar": 0.22,
+            "hl_seed": 2026117648,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -82463.22408825095,
+              -94048.87862610449
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -90601.9577277412,
+              -99833.61337579571
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              34,
+              32
+            ],
+            "init_min_gg_A": 3.253211084053113
+          },
+          "0.28": {
+            "P_bar": 0.28,
+            "hl_seed": 2026118657,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              37,
+              33
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              8.4693,
+              7.5537
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -89373.68134030592,
+              -73622.82135924445
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -90329.97587704983,
+              -75848.66797167239
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              34,
+              29
+            ],
+            "init_min_gg_A": 3.508131369864642
+          },
+          "0.55": {
+            "P_bar": 0.55,
+            "hl_seed": 2026119666,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              30,
+              36
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              6.867,
+              8.2404
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -80862.36763488181,
+              -75861.53144120479
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -83567.32301106512,
+              -76889.4717774297
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              30,
+              31
+            ],
+            "init_min_gg_A": 3.209559896785783
+          },
+          "1": {
+            "P_bar": 1.0,
+            "hl_seed": 2026120675,
+            "target_N_high": 37,
+            "actual_N_per_box": [
+              0,
+              0,
+              34,
+              37
+            ],
+            "actual_loading_mmol_g": [
+              0.0,
+              0.0,
+              7.7826,
+              8.4693
+            ],
+            "init_U_tgt_K": [
+              0.0,
+              0.0,
+              -78100.49882930826,
+              -85306.31863306812
+            ],
+            "init_U_ref_K": [
+              0.0,
+              0.0,
+              -84681.02955729848,
+              -91444.50204827692
+            ],
+            "init_oms_occ_per_box": [
+              0,
+              0,
+              29,
+              32
+            ],
+            "init_min_gg_A": 3.299001547857695
+          }
+        }
+      }
+    }
+  },
+  "groups": {
+    "A": {
+      "only_1b": true,
+      "remc_enable_swaps": false,
+      "label": "1B-only (classical gg) + REMC OFF"
+    },
+    "B": {
+      "only_1b": false,
+      "remc_enable_swaps": false,
+      "label": "1B+2B + REMC OFF"
+    },
+    "C": {
+      "only_1b": true,
+      "remc_enable_swaps": true,
+      "label": "1B-only (classical gg) + REMC ON"
+    },
+    "D": {
+      "only_1b": false,
+      "remc_enable_swaps": true,
+      "label": "1B+2B + REMC ON"
+    }
+  },
+  "commands": {
+    "2026112601": {
+      "A": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap off --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_only.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112601.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112601 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112601_A/cli_equiv.json --distill-1b-only",
+      "B": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap off --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_2b.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112601.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112601 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112601_B/cli_equiv.json",
+      "C": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap on --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_only.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112601.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112601 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112601_C/cli_equiv.json --distill-1b-only",
+      "D": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap on --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_2b.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112601.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112601 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112601_D/cli_equiv.json"
+    },
+    "2026112602": {
+      "A": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap off --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_only.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112602.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112602 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112602_A/cli_equiv.json --distill-1b-only",
+      "B": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap off --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_2b.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112602.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112602 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112602_B/cli_equiv.json",
+      "C": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap on --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_only.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112602.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112602 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112602_C/cli_equiv.json --distill-1b-only",
+      "D": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap on --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_2b.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112602.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112602 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112602_D/cli_equiv.json"
+    },
+    "2026112603": {
+      "A": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap off --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_only.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112603.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112603 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112603_A/cli_equiv.json --distill-1b-only",
+      "B": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap off --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_2b.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112603.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112603 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112603_B/cli_equiv.json",
+      "C": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap on --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_only.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112603.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112603 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112603_C/cli_equiv.json --distill-1b-only",
+      "D": ".venv-mlip/bin/python scripts/run_mlip_gcmc.py --cif data/MgMOF-74.cif --supercell 1 1 2 --guest co2 --temp 298.0 --pressures 0.012 0.04 0.08 0.16 0.22 0.28 0.55 1.0 --proposer auto_mlip --model mace-matpes-r2scan-0 --dispersion off --dtype float32 --mace-chunk 2 --boxes 4 --max-mol 128 --grid-dims 240 240 64 --distill-samples-1b 1200 --distill-samples-2b 192 --cbmc-k 128 --k-steps 24 --p-ins-del 0.5 --eq-cycles 1500 --prod-cycles 200000 --adapt-k off --adapt-shift off --pilot-cycles 0 --parallel-mode remc --gpus 0 1 2 3 4 5 6 7 --remc-swap-every 2 --remc-swap on --shift-map-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/calibration/shift_1b_2b.json --init-states-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/init_states/init_rep_2026112603.json --max-wall-s 7200.0 --diag-checkpoint-every-s 300.0 --seed 2026112603 --out-json /share/SL/cuda-mof-gcmc/build/jctc_presubmission/runs/rep_2026112603_D/cli_equiv.json"
+    }
+  }
+}

@@ -16,7 +16,7 @@
 
 ## 主要研究结果
 
-以下全部数据均直接来自统一硬核同预算 2×2 归档（`build/jctc_presubmission/matched_budget_audit.md` 与 `matched_budget_summary.json`，`v1.4` 缓存）以及多 MOF 归档（[`docs/results/jctc_audit_report.md`](docs/results/jctc_audit_report.md)、[`docs/results/jctc_summary.json`](docs/results/jctc_summary.json)、[`docs/results/precision_hc_audit.json`](docs/results/precision_hc_audit.json)、[`docs/results/phase2_phase3_summary.json`](docs/results/phase2_phase3_summary.json)）。
+以下全部数据均直接来自统一硬核同预算 2×2 归档（[`docs/results/presubmission/matched_budget_audit.md`](docs/results/presubmission/matched_budget_audit.md)、[`docs/results/presubmission/matched_budget_summary.json`](docs/results/presubmission/matched_budget_summary.json)、[`docs/results/presubmission/gate1_summary.json`](docs/results/presubmission/gate1_summary.json)，`v1.4` 缓存）以及多 MOF 归档（[`docs/results/jctc_audit_report.md`](docs/results/jctc_audit_report.md)、[`docs/results/jctc_summary.json`](docs/results/jctc_summary.json)、[`docs/results/precision_hc_audit.json`](docs/results/precision_hc_audit.json)、[`docs/results/phase2_phase3_summary.json`](docs/results/phase2_phase3_summary.json)）。
 
 - **连续坐标周期最小镜像（MIC）硬核统一（Gate 1）：** 直接 MLIP-GCMC 与 CUDA `auto_mlip` 共用同一连续坐标周期最小镜像硬核判定（`include/hard_core.hpp`：客体 H–框架 `1.20 Å`、客体重原子–框架 `1.48 Å`、不同客体实原子对 `0.50 Å`，排除虚拟位点，$N_{\max}=128$，取消网格角点与代理能量截断拒判）。在 `1,040` 个边界/截断/近壁构型上与 27 镜像暴力搜索达成 **`0 / 1,040` 不一致**，非 MLIP 回归测试 **`58 / 58` 全通过**。
 - **同预算 2×2 消融实验（Mg-MOF-74 + CO₂，`1×1×2`，298 K，`0.28 bar`，`mace-matpes-r2scan-0` 关闭 D3，8×RTX 3090）：** 四组 × 3 次独立重复共用 8 档压力（`0.012–1.0 bar`）、4 条独立梯子、逐位一致的 `v1.4` 1B 网格与固定 `7,200 s` 采样壁钟预算（每组每次 `57,600` 全梯子 GPU-s，另记 `39.7–43.7 s` 单卡建势与 `88.9–93.3 s` 八卡偏移校准）。12 次运行一致采样同一平衡吸附量（`6.16–6.30 mmol/g`，总中位数 `6.27 mmol/g`），**$\mu$-REMC 是混合与收敛的主导驱动力**：
@@ -108,7 +108,8 @@ Widom 插入与能量分解：
 
 ## 文档索引
 
-- **JCTC 审计与精度校验数据：** [`docs/results/jctc_audit_report.md`](docs/results/jctc_audit_report.md) · [`docs/results/jctc_summary.json`](docs/results/jctc_summary.json) · [`docs/results/precision_hc_audit.json`](docs/results/precision_hc_audit.json) · [`docs/results/phase2_phase3_summary.json`](docs/results/phase2_phase3_summary.json)
+- **同预算 2×2 与 Gate 1 硬核审计数据（`v1.4`）：** [`docs/results/presubmission/matched_budget_audit.md`](docs/results/presubmission/matched_budget_audit.md) · [`docs/results/presubmission/matched_budget_summary.json`](docs/results/presubmission/matched_budget_summary.json) · [`docs/results/presubmission/protocol.json`](docs/results/presubmission/protocol.json) · [`docs/results/presubmission/gate1_summary.json`](docs/results/presubmission/gate1_summary.json)
+- **多 MOF 审计与精度校验数据：** [`docs/results/jctc_audit_report.md`](docs/results/jctc_audit_report.md) · [`docs/results/jctc_summary.json`](docs/results/jctc_summary.json) · [`docs/results/precision_hc_audit.json`](docs/results/precision_hc_audit.json) · [`docs/results/phase2_phase3_summary.json`](docs/results/phase2_phase3_summary.json)
 - **经典与极化基准验证（`RASPA3 3.0.29`）：** [经典与极化基准（中文）](docs/CLASSICAL_VALIDATION.zh-CN.md) · [English](docs/CLASSICAL_VALIDATION.md)
 
 ```text
