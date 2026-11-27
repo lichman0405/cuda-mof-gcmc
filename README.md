@@ -14,22 +14,24 @@ A GPU-accelerated CUDA/C++17 grand-canonical Monte Carlo (GCMC) engine for gas a
 
 ![Method overview](assets/fig1_architecture.png)
 
-## Main JCTC v2 results
+## Main results
 
-All numbers below come directly from [`docs/results/jctc_audit_report.md`](docs/results/jctc_audit_report.md), [`docs/results/jctc_summary.json`](docs/results/jctc_summary.json), [`docs/results/precision_hc_audit.json`](docs/results/precision_hc_audit.json), and [`docs/results/phase2_phase3_summary.json`](docs/results/phase2_phase3_summary.json).
+All headline numbers below come directly from the unified-hard-core matched-budget archive (`build/jctc_presubmission/matched_budget_audit.md` and `matched_budget_summary.json`, schema `v1.4`) and the multi-MOF archive ([`docs/results/jctc_audit_report.md`](docs/results/jctc_audit_report.md), [`docs/results/jctc_summary.json`](docs/results/jctc_summary.json), [`docs/results/precision_hc_audit.json`](docs/results/precision_hc_audit.json), [`docs/results/phase2_phase3_summary.json`](docs/results/phase2_phase3_summary.json)).
 
-- **On-demand 1B+2B surrogate distillation:** Across all 14 content-addressed caches (4 MOFs: Mg-MOF-74, Ni-MOF-74, Cu-BTC, IRMOF-1; 3 guests: $\text{CO}_2$, $\text{CH}_4$, $\text{H}_2\text{O}$; 4 MLIP setups) built in `40.3–212.7 s` on one RTX 3090 (`0.08%–1.82%` of multi-pressure REMC campaign GPU time), 85/15 analytical 1B hold-out $R^2$ spans `0.9236–0.9942` (`0.9522–0.9942` for $\text{CO}_2/\text{CH}_4$, MAE `0.89–2.85 kJ/mol`) and 80/20 (`154/38`) **deployed-LUT** 2B hold-out MAE spans `0.04–1.54 kJ/mol`.
-- **Exact parity & $51.2\times$ sampling speedup (`IRMOF-1 + CO2` at 1.0 bar, `r2SCAN`):** Nested MC (`0.874 ± 0.011 mmol/g`, `Qst = 16.3 ± 0.2 kJ/mol`, **`PASS`**) matches Direct MLIP-GCMC (`0.863 ± 0.080 mmol/g` MCSE, `16.2 ± 0.5 kJ/mol`, `FAIL`) within $z = 0.18$, while boosting `ESS_bulk(N)/GPU-s` by **$51.2\times$** (`0.480` vs. `0.009`) and cutting cold-start time-to-`MCSE=0.10` by **$9.7\times$** (`179 s` vs. `1,737 s`).
-- **Open-metal-site efficiency & many-body outer reweighting (`Mg-MOF-74 + CO2` at 0.28 bar, `r2SCAN`):** Single-pressure Direct MLIP-GCMC (`1.165 ± 0.290`, `ESS = 6`), UFF NMC (`3.157 ± 0.251`, `ins/del = 0.39`), and bespoke Mercado-2016 DFT-FF NMC (`6.044 ± 0.295`, `ESS = 10`) all fail multi-chain gates; adding 1B+2B distillation + isolated-ladder $\mu$-REMC raises bulk loading ESS to **`446`** (`6.222 ± 0.041 mmol/g`, `Qst = 39.0 ± 0.2 kJ/mol`) and independently matches a doubled `1×1×4` supercell (`6.028 ± 0.108 mmol/g`, $z = 1.69$). Dropping the outer full-system MLIP (`grid_only`) underestimates `0.28 bar` uptake by **`-56.6%`** (`2.703` vs. `6.222 mmol/g`).
-- **Zero-shot foundation MLIPs vs. fine-tuned `MACE-DAC-1+PBE-D3` & global audit:** Across all 23 runs (76 pressure points), **`41/76`** pass all 5 strict Vehtari gates ($\hat{R}_{\max} < 1.01$, $\text{ESS}_{\text{bulk,tail}} \ge 400$ across $N$, $U$, $N_{\text{OMS}}$, MCSE, drift)—including `38/64` estimable non-grid MLIP points and **18/18 (100%)** `MACE-DAC-1+PBE-D3` $\text{CO}_2$ points across all four frameworks. Widom and equilibrium partitioning show D3(BJ) supplies `47.9%–53.0%` (`MACE-DAC-1`) and `45.8%–54.1%` (`MP0+D3`) of Mg-MOF-74 interaction energy. All `34 FAIL` and `1 INSUFFICIENT` points are audited explicitly (`Direct/UFF/Mercado/grid_only` failure baselines, overbound dense `MP0+D3` Mg-MOF-74 at `15.4–18.9 mmol/g`, ultra-dilute `<N> < 0.22` empty-box tail-ESS edge cases, and strict near-miss secondary gates on dense `r2SCAN` rungs).
-- **Numerical precision, hard-core support, multi-GPU & classical baseline:** `FP32` forward with `FP64` `node_energy` summation matches full `FP64` to RMS `0.00044–0.00130 kJ/mol` with **`0%` accept/reject flips** across 64 outer test pairs and `5.93×–9.49×` speedup; 4×RTX 3090 replica sharding accelerates MC by **`3.26×`** (`2.19×` pressure queue end-to-end); classical Tricubic GCMC matches single-core `RASPA3 3.0.29` within `≤ 0.54σ` at `598,669 MC-steps/s`, and `Pol-SCF` matches `36×36` matrix inversion to `1.83×10⁻⁸ K`.
+- **Unified continuous-coordinate periodic MIC hard-core domain (Gate 1):** Direct MLIP-GCMC and CUDA `auto_mlip` enforce the identical continuous-coordinate minimum-image hard-core check (`include/hard_core.hpp`: `1.20 Å` guest H–framework, `1.48 Å` guest heavy–framework, `0.50 Å` distinct guest real-atom pairs, virtual sites excluded, $N_{\max}=128$, zero grid-corner or surrogate-energy exclusion), verified to **`0 / 1,040` mismatches** against 27-image brute-force periodic search and **`58 / 58`** passing non-MLIP regression tests.
+- **Matched-budget $2\times 2$ factorial ablation (`Mg-MOF-74 + CO2`, `1×1×2`, 298 K, `0.28 bar`, `mace-matpes-r2scan-0` without D3, 8×RTX 3090):** Across 4 groups × 3 independent replicates (`7,200 s` wall-clock = `57,600` whole-ladder GPU-s/run across 8 pressures `0.012–1.0 bar`, 4 isolated ladders, bit-identical `v1.4` 1B grids, separate `39.7–43.7 s` distillation and `88.9–93.3 s` 8-GPU shift calibration), all 12 runs sample consistent equilibrium uptake (`6.16–6.30 mmol/g`, grand median `6.27 mmol/g`), and **$\mu$-REMC is the dominant mixing driver**:
+  - **REMC OFF (`0` swap attempts verified):** `0/3` pass for A (`1B-only`, median $\mathrm{ESS}_{\text{bulk}}(N) = 239.6$, $\hat{R}_N = 1.0156$) and `0/3` pass for B (`1B+2B`, median $\mathrm{ESS}_{\text{bulk}}(N) = 231.9$, $\hat{R}_N = 1.0189$); all 6 runs are right-censored `> 7,200 s`.
+  - **REMC ON (`29–43` production ladder round trips):** Raises whole-ladder efficiency $\mathrm{ESS}_{\text{bulk}}(N)/\text{GPU-s}$ by **`2.26×`** on 1B-only (`C/A`: `0.00942` vs. `0.00416`) and **`2.29×`** on 1B+2B (`D/B`: `0.00921` vs. `0.00402`), passing all 11 strict gates at budget endpoint in **`1/3`** replicates for C (confirmed `1/3` at `4,800 s`, confirmed `5,100 s`) and **`2/3`** replicates for D (confirmed `1/3` at `6,600 s`, confirmed `6,900 s`; second pass at `7,200 s` endpoint).
+  - **2B residual fitting vs. sampling gain:** 2B LUT distillation reduces 80/20 deployed hold-out pair MAE from `2.60` to `1.51 kJ/mol` ($R^2 = 0.818$) and halves the calibrated shift magnitude (`-3.05` to `-1.42 kJ/mol`), yet yields no median fixed-budget ESS speedup (`B/A = 0.97×`, `D/C = 0.98×`), while tightening cross-replicate diagnostic spread under REMC (`3/3` D replicates with $\hat{R}_{\max} \le 1.0089$ and bulk ESS $\ge 418.8$ across $N$, $U$, and OMS).
+- **On-demand 1B+2B distillation & cross-MOF transferability:** Across 4 MOFs (Mg-MOF-74, Ni-MOF-74, Cu-BTC, IRMOF-1), 3 guests ($\text{CO}_2$, $\text{CH}_4$, $\text{H}_2\text{O}$), and 4 MLIP setups (`39.7–212.7 s` single-GPU build), 1B hold-out $R^2$ spans `0.9236–0.9942` (MAE `0.89–2.85 kJ/mol`), 2B deployed-LUT hold-out MAE spans `0.04–1.54 kJ/mol`, and domain-fine-tuned **`MACE-DAC-1+PBE-D3` $\text{CO}_2$ isotherms converge on 18/18 (100%)** state points across all four frameworks. Widom and equilibrium partitioning show D3(BJ) supplies `47.9%–53.0%` (`MACE-DAC-1`) and `45.8%–54.1%` (`MP0+D3`) of Mg-MOF-74 interaction energy.
+- **Numerical precision, multi-GPU & classical baseline:** `FP32` forward with `FP64` `node_energy` summation matches full `FP64` to RMS `0.00044–0.00130 kJ/mol` with **`0%` accept/reject flips** across 64 outer test pairs and `5.93×–9.49×` speedup; 4×RTX 3090 replica sharding accelerates MC by **`3.26×`** (`2.19×` pressure queue end-to-end); classical Tricubic GCMC matches single-core `RASPA3 3.0.29` within `≤ 0.54σ` at `598,669 MC-steps/s`, and `Pol-SCF` matches `36×36` matrix inversion to `1.83×10⁻⁸ K`.
 
 ````carousel
-![Exact parity and Mg-MOF-74 efficiency benchmarks](assets/fig2_parity_efficiency.png)
+![Matched-budget 2x2 ablation on Mg-MOF-74 + CO2 at 0.28 bar](assets/fig2_parity_efficiency.png)
 <!-- slide -->
 ![Cross-MOF transferability and MACE-DAC-1 vs r2SCAN isotherms](assets/fig3_transferability_finetuned.png)
 <!-- slide -->
-![Target functional sensitivity, Widom, D3 partitioning, and 1x1x4 finite-size test](assets/fig4_physics_diagnostics.png)
+![Target functional sensitivity, Widom, D3 partitioning, and exploratory 1x1x4 test](assets/fig4_physics_diagnostics.png)
 <!-- slide -->
 ![Global Vehtari convergence audit, REMC swap acceptance, consistency, and GPU cost](assets/fig5_convergence_scaling.png)
 ````
@@ -65,8 +67,18 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 .venv-mlip/bin/python -u scripts/run_mlip_gcmc.py \
   --pressures 0.5 1.0 2.5 5.0 --proposer auto_mlip --cbmc-k 128 \
   --model build/models/mace-dac-1.model --dispersion on --dispersion-xc pbe \
   --boxes 4 --k-steps 24 --eq-cycles 800 --prod-cycles 16000 \
-  --distill-cache-dir build/distill_cache --gpus 0 1 2 3 --parallel-mode remc --swap-every 2 \
+  --distill-cache-dir build/distill_cache --gpus 0 1 2 3 \
+  --parallel-mode remc --remc-swap on --remc-swap-every 2 \
   --out-json build/irmof1_co2_macedac_remc.json
+```
+
+Matched-budget $2\times 2$ ablation (`v1.4` unified hard-core, 8 GPUs) and deterministic audit / Figure 2 regeneration:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 .venv-mlip/bin/python -u scripts/run_jctc_presubmission.py prepare
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 .venv-mlip/bin/python -u scripts/run_jctc_presubmission.py run-formal --budget-wall-s 7200 --ckpt-every-s 300 --skip-done
+.venv-mlip/bin/python scripts/audit_jctc_presubmission.py --root build/jctc_presubmission
+.venv-mlip/bin/python scripts/plot_phase4_figures.py --mode presubmission
 ```
 
 Widom insertion and energy decomposition:
@@ -78,7 +90,7 @@ Widom insertion and energy decomposition:
   --out-json build/widom_mgmof74_r2scan.json
 ```
 
-Verify a downloaded full-trace archive (when `jctc_traces.npz` is present from an offline/release bundle) and regenerate all 5 JCTC publication figures directly from [`docs/results/jctc_summary.json`](docs/results/jctc_summary.json):
+Verify the historical multi-MOF full-trace archive (when `jctc_traces.npz` is present from an offline/release bundle) and regenerate all 5 JCTC publication figures:
 
 ```bash
 .venv-mlip/bin/python scripts/archive_jctc_results.py \

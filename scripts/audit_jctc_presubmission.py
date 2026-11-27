@@ -519,7 +519,7 @@ def main():
         },
         "D_over_A_combined": {
             "eff_ratio": _safe_ratio(eff_med["D"], eff_med["A"]),
-            "ess_ratio": _safe_ratio(eff_med["D"], ess_med["A"]),
+            "ess_ratio": _safe_ratio(ess_med["D"], ess_med["A"]),
         },
     }
 

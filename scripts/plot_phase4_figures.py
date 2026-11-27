@@ -21,6 +21,8 @@ from matplotlib.lines import Line2D
 ROOT = Path(__file__).resolve().parent.parent
 SUMMARY = ROOT / "docs" / "results" / "phase2_phase3_summary.json"
 JCTC_SUMMARY = ROOT / "docs" / "results" / "jctc_summary.json"
+PRESUB_SUMMARY = ROOT / "build" / "jctc_presubmission" / "matched_budget_summary.json"
+PRESUB_TRACES = ROOT / "build" / "jctc_presubmission" / "matched_budget_traces.npz"
 ARCH_NPZ = ROOT / "docs" / "results" / "arch_inputs_mgmof74_r2scan.npz"
 EXP = ROOT / "data" / "exp_isotherms"
 OUT = ROOT / "assets"
@@ -1134,6 +1136,363 @@ def fig_jctc2_parity_efficiency(s, exp_dir: Path, out_dir: Path):
     print(f"saved {out_p.name}")
 
 
+_PRESUB_GROUPS = [
+    ("A", "A: 1B-only* + REMC OFF", "A\n1B-only*\nREMC OFF", "#64748B", "--", "o"),
+    ("B", "B: 1B+2B + REMC OFF", "B\n1B+2B\nREMC OFF", "#D97706", "-.", "s"),
+    ("C", "C: 1B-only* + REMC ON", "C\n1B-only*\nREMC ON", "#2563EB", "-", "^"),
+    ("D", "D: 1B+2B + REMC ON", "D\n1B+2B\nREMC ON", "#0F766E", "-", "D"),
+]
+
+
+def fig_jctc2_presubmission_ablation(ps: dict, out_dir: Path):
+    """JCTC Fig. 2 (pre-submission 2x2 matched-budget ablation, Mg-MOF-74 / CO2, 298 K, 0.28 bar).
+
+    All numbers are read directly from build/jctc_presubmission/matched_budget_summary.json.
+    """
+    fig, axs = plt.subplots(2, 2, figsize=(12.6, 9.2))
+    (ax_a, ax_b), (ax_c, ax_d) = axs
+    fig.subplots_adjust(hspace=0.40, wspace=0.28)
+
+    runs = ps["runs"]
+    gs_map = ps["group_summaries"]
+    contrasts = ps["factorial_contrasts"]
+    budget_wall_s = 7200.0
+    budget_gpu_s = 57600.0
+
+    # ---- (a) ESS_bulk(N) at 0.28 bar vs cumulative whole-ladder GPU-s ----
+    ax_a.axhline(400.0, color="#DC2626", lw=1.0, ls=":", zorder=1)
+    ax_a.text(1.5, 412.0, "ESS gate = 400", fontsize=7.6, color="#DC2626", va="bottom", ha="left")
+    ax_a.axvline(budget_gpu_s / 1000.0, color="#9CA3AF", lw=0.9, ls="--", zorder=1)
+
+    for grp, leg_lab, _, col, ls, mk in _PRESUB_GROUPS:
+        g_runs = [r for r in runs if r["group"] == grp]
+        grid_t = np.linspace(2.4, 57.6, 24)
+        interp_y = []
+        for r in g_runs:
+            ckpts = r["empirical_convergence"]["checkpoints"]
+            xs = np.array([c["total_ladder_gpu_s"] / 1000.0 for c in ckpts], dtype=float)
+            ys = np.array([float(c.get("N_ess_bulk") or 0.0) for c in ckpts], dtype=float)
+            ax_a.plot(xs, ys, color=col, lw=1.05, ls=ls, alpha=0.42, zorder=2)
+            passed_fin = bool(r["primary_028bar"]["converged"])
+            ax_a.scatter(
+                [xs[-1]], [ys[-1]],
+                s=34, marker=mk,
+                facecolor=col if passed_fin else "white",
+                edgecolor=col, linewidths=1.3, zorder=5,
+            )
+            if len(xs) >= 2:
+                interp_y.append(np.interp(grid_t, xs, ys))
+        if interp_y:
+            med_y = np.median(np.vstack(interp_y), axis=0)
+            ax_a.plot(grid_t, med_y, color=col, lw=2.2, ls=ls, label=leg_lab, zorder=4)
+
+    ax_a.set_xlim(0, 61.5)
+    ax_a.set_ylim(0, 780)
+    ax_a.set_xlabel("Cumulative whole-ladder compute (10$^3$ GPU-s; 8$\\times$RTX 3090)")
+    ax_a.set_ylabel("Bulk ESS of loading $N$ at 0.28 bar")
+    ax_a.set_title("Mixing growth vs. whole-ladder budget (3 replicates/group)", loc="left")
+    handles_a, labels_a = ax_a.get_legend_handles_labels()
+    handles_a.extend([
+        Line2D([0], [0], marker="o", color="none", mfc="#374151", mec="#374151", ms=5.5, label="Filled: 11/11 gates PASS"),
+        Line2D([0], [0], marker="o", color="none", mfc="white", mec="#374151", ms=5.5, mew=1.2, label="Open: budget-censored FAIL"),
+    ])
+    ax_a.legend(handles=handles_a, loc="upper left", fontsize=7.1, handlelength=2.0)
+    panel_label(ax_a, "a")
+
+    # ---- (b) Fixed-budget efficiency ESS_bulk(N) / total_ladder_GPU_s ----
+    x_pos = np.arange(4, dtype=float)
+    med_effs = []
+    for idx, (grp, _, _, col, _, mk) in enumerate(_PRESUB_GROUPS):
+        g_runs = [r for r in runs if r["group"] == grp]
+        vals_k = [float(r["primary_028bar"]["ess_bulk_N_per_total_gpu_s"]) * 1000.0 for r in g_runs]
+        med_v = float(gs_map[grp]["ess_bulk_N_per_total_gpu_s"]["median"]) * 1000.0
+        med_effs.append(med_v)
+        ax_b.bar(idx, med_v, width=0.52, color=col, alpha=0.28, edgecolor=col, lw=1.3, zorder=2)
+        offsets = np.linspace(-0.12, 0.12, len(g_runs))
+        for dx, r, vk in zip(offsets, g_runs, vals_k):
+            passed_fin = bool(r["primary_028bar"]["converged"])
+            ax_b.scatter(
+                [idx + dx], [vk],
+                s=46, marker=mk,
+                facecolor=col if passed_fin else "white",
+                edgecolor=col, linewidths=1.4, zorder=5,
+            )
+        ax_b.text(
+            idx, max(vals_k) + 0.55,
+            f"med {med_v:.2f}\n[{min(vals_k):.2f}, {max(vals_k):.2f}]",
+            ha="center", va="bottom", fontsize=7.4, color=C["ink"],
+        )
+
+    c_over_a = float(contrasts["C_over_A_REMC_effect_1B_only"]["eff_ratio"])
+    d_over_b = float(contrasts["D_over_B_REMC_effect_1B_2B"]["eff_ratio"])
+    b_over_a = float(contrasts["B_over_A_2B_effect_REMC_OFF"]["eff_ratio"])
+    d_over_c = float(contrasts["D_over_C_2B_effect_REMC_ON"]["eff_ratio"])
+    ratio_txt = (
+        f"2$\\times$2 median contrasts:\n"
+        f"REMC ON/OFF: {c_over_a:.2f}$\\times$ (1B), {d_over_b:.2f}$\\times$ (1B+2B)\n"
+        f"2B fit (1B+2B / 1B): {b_over_a:.2f}$\\times$ (OFF), {d_over_c:.2f}$\\times$ (ON)\n"
+        f"*1B-only retains unscaled classical guest–guest pair terms"
+    )
+    ax_b.text(
+        0.03, 0.96, ratio_txt, transform=ax_b.transAxes,
+        va="top", ha="left", fontsize=7.1, color=C["ink"],
+        bbox=dict(boxstyle="round,pad=0.35", fc="#F9FAFB", ec="#D1D5DB", lw=0.7),
+    )
+    ax_b.set_xticks(x_pos)
+    ax_b.set_xticklabels([g[2] for g in _PRESUB_GROUPS], fontsize=8.0)
+    ax_b.set_ylim(0, 17.8)
+    ax_b.set_ylabel("Sampling efficiency (ESS$_N$ per 10$^3$ ladder GPU-s)")
+    ax_b.set_title("0.28 bar fixed-budget efficiency (57.6k GPU-s/run)", loc="left")
+    panel_label(ax_b, "b")
+
+    # ---- (c) 0.28 bar uptake +/- MCSE_eff with R-hat / ESS & pass markers ----
+    all_q = [float(r["primary_028bar"]["uptake_mmol_g"]) for r in runs]
+    grand_med = float(np.median(all_q))
+    ax_c.axhline(grand_med, color="#9CA3AF", lw=0.9, ls="--", zorder=1)
+
+    for g_idx, (grp, _, _, col, _, mk) in enumerate(_PRESUB_GROUPS):
+        g_runs = [r for r in runs if r["group"] == grp]
+        offsets = np.linspace(-0.20, 0.20, len(g_runs))
+        for dx, r in zip(offsets, g_runs):
+            p0 = r["primary_028bar"]
+            ec = r["empirical_convergence"]
+            q_val = float(p0["uptake_mmol_g"])
+            mcse = float(p0["mcse_eff_mmol_g"])
+            fin_pass = bool(p0["converged"])
+            conf_pass = not bool(ec["right_censored"])
+            ax_c.errorbar(
+                g_idx + dx, q_val, yerr=mcse,
+                fmt="none", ecolor=col, elinewidth=1.2, capsize=3.0, zorder=3,
+            )
+            ax_c.scatter(
+                [g_idx + dx], [q_val],
+                s=54 if conf_pass else 44,
+                marker=mk,
+                facecolor=col if fin_pass else "white",
+                edgecolor="#111827" if conf_pass else col,
+                linewidths=1.8 if conf_pass else 1.3,
+                zorder=5,
+            )
+            if conf_pass:
+                ax_c.scatter([g_idx + dx], [q_val + mcse + 0.022], s=48, marker="*", color=col, edgecolor="#111827", linewidths=0.4, zorder=6)
+        gs = gs_map[grp]
+        n_fin = int(gs["n_passed_final"])
+        n_conf = int(gs["n_passed_confirmed_empirical"])
+        rh_med = float(gs["rhat_N"]["median"])
+        ess_n_med = float(gs["ess_bulk_N"]["median"])
+        ess_u_med = float(gs["ess_bulk_U"]["median"])
+        ess_o_med = float(gs["ess_bulk_OMS"]["median"])
+        ax_c.text(
+            g_idx, 5.955,
+            f"Fin {n_fin}/3 | Conf {n_conf}/3\n"
+            f"$\\hat{{R}}_N$ {rh_med:.3f}\n"
+            f"ESS {ess_n_med:.0f}/{ess_u_med:.0f}/{ess_o_med:.0f}",
+            ha="center", va="bottom", fontsize=6.7, color=C["ink"],
+            bbox=dict(boxstyle="round,pad=0.22", fc="#F9FAFB", ec="#E5E7EB", lw=0.6),
+        )
+
+    ax_c.set_xticks(x_pos)
+    ax_c.set_xticklabels([g[2] for g in _PRESUB_GROUPS], fontsize=8.0)
+    ax_c.set_xlim(-0.55, 3.55)
+    ax_c.set_ylim(5.93, 6.48)
+    ax_c.set_ylabel("CO$_2$ uptake at 0.28 bar (mmol g$^{-1}$, bars: $\\pm$MCSE$_{\\rm eff}$)")
+    ax_c.set_title("Equilibrium parity & convergence summary (ESS: $N/U/$OMS)", loc="left")
+    leg_c = [
+        Line2D([0], [0], marker="*", color="none", mfc="#0F766E", mec="#111827", mew=0.6, ms=8.0, label="Star + black ring: 2-ckpt confirmed PASS"),
+        Line2D([0], [0], marker="D", color="none", mfc="#0F766E", mec="#0F766E", mew=1.2, ms=5.5, label="Filled: final-endpoint PASS only"),
+        Line2D([0], [0], marker="o", color="none", mfc="white", mec="#64748B", mew=1.2, ms=5.5, label="Open: budget-censored FAIL"),
+        Line2D([0], [0], color="#9CA3AF", lw=1.0, ls="--", label=f"Grand median: {grand_med:.2f} mmol g$^{{-1}}$"),
+    ]
+    ax_c.legend(handles=leg_c, loc="upper left", fontsize=6.8, ncol=1)
+    panel_label(ax_c, "c")
+
+    # ---- (d) Empirical time-to-convergence (confirmed 2 consecutive 5-min ckpts) + right censoring ----
+    y_rows = []
+    for grp, _, _, col, _, mk in _PRESUB_GROUPS:
+        g_runs = [r for r in runs if r["group"] == grp]
+        for r_i, r in enumerate(g_runs, start=1):
+            y_rows.append((f"{grp}-R{r_i}", col, mk, r))
+
+    yy = np.arange(len(y_rows))[::-1]
+    ax_d.axvline(budget_wall_s, color="#DC2626", lw=1.2, ls="--", zorder=1)
+    ax_d.text(budget_wall_s - 150, len(y_rows) - 0.15, "Budget cutoff:\n7,200 s (57.6k GPU-s)",
+              ha="right", va="top", fontsize=6.9, color="#DC2626",
+              bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.88))
+
+    for yi, (lbl, col, mk, r) in zip(yy, y_rows):
+        ec = r["empirical_convergence"]
+        p0 = r["primary_028bar"]
+        if not ec["right_censored"] and ec["time_to_convergence_s"] is not None:
+            t_c = float(ec["time_to_convergence_s"])
+            t_cf = float(ec["confirmation_time_s"])
+            ax_d.hlines(yi, 0, t_c, color=col, lw=2.6, alpha=0.85, zorder=3)
+            ax_d.hlines(yi, t_c, t_cf, color=col, lw=1.2, ls=":", zorder=3)
+            ax_d.scatter([t_c], [yi], s=52, marker=mk, facecolor=col, edgecolor="#111827", linewidths=1.3, zorder=5)
+            ax_d.scatter([t_cf], [yi], s=26, marker="|", color="#111827", linewidths=1.5, zorder=5)
+            ax_d.text(
+                t_cf + 150, yi, f"{t_c:,.0f} s (conf. {t_cf:,.0f} s)",
+                va="center", ha="left", fontsize=6.7, color=col, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="none", alpha=0.92), zorder=6,
+            )
+        elif ec.get("unconfirmed_terminal_pass"):
+            ax_d.hlines(yi, 0, budget_wall_s, color=col, lw=2.0, ls="-", alpha=0.55, zorder=2)
+            ax_d.scatter([budget_wall_s], [yi], s=48, marker=mk, facecolor=col, edgecolor=col, linewidths=1.2, zorder=5)
+            ax_d.annotate("", xy=(budget_wall_s + 520, yi), xytext=(budget_wall_s + 40, yi),
+                          arrowprops=dict(arrowstyle="->", color=col, lw=1.1))
+            ax_d.text(budget_wall_s + 580, yi, ">7,200 s (11/11 @ end)", va="center", ha="left", fontsize=6.7, color=col)
+        else:
+            ax_d.hlines(yi, 0, budget_wall_s, color=col, lw=1.5, ls="--", alpha=0.40, zorder=2)
+            ax_d.scatter([budget_wall_s], [yi], s=42, marker=mk, facecolor="white", edgecolor=col, linewidths=1.2, zorder=5)
+            ax_d.annotate("", xy=(budget_wall_s + 520, yi), xytext=(budget_wall_s + 40, yi),
+                          arrowprops=dict(arrowstyle="->", color=col, lw=1.0, alpha=0.75))
+            n_g = sum(1 for v in p0["gates"].values() if v)
+            ax_d.text(budget_wall_s + 580, yi, f">7,200 s ({n_g}/11 gates)", va="center", ha="left", fontsize=6.7, color=C["muted"])
+
+    # Horizontal group separators
+    for sep in (2.5, 5.5, 8.5):
+        ax_d.axhline(sep, color="#E5E7EB", lw=0.7, zorder=0)
+
+    ax_d.set_yticks(yy)
+    ax_d.set_yticklabels([row[0] for row in y_rows], fontsize=7.6)
+    ax_d.set_xlim(0, 11100)
+    ax_d.set_ylim(-0.7, len(y_rows) + 0.15)
+    ax_d.set_xticks([0, 1800, 3600, 5400, 7200])
+    ax_d.set_xlabel("Empirical time to 2-ckpt convergence, wall-clock (s; 8 GPUs)")
+    ax_d.set_title("Empirical convergence time & right-censoring (no extrapolation)", loc="left")
+
+    ax_d_top = ax_d.twiny()
+    ax_d_top.set_xlim(ax_d.get_xlim()[0] * 8.0 / 1000.0, ax_d.get_xlim()[1] * 8.0 / 1000.0)
+    ax_d_top.set_xticks([0, 14.4, 28.8, 43.2, 57.6])
+    ax_d_top.set_xlabel("Whole-ladder compute (10$^3$ GPU-s)", fontsize=8.2, labelpad=4)
+    ax_d_top.tick_params(labelsize=7.6)
+    ax_d_top.spines["right"].set_visible(False)
+    ax_d_top.spines["top"].set_visible(True)
+    ax_d_top.spines["top"].set_linewidth(0.7)
+    panel_label(ax_d, "d", y=1.12)
+
+    out_p = out_dir / "fig2_parity_efficiency.png"
+    fig.savefig(out_p, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"saved {out_p.name}")
+
+
+def fig_si_presubmission_diagnostics(ps: dict, traces_npz_path: Path, out_dir: Path):
+    """SI Figure: Empty vs high-loading branch convergence, REMC swap rates/RTs, and P(N)/P(OMS) distributions."""
+    npz = np.load(traces_npz_path)
+    runs = ps["runs"]
+    conv_mmol_g = 1000.0 / MG_SUPER_MASS
+
+    fig, axs = plt.subplots(2, 2, figsize=(12.4, 8.8))
+    (ax_a, ax_b), (ax_c, ax_d) = axs
+    fig.subplots_adjust(hspace=0.38, wspace=0.28)
+
+    # ---- (a) Empty-start (boxes 0,1) vs high-loading-start (boxes 2,3) equilibration & cumulative convergence ----
+    # Plot initial 3,500 total cycles (including 1,500 eq cycles) averaged over all 3 replicates per group
+    n_show = 3500
+    win = 40
+    kernel = np.ones(win, dtype=float) / float(win)
+    ax_a.axvline(1500, color="#DC2626", lw=0.95, ls=":", zorder=1)
+    ax_a.text(1540, 8.85, "eq_cycles = 1,500\n(production starts)", fontsize=7.2, color="#DC2626", va="top", ha="left")
+    ax_a.axhline(6.27, color="#9CA3AF", lw=0.85, ls="--", zorder=1)
+
+    for grp, _, _, col, _, _ in _PRESUB_GROUPS:
+        g_runs = [r for r in runs if r["group"] == grp]
+        e_list, h_list = [], []
+        for r in g_runs:
+            arr_all = np.asarray(npz[f"{r['run_id']}_box_N_all_028"], dtype=float)
+            k_len = min(n_show, arr_all.shape[0])
+            init_n = r["primary_028bar"].get("init_N_per_box") or [0, 0, 36, 36]
+            e0 = np.array([float(np.mean(init_n[:2])) * conv_mmol_g])
+            h0 = np.array([float(np.mean(init_n[2:])) * conv_mmol_g])
+            e_list.append(np.concatenate([e0, arr_all[:k_len, :2].mean(axis=1) * conv_mmol_g]))
+            h_list.append(np.concatenate([h0, arr_all[:k_len, 2:].mean(axis=1) * conv_mmol_g]))
+        e_mean = np.mean(np.vstack(e_list), axis=0)
+        h_mean = np.mean(np.vstack(h_list), axis=0)
+        e_sm = np.convolve(e_mean, kernel, mode="valid")
+        h_sm = np.convolve(h_mean, kernel, mode="valid")
+        xs_c = np.concatenate([[0.0], np.arange(len(e_sm), dtype=float) + win / 2.0])
+        lw_g = 1.75 if grp in ("C", "D") else 1.2
+        ax_a.plot(xs_c, np.concatenate([[e_mean[0]], e_sm]), color=col, lw=lw_g, ls="-", alpha=0.92)
+        ax_a.plot(xs_c, np.concatenate([[h_mean[0]], h_sm]), color=col, lw=lw_g, ls="--", alpha=0.88)
+
+    ax_a.set_xlim(0, n_show)
+    ax_a.set_ylim(0, 9.2)
+    ax_a.set_xlabel("Outer cycle index (3-replicate mean, 40-cycle smoothing)")
+    ax_a.set_ylabel("Branch-averaged CO$_2$ uptake (mmol g$^{-1}$)")
+    ax_a.set_title("Empty vs. high-loading branch convergence at 0.28 bar", loc="left")
+    leg_a = [
+        Line2D([0], [0], color=col, lw=1.7, label=f"Group {grp}") for grp, _, _, col, _, _ in _PRESUB_GROUPS
+    ] + [
+        Line2D([0], [0], color="#374151", lw=1.4, ls="-", label="Solid: empty start ($N_0=0$)"),
+        Line2D([0], [0], color="#374151", lw=1.4, ls="--", label="Dashed: loaded start ($N_0\\approx 36$)"),
+    ]
+    ax_a.legend(handles=leg_a, loc="lower right", ncol=2, fontsize=6.9, frameon=True, facecolor="white", edgecolor="#E5E7EB")
+    panel_label(ax_a, "a")
+
+    # ---- (b) Adjacent pressure-pair swap acceptance rates (C vs D; A/B = 0%) + round-trip counts ----
+    pair_labels = [p["pair"] for p in runs[0]["ladder_swaps"]["pairs"]]
+    xp = np.arange(len(pair_labels), dtype=float)
+    w = 0.36
+    for idx, (grp, col, lab) in enumerate([("C", "#2563EB", "C: 1B-only + REMC ON"), ("D", "#0F766E", "D: 1B+2B + REMC ON")]):
+        g_runs = [r for r in runs if r["group"] == grp]
+        mat = np.array([[p["prod_rate"] * 100.0 for p in r["ladder_swaps"]["pairs"]] for r in g_runs], dtype=float)
+        med = np.median(mat, axis=0)
+        lo = med - np.min(mat, axis=0)
+        hi = np.max(mat, axis=0) - med
+        rts = [int(r["ladder_swaps"]["sum_round_trips_prod"]) for r in g_runs]
+        ax_b.bar(
+            xp + (idx - 0.5) * w, med, width=w * 0.92,
+            yerr=[lo, hi], capsize=2.5, color=col, alpha=0.85,
+            label=f"{lab} (RT: {min(rts)}–{max(rts)})",
+        )
+    ax_b.set_xticks(xp)
+    ax_b.set_xticklabels(pair_labels, rotation=28, ha="right", fontsize=7.4)
+    ax_b.set_ylim(0, 62)
+    ax_b.set_ylabel("Production swap acceptance (%)")
+    ax_b.set_title("Adjacent-rung $\\mu$-REMC swaps (A/B strictly 0 attempts)", loc="left")
+    ax_b.legend(loc="upper left", fontsize=7.3)
+    ax_b.text(
+        0.98, 0.95,
+        "A & B (REMC OFF):\n0 swap attempts,\n0 round trips\n(verified on all 6 runs)",
+        transform=ax_b.transAxes, ha="right", va="top", fontsize=7.0, color=C["muted"],
+        bbox=dict(boxstyle="round,pad=0.28", fc="#F9FAFB", ec="#D1D5DB", lw=0.7),
+    )
+    panel_label(ax_b, "b")
+
+    # ---- (c) Pooled P(N) distribution at 0.28 bar ----
+    for grp, leg_lab, _, col, ls, _ in _PRESUB_GROUPS:
+        g_runs = [r for r in runs if r["group"] == grp]
+        pooled = np.concatenate([np.asarray(npz[f"{r['run_id']}_N_028"]).ravel() for r in g_runs])
+        vals, cnts = np.unique(pooled, return_counts=True)
+        probs = cnts.astype(float) / float(pooled.size)
+        ax_c.plot(vals, probs, color=col, lw=1.8 if grp in ("C", "D") else 1.3, ls=ls, label=f"{leg_lab} (max N={int(vals.max())})")
+    ax_c.set_xlim(10, 42)
+    ax_c.set_xlabel("Adsorbed CO$_2$ molecules $N$ in 1$\\times$1$\\times$2 supercell ($N_{\\max}=128$)")
+    ax_c.set_ylabel("Probability $P(N)$")
+    ax_c.set_title("Pooled production loading distribution $P(N)$ at 0.28 bar", loc="left")
+    ax_c.legend(loc="upper left", fontsize=7.1)
+    panel_label(ax_c, "c")
+
+    # ---- (d) Pooled P(N_OMS) distribution at 0.28 bar ----
+    for grp, leg_lab, _, col, ls, _ in _PRESUB_GROUPS:
+        g_runs = [r for r in runs if r["group"] == grp]
+        pooled = np.concatenate([np.asarray(npz[f"{r['run_id']}_oms_occ_028"]).ravel() for r in g_runs])
+        vals, cnts = np.unique(pooled, return_counts=True)
+        probs = cnts.astype(float) / float(pooled.size)
+        ax_d.plot(vals, probs, color=col, lw=1.8 if grp in ("C", "D") else 1.3, ls=ls, label=f"{grp}: $\\langle N_{{\\rm OMS}}\\rangle={pooled.mean():.2f}$")
+    ax_d.set_xlim(8, 36)
+    ax_d.set_xlabel("Occupied Mg$^{2+}$ open metal sites $N_{\\rm OMS}$ (36 sites total)")
+    ax_d.set_ylabel("Probability $P(N_{\\rm OMS})$")
+    ax_d.set_title("Pooled OMS occupancy distribution at 0.28 bar", loc="left")
+    ax_d.legend(loc="upper left", fontsize=7.4)
+    panel_label(ax_d, "d")
+
+    out_p = out_dir / "si_fig_presubmission_diagnostics.png"
+    fig.savefig(out_p, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"saved {out_p.name}")
+
+
 def fig_jctc3_transferability_finetuned(s, exp_dir: Path, out_dir: Path):
     """JCTC Fig. 3: Cross-MOF transferability, MACE-DAC-1 comparison, parity vs exp, & honest hold-out fidelity."""
     fig, axs = plt.subplots(2, 3, figsize=(14.4, 8.8))
@@ -1729,9 +2088,11 @@ def fig_jctc5_convergence_scaling(s, out_dir: Path):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Generate publication figures (legacy 4-fig or JCTC 5-fig mode)")
-    p.add_argument("--mode", choices=["legacy", "jctc"], default="legacy", help="Figure generation mode")
+    p = argparse.ArgumentParser(description="Generate publication figures (legacy, jctc, or presubmission mode)")
+    p.add_argument("--mode", choices=["legacy", "jctc", "presubmission"], default="legacy", help="Figure generation mode")
     p.add_argument("--summary", default="", help="Path to summary JSON (defaults per mode)")
+    p.add_argument("--presubmission-summary", default=str(PRESUB_SUMMARY), help="Path to matched_budget_summary.json")
+    p.add_argument("--presubmission-traces", default=str(PRESUB_TRACES), help="Path to matched_budget_traces.npz")
     p.add_argument("--arch-npz", default=str(ARCH_NPZ), help="Path to arch_inputs_mgmof74_r2scan.npz")
     p.add_argument("--exp-dir", default=str(EXP), help="Path to experimental isotherms directory")
     p.add_argument("--out-dir", default=str(OUT), help="Output directory for PNG figures")
@@ -1746,11 +2107,26 @@ def main():
     ARCH_NPZ = Path(args.arch_npz)
     OUT.mkdir(parents=True, exist_ok=True)
 
-    if args.mode == "jctc":
+    if args.mode == "presubmission":
+        ps_path = Path(args.presubmission_summary)
+        pt_path = Path(args.presubmission_traces)
+        ps = json.loads(ps_path.read_text(encoding="utf-8"))
+        fig_jctc2_presubmission_ablation(ps, OUT)
+        if pt_path.is_file():
+            fig_si_presubmission_diagnostics(ps, pt_path, OUT)
+    elif args.mode == "jctc":
         summary_path = Path(args.summary) if args.summary else JCTC_SUMMARY
         s = json.loads(summary_path.read_text(encoding="utf-8"))
         fig_jctc1_architecture(s, ARCH_NPZ, OUT)
-        fig_jctc2_parity_efficiency(s, EXP, OUT)
+        ps_path = Path(args.presubmission_summary)
+        pt_path = Path(args.presubmission_traces)
+        if ps_path.is_file():
+            ps = json.loads(ps_path.read_text(encoding="utf-8"))
+            fig_jctc2_presubmission_ablation(ps, OUT)
+            if pt_path.is_file():
+                fig_si_presubmission_diagnostics(ps, pt_path, OUT)
+        else:
+            fig_jctc2_parity_efficiency(s, EXP, OUT)
         fig_jctc3_transferability_finetuned(s, EXP, OUT)
         fig_jctc4_physics_diagnostics(s, EXP, OUT)
         fig_jctc5_convergence_scaling(s, OUT)
